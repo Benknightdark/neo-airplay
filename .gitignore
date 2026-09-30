@@ -1,0 +1,8 @@
+.build/
+dist/
+/engine/
+**/bin/
+**/obj/
+*.user
+*.suo
+.vs/*
