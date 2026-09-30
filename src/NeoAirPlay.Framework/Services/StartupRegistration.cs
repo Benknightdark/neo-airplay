@@ -2,7 +2,7 @@ using Microsoft.Win32;
 
 namespace NeoAirPlay.Services;
 
-public sealed class StartupRegistration
+public sealed class StartupRegistration : IStartupRegistration
 {
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string ValueName = "NeoAirPlay";

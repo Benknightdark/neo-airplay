@@ -3,7 +3,7 @@ using Microsoft.Win32;
 
 namespace NeoAirPlay.Services;
 
-public sealed class BonjourServiceInspector
+public sealed class BonjourServiceInspector : IBonjourRuntimeInspector
 {
     private const string BonjourServiceName = "Bonjour Service";
     private const string ServiceRegistryPath = @"SYSTEM\CurrentControlSet\Services\" + BonjourServiceName;

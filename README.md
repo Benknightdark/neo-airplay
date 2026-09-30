@@ -18,6 +18,20 @@ Windows 11 x64 的 AirPlay 接收器，使用 WPF/XAML 建立操作介面，並�
 dotnet build NeoAirPlay.slnx
 ```
 
+執行單元測試：
+
+```powershell
+dotnet test NeoAirPlay.slnx --filter "Category=Unit"
+```
+
+執行 WPF UI E2E 測試需使用可互動的 Windows 桌面工作階段；測試會啟動 App 並操作頁面導覽，不會連接 AirPlay 裝置或啟動接收器：
+
+```powershell
+dotnet test tests/NeoAirPlay.App.Test/NeoAirPlay.App.Test.csproj --filter "Category=E2E"
+```
+
+`NeoAirPlay.Framework` 放置模型與服務，WPF 介面、ViewModel 和命令留在 `NeoAirPlay.App`。測試專案分別為 `NeoAirPlay.Framework.Test` 與 `NeoAirPlay.App.Test`；`.neo_harness/verify.ps1` 會建置方案並執行單元測試。
+
 第一次建置 UxPlay 與 GStreamer 執行環境時執行：
 
 ```powershell
@@ -49,7 +63,7 @@ dotnet build NeoAirPlay.slnx
 最後建置可發佈版本：
 
 ```powershell
-dotnet publish src/NeoAirPlay/NeoAirPlay.csproj -c Release -o dist/NeoAirPlay-Release
+dotnet publish src/NeoAirPlay.App/NeoAirPlay.App.csproj -c Release -o dist/NeoAirPlay-Release
 ```
 
 發佈目錄中的 `engine` 會一併包含 UxPlay、GStreamer 與 Bonjour 執行檔；安裝完成後不需要從 `Downloads\uxplay-windows` 載入任何檔案。若搬移整個專案目錄，需重新執行 Bonjour 安裝腳本，讓 Windows 服務指向新位置。

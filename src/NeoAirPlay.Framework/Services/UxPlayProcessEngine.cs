@@ -1,15 +1,55 @@
-using System.Diagnostics;
 using System.ComponentModel;
+using System.Diagnostics;
 using NeoAirPlay.Models;
 
 namespace NeoAirPlay.Services;
 
-public sealed class UxPlayProcessEngine(IAppLogger logger) : IReceiverEngine, IDisposable
+public sealed class UxPlayProcessEngine : IReceiverEngine, IDisposable
 {
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
-    private readonly BonjourServiceInspector _bonjourInspector = new();
-    private Process? _process;
+    private readonly IAppLogger _logger;
+    private readonly IBonjourRuntimeInspector _bonjourInspector;
+    private readonly IReceiverProcessFactory _processFactory;
+    private readonly string _engineDirectory;
+    private readonly string _gstreamerRegistryPath;
+    private IReceiverProcess? _process;
     private bool _stopRequested;
+
+    public UxPlayProcessEngine(
+        IAppLogger logger,
+        string? engineDirectory = null,
+        string? gstreamerRegistryPath = null)
+        : this(
+            logger,
+            new SystemReceiverProcessFactory(),
+            new BonjourServiceInspector(),
+            engineDirectory ?? Path.Combine(AppContext.BaseDirectory, "engine"),
+            gstreamerRegistryPath ?? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "NeoAirPlay",
+                "gstreamer-registry.bin"))
+    {
+    }
+
+    internal UxPlayProcessEngine(
+        IAppLogger logger,
+        IReceiverProcessFactory processFactory,
+        IBonjourRuntimeInspector bonjourInspector,
+        string engineDirectory,
+        string gstreamerRegistryPath)
+    {
+        ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(processFactory);
+        ArgumentNullException.ThrowIfNull(bonjourInspector);
+        ArgumentException.ThrowIfNullOrWhiteSpace(engineDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(gstreamerRegistryPath);
+
+        _logger = logger;
+        _processFactory = processFactory;
+        _bonjourInspector = bonjourInspector;
+        _engineDirectory = Path.GetFullPath(engineDirectory);
+        _gstreamerRegistryPath = Path.GetFullPath(gstreamerRegistryPath);
+    }
 
     public ReceiverState State { get; private set; } = ReceiverState.Stopped;
     public string StatusMessage { get; private set; } = "接收器尚未啟動。";
@@ -33,13 +73,13 @@ public sealed class UxPlayProcessEngine(IAppLogger logger) : IReceiverEngine, ID
             }
 
             SetStatus(ReceiverState.Starting, "正在啟動 UxPlay。");
-            var engineDirectory = Path.Combine(AppContext.BaseDirectory, "engine");
+            var engineDirectory = _engineDirectory;
             var executablePath = Path.Combine(engineDirectory, "uxplay.exe");
             if (!File.Exists(executablePath))
             {
                 const string message = "找不到 engine\\uxplay.exe。請先完成 scripts\\build-engine.ps1。";
                 SetStatus(ReceiverState.DependencyMissing, message);
-                await logger.WriteAsync(LogLevel.Error, message, cancellationToken);
+                await _logger.WriteAsync(LogLevel.Error, message, cancellationToken);
                 return;
             }
 
@@ -48,7 +88,7 @@ public sealed class UxPlayProcessEngine(IAppLogger logger) : IReceiverEngine, ID
             {
                 var message = problem ?? "Bonjour Service 不可用。";
                 SetStatus(ReceiverState.DependencyMissing, message);
-                await logger.WriteAsync(LogLevel.Error, message, cancellationToken);
+                await _logger.WriteAsync(LogLevel.Error, message, cancellationToken);
                 return;
             }
 
@@ -58,33 +98,23 @@ public sealed class UxPlayProcessEngine(IAppLogger logger) : IReceiverEngine, ID
             {
                 const string message = "找不到 engine\\runtime 的 GStreamer 元件。請先完成 scripts\\build-engine.ps1。";
                 SetStatus(ReceiverState.DependencyMissing, message);
-                await logger.WriteAsync(LogLevel.Error, message, cancellationToken);
+                await _logger.WriteAsync(LogLevel.Error, message, cancellationToken);
                 return;
             }
 
-            var process = new Process
+            var process = _processFactory.Create();
+            process.OutputReceived += message =>
             {
-                StartInfo = CreateStartInfo(
-                    executablePath,
-                    engineDirectory,
-                    runtimeDirectory,
-                    pluginDirectory,
-                    bonjour.Directory,
-                    options),
-                EnableRaisingEvents = true
-            };
-            process.OutputDataReceived += (_, args) =>
-            {
-                if (!string.IsNullOrWhiteSpace(args.Data))
+                if (!string.IsNullOrWhiteSpace(message))
                 {
-                    _ = logger.WriteAsync(LogLevel.Information, $"UxPlay: {args.Data}");
+                    _ = _logger.WriteAsync(LogLevel.Information, $"UxPlay: {message}");
                 }
             };
-            process.ErrorDataReceived += (_, args) =>
+            process.ErrorReceived += message =>
             {
-                if (!string.IsNullOrWhiteSpace(args.Data))
+                if (!string.IsNullOrWhiteSpace(message))
                 {
-                    _ = logger.WriteAsync(LogLevel.Warning, $"UxPlay: {args.Data}");
+                    _ = _logger.WriteAsync(LogLevel.Warning, $"UxPlay: {message}");
                 }
             };
             process.Exited += (_, _) => OnProcessExited(process);
@@ -93,7 +123,14 @@ public sealed class UxPlayProcessEngine(IAppLogger logger) : IReceiverEngine, ID
             bool started;
             try
             {
-                started = process.Start();
+                started = process.Start(CreateStartInfo(
+                    executablePath,
+                    engineDirectory,
+                    runtimeDirectory,
+                    pluginDirectory,
+                    bonjour.Directory,
+                    _gstreamerRegistryPath,
+                    options));
             }
             catch
             {
@@ -105,7 +142,7 @@ public sealed class UxPlayProcessEngine(IAppLogger logger) : IReceiverEngine, ID
             {
                 process.Dispose();
                 SetStatus(ReceiverState.Faulted, "Windows 無法啟動 UxPlay。");
-                await logger.WriteAsync(LogLevel.Error, "Windows 無法啟動 UxPlay。", cancellationToken);
+                await _logger.WriteAsync(LogLevel.Error, "Windows 無法啟動 UxPlay。", cancellationToken);
                 return;
             }
 
@@ -113,12 +150,12 @@ public sealed class UxPlayProcessEngine(IAppLogger logger) : IReceiverEngine, ID
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
             SetStatus(ReceiverState.Running, $"正在以「{options.ReceiverName}」接收 AirPlay。");
-            await logger.WriteAsync(LogLevel.Information, $"UxPlay 已啟動，接收器名稱為「{options.ReceiverName}」。", cancellationToken);
+            await _logger.WriteAsync(LogLevel.Information, $"UxPlay 已啟動，接收器名稱為「{options.ReceiverName}」。", cancellationToken);
         }
         catch (Exception exception) when (exception is InvalidOperationException or Win32Exception or IOException or UnauthorizedAccessException)
         {
             SetStatus(ReceiverState.Faulted, $"UxPlay 啟動失敗：{exception.Message}");
-            await logger.WriteAsync(LogLevel.Error, $"UxPlay 啟動失敗：{exception.Message}", cancellationToken);
+            await _logger.WriteAsync(LogLevel.Error, $"UxPlay 啟動失敗：{exception.Message}", cancellationToken);
         }
         finally
         {
@@ -169,7 +206,7 @@ public sealed class UxPlayProcessEngine(IAppLogger logger) : IReceiverEngine, ID
             }
             catch (System.ComponentModel.Win32Exception exception)
             {
-                await logger.WriteAsync(LogLevel.Warning, $"無法正常停止 UxPlay，已嘗試結束程序：{exception.Message}", cancellationToken);
+                await _logger.WriteAsync(LogLevel.Warning, $"無法正常停止 UxPlay，已嘗試結束程序：{exception.Message}", cancellationToken);
                 if (!process.HasExited)
                 {
                     process.Kill(entireProcessTree: true);
@@ -183,7 +220,7 @@ public sealed class UxPlayProcessEngine(IAppLogger logger) : IReceiverEngine, ID
                 SetStatus(ReceiverState.Stopped, "接收器已停止。");
             }
 
-            await logger.WriteAsync(LogLevel.Information, "UxPlay 已停止。", cancellationToken);
+            await _logger.WriteAsync(LogLevel.Information, "UxPlay 已停止。", cancellationToken);
         }
         finally
         {
@@ -199,7 +236,7 @@ public sealed class UxPlayProcessEngine(IAppLogger logger) : IReceiverEngine, ID
         }
         catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
         {
-            _ = logger.WriteAsync(LogLevel.Error, $"關閉時停止 UxPlay 失敗：{exception.Message}");
+            _ = _logger.WriteAsync(LogLevel.Error, $"關閉時停止 UxPlay 失敗：{exception.Message}");
         }
 
     }
@@ -209,12 +246,13 @@ public sealed class UxPlayProcessEngine(IAppLogger logger) : IReceiverEngine, ID
         await StopAsync();
     }
 
-    private static ProcessStartInfo CreateStartInfo(
+    internal static ProcessStartInfo CreateStartInfo(
         string executablePath,
         string engineDirectory,
         string runtimeDirectory,
         string pluginDirectory,
         string bonjourDirectory,
+        string gstreamerRegistryPath,
         ReceiverOptions options)
     {
         var startInfo = new ProcessStartInfo
@@ -254,10 +292,7 @@ public sealed class UxPlayProcessEngine(IAppLogger logger) : IReceiverEngine, ID
                 .Where(value => !string.IsNullOrWhiteSpace(value)));
         startInfo.Environment["GST_PLUGIN_PATH"] = pluginDirectory;
         startInfo.Environment["GST_PLUGIN_SYSTEM_PATH_1_0"] = pluginDirectory;
-        startInfo.Environment["GST_REGISTRY"] = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "NeoAirPlay",
-            "gstreamer-registry.bin");
+        startInfo.Environment["GST_REGISTRY"] = gstreamerRegistryPath;
         var scanner = Path.Combine(engineDirectory, "runtime", "libexec", "gstreamer-1.0", "gst-plugin-scanner.exe");
         if (File.Exists(scanner))
         {
@@ -267,7 +302,7 @@ public sealed class UxPlayProcessEngine(IAppLogger logger) : IReceiverEngine, ID
         return startInfo;
     }
 
-    private async void OnProcessExited(Process process)
+    private async void OnProcessExited(IReceiverProcess process)
     {
         try
         {
@@ -296,7 +331,7 @@ public sealed class UxPlayProcessEngine(IAppLogger logger) : IReceiverEngine, ID
                     ? "UxPlay 已結束。"
                     : $"UxPlay 已結束，結束代碼：{exitCode}。";
                 SetStatus(state, message);
-                await logger.WriteAsync(
+                await _logger.WriteAsync(
                     exitCode == 0 ? LogLevel.Information : LogLevel.Error,
                     message);
             }

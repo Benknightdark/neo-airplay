@@ -39,13 +39,13 @@
                 <StackPanel Grid.Row="2">
                     <TextBlock Text="接收器" Foreground="#8193AC" FontSize="10" FontWeight="Bold"
                                Margin="10,0,0,10" />
-                    <Button Command="{Binding NavigateCommand}" CommandParameter="Home" Style="{StaticResource HomeNavigationButtonStyle}">
+                    <Button AutomationProperties.AutomationId="NavigateHome" Command="{Binding NavigateCommand}" CommandParameter="Home" Style="{StaticResource HomeNavigationButtonStyle}">
                         <StackPanel Orientation="Horizontal"><TextBlock Text="⌂" FontSize="17" Width="28"/><TextBlock Text="總覽" VerticalAlignment="Center"/></StackPanel>
                     </Button>
-                    <Button Command="{Binding NavigateCommand}" CommandParameter="Settings" Style="{StaticResource SettingsNavigationButtonStyle}">
+                    <Button AutomationProperties.AutomationId="NavigateSettings" Command="{Binding NavigateCommand}" CommandParameter="Settings" Style="{StaticResource SettingsNavigationButtonStyle}">
                         <StackPanel Orientation="Horizontal"><TextBlock Text="⚙" FontSize="15" Width="28"/><TextBlock Text="設定" VerticalAlignment="Center"/></StackPanel>
                     </Button>
-                    <Button Command="{Binding NavigateCommand}" CommandParameter="Diagnostics" Style="{StaticResource DiagnosticsNavigationButtonStyle}">
+                    <Button AutomationProperties.AutomationId="NavigateDiagnostics" Command="{Binding NavigateCommand}" CommandParameter="Diagnostics" Style="{StaticResource DiagnosticsNavigationButtonStyle}">
                         <StackPanel Orientation="Horizontal"><TextBlock Text="▤" FontSize="15" Width="28"/><TextBlock Text="診斷記錄" VerticalAlignment="Center"/></StackPanel>
                     </Button>
                 </StackPanel>
@@ -70,7 +70,7 @@
             </Grid.RowDefinitions>
             <DockPanel Margin="0,0,0,22">
                 <StackPanel DockPanel.Dock="Left">
-                    <TextBlock Text="{Binding CurrentPageLabel}" Style="{StaticResource PageTitleStyle}" />
+                    <TextBlock AutomationProperties.AutomationId="CurrentPageHeading" Text="{Binding CurrentPageLabel}" Style="{StaticResource PageTitleStyle}" />
                     <TextBlock Text="將 Apple 裝置的畫面與音訊接收到這台電腦。"
                                Foreground="{StaticResource MutedTextBrush}" FontSize="12" Margin="0,5,0,0" />
                 </StackPanel>

@@ -17,7 +17,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private readonly IReceiverEngine _engine;
     private readonly IAppLogger _logger;
     private readonly ISettingsStore _settingsStore;
-    private readonly StartupRegistration _startupRegistration;
+    private readonly IStartupRegistration _startupRegistration;
     private ReceiverSettings _savedSettings;
     private ReceiverState _state;
     private string _statusMessage = string.Empty;
@@ -34,7 +34,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         IReceiverEngine engine,
         IAppLogger logger,
         ISettingsStore settingsStore,
-        StartupRegistration startupRegistration,
+        IStartupRegistration startupRegistration,
         ReceiverSettings settings)
     {
         _engine = engine;

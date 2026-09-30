@@ -11,12 +11,14 @@ public partial class MainWindow : Window
 {
     private readonly MainViewModel _viewModel;
     private readonly Forms.NotifyIcon _trayIcon;
+    private readonly bool _closeOnWindowClose;
     private bool _allowClose;
     private bool _exitInProgress;
 
-    public MainWindow(MainViewModel viewModel)
+    public MainWindow(MainViewModel viewModel, bool closeOnWindowClose = false)
     {
         _viewModel = viewModel;
+        _closeOnWindowClose = closeOnWindowClose;
         DataContext = viewModel;
         InitializeComponent();
 
@@ -100,6 +102,17 @@ public partial class MainWindow : Window
     {
         if (_allowClose)
         {
+            return;
+        }
+
+        if (_closeOnWindowClose)
+        {
+            e.Cancel = true;
+            if (!_exitInProgress)
+            {
+                _viewModel.ExitCommand.Execute(null);
+            }
+
             return;
         }
 

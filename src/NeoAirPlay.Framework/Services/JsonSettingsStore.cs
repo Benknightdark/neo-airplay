@@ -3,7 +3,7 @@ using NeoAirPlay.Models;
 
 namespace NeoAirPlay.Services;
 
-public sealed class JsonSettingsStore(IAppLogger logger) : ISettingsStore
+public sealed class JsonSettingsStore : ISettingsStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -11,10 +11,18 @@ public sealed class JsonSettingsStore(IAppLogger logger) : ISettingsStore
         PropertyNameCaseInsensitive = true
     };
 
-    private readonly string _settingsPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "NeoAirPlay",
-        "settings.json");
+    private readonly IAppLogger _logger;
+    private readonly string _settingsPath;
+
+    public JsonSettingsStore(IAppLogger logger, string? settingsPath = null)
+    {
+        ArgumentNullException.ThrowIfNull(logger);
+        _logger = logger;
+        _settingsPath = settingsPath ?? Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "NeoAirPlay",
+            "settings.json");
+    }
 
     public async Task<ReceiverSettings> LoadAsync(CancellationToken cancellationToken = default)
     {
@@ -35,7 +43,7 @@ public sealed class JsonSettingsStore(IAppLogger logger) : ISettingsStore
         }
         catch (Exception exception) when (exception is IOException or JsonException or UnauthorizedAccessException)
         {
-            await logger.WriteAsync(
+            await _logger.WriteAsync(
                 LogLevel.Warning,
                 $"設定檔無法讀取，已使用預設值。{exception.Message}",
                 cancellationToken);

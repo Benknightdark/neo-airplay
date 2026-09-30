@@ -8,12 +8,16 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <SelfContained>true</SelfContained>
+    <PublishSelfContained>true</PublishSelfContained>
     <AssemblyName>NeoAirPlay</AssemblyName>
     <RootNamespace>NeoAirPlay</RootNamespace>
     <Title>Neo AirPlay</Title>
     <Version>0.1.0</Version>
   </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NeoAirPlay.Framework\NeoAirPlay.Framework.csproj" />
+  </ItemGroup>
 
   <ItemGroup>
     <Content Include="..\..\engine\**\*"

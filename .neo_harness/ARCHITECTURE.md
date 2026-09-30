@@ -4,35 +4,36 @@
 
 ## 依賴概況
 
-- App.xaml.cs 組裝日誌、設定儲存、登入啟動註冊、接收器引擎及 MainViewModel，然後建立 MainWindow。
-- MainWindow 使用 MainViewModel；畫面由 Views/ 下的 XAML 視圖組成。
-- MainViewModel 經 IReceiverEngine、ISettingsStore 與 IAppLogger 等服務介面管理接收器、設定及診斷記錄。
-- UxPlayProcessEngine 透過 BonjourServiceInspector 檢查執行元件，並啟動 engine/ 下的外部接收程序。
-- NeoAirPlay.csproj 將 engine/ 下的檔案納入建置與發佈輸出。
+- `NeoAirPlay.App` 是 WPF 啟動與呈現層。`App.xaml.cs` 組裝 Framework 服務、載入設定、建立 `MainViewModel` 與 `MainWindow`。
+- `MainWindow` 使用 `MainViewModel`；畫面由 `Views/` 下的 XAML 視圖組成，ViewModel 與 UI 命令留在 App。
+- `NeoAirPlay.Framework` 包含 `NeoAirPlay.Models` 與 `NeoAirPlay.Services`，提供設定、記錄、登入啟動註冊、Bonjour 檢查及 UxPlay 外部程序生命週期服務。
+- App 透過 `IReceiverEngine`、`ISettingsStore`、`IAppLogger`、`IStartupRegistration` 等介面使用服務；專案參考方向為 App → Framework。
+- `NeoAirPlay.App.csproj` 將 `engine/` 下的檔案納入建置與發佈輸出；Framework 不負責隨附執行元件。
 
-## 元件責任
+## 專案責任
 
-| 元件 | 目前責任 | 證據 |
+| 專案或元件 | 責任 | 證據 |
 | :--- | :--- | :--- |
-| 啟動與視窗 | App.xaml.cs 建立服務、載入設定並建立主視窗。MainWindow 提供系統匣操作。 | src/NeoAirPlay/App.xaml.cs、src/NeoAirPlay/MainWindow.xaml.cs |
-| Views | Dashboard、Settings、Diagnostics XAML 視圖呈現接收器狀態、設定與記錄。 | src/NeoAirPlay/Views/ |
-| ViewModel | MainViewModel 管理畫面狀態、接收器命令、設定與診斷記錄，並呼叫服務。 | src/NeoAirPlay/ViewModels/MainViewModel.cs |
-| Models 與 Commands | Models 保存接收器設定、選項、狀態及記錄資料；Commands 提供同步與非同步 UI 命令。 | src/NeoAirPlay/Models/、src/NeoAirPlay/Commands/ |
-| 接收器引擎 | IReceiverEngine 定義非同步啟停介面。UxPlayProcessEngine 檢查隨附元件、啟動外部程序、讀取輸出與錯誤，並回報生命週期狀態。 | src/NeoAirPlay/Services/IReceiverEngine.cs、src/NeoAirPlay/Services/UxPlayProcessEngine.cs |
-| Bonjour 檢查 | BonjourServiceInspector 檢查專案內的服務執行元件及可用狀態。 | src/NeoAirPlay/Services/BonjourServiceInspector.cs |
-| 設定與登入啟動 | JsonSettingsStore 讀寫使用者設定；StartupRegistration 管理目前使用者登入啟動設定。 | src/NeoAirPlay/Services/JsonSettingsStore.cs、src/NeoAirPlay/Services/StartupRegistration.cs |
-| 記錄 | FileAppLogger 將記錄寫到使用者 LocalAppData，並提供記錄事件給介面。 | src/NeoAirPlay/Services/FileAppLogger.cs |
-| 隨附執行元件 | 專案設定將 engine/ 下的內容複製到建置與發佈輸出。建置腳本整理接收程序、影音執行環境及 Bonjour 元件。 | src/NeoAirPlay/NeoAirPlay.csproj、scripts/ |
+| App 啟動與視窗 | 組裝服務、啟動主視窗並提供系統匣操作。 | `src/NeoAirPlay.App/App.xaml.cs`、`src/NeoAirPlay.App/MainWindow.xaml.cs` |
+| Views 與 ViewModel | Dashboard、Settings、Diagnostics 視圖呈現接收器狀態、設定與記錄；ViewModel 管理畫面狀態及命令。 | `src/NeoAirPlay.App/Views/`、`src/NeoAirPlay.App/ViewModels/MainViewModel.cs` |
+| Commands | 提供同步與非同步 UI 命令。 | `src/NeoAirPlay.App/Commands/` |
+| Framework Models | 保存接收器設定、選項、狀態及記錄資料。 | `src/NeoAirPlay.Framework/Models/` |
+| Framework Services | 管理接收器程序、Bonjour 執行元件檢查、設定、登入啟動註冊及記錄。 | `src/NeoAirPlay.Framework/Services/` |
+| Framework 單元測試 | 驗證設定儲存、檔案記錄與接收器程序整合邏輯，並以替身隔離外部邊界。 | `tests/NeoAirPlay.Framework.Test/` |
+| App 單元與 UI E2E 測試 | 驗證 ViewModel 行為，並以 UI Automation 驅動 WPF 頁面導覽。 | `tests/NeoAirPlay.App.Test/` |
+| 隨附執行元件 | 建置腳本整理接收程序、影音執行環境及 Bonjour 元件；App 專案負責複製到輸出。 | `src/NeoAirPlay.App/NeoAirPlay.App.csproj`、`scripts/` |
 
 ## 依賴與執行邊界
 
-- App 啟動時組裝具體服務；MainWindow 使用 MainViewModel；ViewModel 經 IReceiverEngine 與 ISettingsStore 等介面呼叫服務。這是目前程式的依賴方向，尚無測試或靜態工具強制該方向。
-- UxPlayProcessEngine 以獨立程序執行 engine/uxplay.exe，設定其執行環境，並將標準輸出及錯誤寫入應用程式記錄。
-- 使用者設定存於 %AppData%\NeoAirPlay\settings.json；完整記錄存於 %LocalAppData%\NeoAirPlay\Logs\。README 另列出影音執行環境登錄快取位置。
-- scripts/build-engine.ps1 會準備建置環境並產生引擎檔案；scripts/Stage-BonjourRuntime.ps1、Install-BonjourService.ps1 與 Restore-BonjourService.ps1 管理 Bonjour 元件及 Windows 服務路徑。這些操作不是應用程式啟動流程的一部分。
+- Framework 目標為 `net10.0-windows`，不參考 WPF。服務介面與實作放在 Framework；WPF ViewModel、Commands、視窗及啟動組裝放在 App。
+- `UxPlayProcessEngine` 以獨立程序執行 `engine/uxplay.exe`，設定其執行環境，並將標準輸出及錯誤寫入應用程式記錄。程序與 Bonjour 狀態可透過注入的介面替身隔離測試。
+- 使用者設定存於 `%AppData%\NeoAirPlay\settings.json`；完整記錄存於 `%LocalAppData%\NeoAirPlay\Logs\`；影音執行環境登錄快取存於 `%LocalAppData%\NeoAirPlay\gstreamer-registry.bin`。
+- `--e2e-profile <path>` 只供 App UI E2E 測試使用，將設定、記錄、GStreamer 快取及單一執行個體 Mutex 導向測試暫存 profile。正常啟動仍使用既有使用者資料位置與 Mutex。
+- `scripts/build-engine.ps1` 會準備建置環境並產生引擎檔案；Bonjour staging、安裝與還原腳本管理 Bonjour 元件及 Windows 服務路徑，不屬於應用程式啟動流程。
 
-## 已知限制
+## 驗證界線
 
-- 目前只找到一個應用程式專案；沒有找到測試專案、CI 工作流程、靜態分析設定或架構邊界檢查。
-- 本文件所列的依賴方向屬於程式碼觀察，不是機器強制的不變量。
-- 使用者可見功能、區域網路需求、建置及授權說明以根目錄 README.md 為準。
+- `.neo_harness/verify.ps1` 建置方案並執行標記為 `Unit` 的 Framework 與 App 測試；不執行 UI E2E。
+- App E2E 需有可互動的 Windows 桌面工作階段，只驗證 WPF 啟動及頁面導覽，不連接 AirPlay 裝置或啟動接收器。
+- 目前沒有 CI 工作流程、靜態分析設定或架構邊界檢查；依賴方向仍未由機器強制。
+- 本文件所列的依賴方向屬於程式碼觀察，不是架構保證。使用者可見功能、區域網路需求、建置及授權說明以根目錄 README.md 為準。

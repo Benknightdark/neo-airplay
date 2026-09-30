@@ -18,7 +18,23 @@ public partial class App : Application
         base.OnStartup(e);
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
-        _instanceMutex = new Mutex(initiallyOwned: true, "Local\\NeoAirPlay.SingleInstance", out _ownsMutex);
+        AppDataPaths dataPaths;
+        try
+        {
+            dataPaths = AppDataPaths.FromCommandLine(e.Args);
+        }
+        catch (ArgumentException exception)
+        {
+            MessageBox.Show(
+                exception.Message,
+                "Neo AirPlay",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            Shutdown();
+            return;
+        }
+
+        _instanceMutex = new Mutex(initiallyOwned: true, dataPaths.MutexName, out _ownsMutex);
         if (!_ownsMutex)
         {
             MessageBox.Show(
@@ -32,11 +48,13 @@ public partial class App : Application
 
         try
         {
-            var logger = new FileAppLogger();
-            var settingsStore = new JsonSettingsStore(logger);
+            var logger = new FileAppLogger(dataPaths.LogDirectory);
+            var settingsStore = new JsonSettingsStore(logger, dataPaths.SettingsPath);
             var startupRegistration = new StartupRegistration();
             var settings = await settingsStore.LoadAsync();
-            var engine = new UxPlayProcessEngine(logger);
+            var engine = new UxPlayProcessEngine(
+                logger,
+                gstreamerRegistryPath: dataPaths.GStreamerRegistryPath);
             _engine = engine;
 
             var viewModel = new MainViewModel(
@@ -45,7 +63,7 @@ public partial class App : Application
                 settingsStore,
                 startupRegistration,
                 settings);
-            var window = new MainWindow(viewModel);
+            var window = new MainWindow(viewModel, closeOnWindowClose: dataPaths.IsE2eProfile);
             MainWindow = window;
             window.Show();
 

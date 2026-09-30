@@ -10,13 +10,13 @@
 
 ## 網路與外部程序
 
-- 應用程式啟動隨附的接收程序，並將標準輸出及錯誤導入本機記錄。修改程序參數或執行環境時，同時檢查 UxPlayProcessEngine.cs 與 BonjourServiceInspector.cs。
+- Framework 服務會啟動隨附的接收程序，並將標準輸出及錯誤導入本機記錄。修改程序參數或執行環境時，同時檢查 `src/NeoAirPlay.Framework/Services/UxPlayProcessEngine.cs` 與 `BonjourServiceInspector.cs`。
 - README 指出電腦與 Apple 裝置需在可互通的區域網路，且 Windows 防火牆可能需要允許 engine/uxplay.exe 通過私人網路。多播探索受網路隔離影響。
 - 目前文件沒有列出防火牆連接埠或自動防火牆設定；不要從此文件推定連接埠或新增規則。
 
 ## 使用者資料與記錄
 
-- README 與 JsonSettingsStore.cs 記載設定存於使用者 AppData；FileAppLogger.cs 將記錄寫入使用者 LocalAppData。接收程序輸出也會進入應用程式記錄。
+- README 與 `src/NeoAirPlay.Framework/Services/JsonSettingsStore.cs` 記載設定存於使用者 AppData；`FileAppLogger.cs` 將記錄寫入使用者 LocalAppData。接收程序輸出也會進入應用程式記錄。
 - 檢視或分享診斷記錄前，先確認內容適合分享。專案未提供記錄去識別或分享前清理工具。
 
 ## 發佈限制
@@ -26,5 +26,6 @@
 
 ## 自動化與未知事項
 
+- Harness 的單元測試使用程序與 Bonjour 替身；App UI E2E 以 `--e2e-profile` 把設定、記錄和 GStreamer 快取導向測試暫存目錄，並使用獨立 Mutex。測試不會啟動接收器或修改 Windows 啟動登錄值。
 - 目前沒有找到安全掃描、權限檢查或網路設定的自動化驗證。
 - 本文件未確認防火牆連接埠、威脅模型或記錄內容中的敏感資料種類；相關決策需以實際需求與程式行為確認。

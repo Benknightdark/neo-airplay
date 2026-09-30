@@ -7,12 +7,12 @@ public sealed class FileAppLogger : IAppLogger
 {
     private readonly SemaphoreSlim _writeLock = new(1, 1);
 
-    public FileAppLogger()
+    public FileAppLogger(string? logDirectory = null)
     {
-        LogDirectory = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "NeoAirPlay",
-            "Logs");
+        LogDirectory = logDirectory ?? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "NeoAirPlay",
+                "Logs");
     }
 
     public string LogDirectory { get; }
