@@ -4,7 +4,12 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $serviceName = 'Bonjour Service'
-$backupPath = Join-Path (Join-Path $env:ProgramData 'NeoAirPlay') 'BonjourServiceBackup.json'
+$bonjourHelpers = Join-Path $PSScriptRoot 'BonjourRuntimeHelpers.psm1'
+if (-not (Test-Path -LiteralPath $bonjourHelpers -PathType Leaf)) {
+    throw "找不到 Bonjour 執行元件輔助模組：$bonjourHelpers"
+}
+Import-Module -Name $bonjourHelpers -Force -ErrorAction Stop
+$backupPath = Get-BonjourServiceBackupPath
 $registryPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\Bonjour Service'
 if (-not (Test-Path -LiteralPath $backupPath)) {
     throw "找不到 Bonjour Service 原始路徑備份：$backupPath"
@@ -14,8 +19,9 @@ if (-not (Test-Path -LiteralPath $registryPath)) {
 }
 
 $backup = Get-Content -LiteralPath $backupPath -Raw | ConvertFrom-Json
-if ([string]::IsNullOrWhiteSpace($backup.OriginalImagePath)) {
-    throw 'Bonjour Service 備份檔沒有原始 ImagePath。'
+if (($backup.ServiceName -ne $serviceName) -or
+    -not (Test-TrustedBonjourExecutablePath $backup.OriginalImagePath)) {
+    throw 'Bonjour Service 備份檔的服務名稱或可信任原始 ImagePath 無效。'
 }
 
 $service = Get-Service -Name $serviceName

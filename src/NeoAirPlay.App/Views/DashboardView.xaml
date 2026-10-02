@@ -4,6 +4,17 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <StackPanel Margin="0,0,8,0">
+            <Border AutomationProperties.AutomationId="EngineSetupStatus"
+                    Background="#FFF8E8" BorderBrush="#F1D8A8" BorderThickness="1"
+                    CornerRadius="10" Padding="14,11" Margin="0,0,0,16"
+                    Visibility="{Binding HasEngineSetupStatus, Converter={StaticResource BooleanToVisibilityConverter}}">
+                <DockPanel>
+                    <TextBlock Text="⟳" Foreground="#A56A12" FontSize="15" Margin="0,0,10,0" />
+                    <TextBlock Text="{Binding EngineSetupStatus}" Foreground="#765018"
+                               FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap" />
+                </DockPanel>
+            </Border>
+
             <Border Style="{StaticResource CardBorderStyle}" Padding="28" Margin="0,0,0,16">
                 <Grid>
                     <Grid.ColumnDefinitions>
@@ -159,7 +170,7 @@
             <Border Background="#EEF5FF" BorderBrush="#D8E7FB" BorderThickness="1" CornerRadius="10" Padding="13,11">
                 <DockPanel>
                     <TextBlock Text="ⓘ" Foreground="#2878E5" FontSize="15" Margin="0,0,10,0" />
-                    <TextBlock Text="第一次使用前，請確認本專案的 Bonjour Service 已安裝且正在執行。"
+                    <TextBlock Text="第一次使用 AirPlay 時，App 會檢查 Bonjour Service；若需管理員權限，會先說明再詢問。"
                                Foreground="#3E587B" FontSize="11" VerticalAlignment="Center" TextWrapping="Wrap" />
                 </DockPanel>
             </Border>

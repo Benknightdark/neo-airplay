@@ -38,9 +38,24 @@ dotnet test tests/NeoAirPlay.App.Test/NeoAirPlay.App.Test.csproj --filter "Categ
 dotnet test tests/NeoAirPlay.App.Test/NeoAirPlay.App.Test.csproj --filter "Category=HardwareE2E"
 ```
 
-硬體 E2E 需要先建置引擎、安裝並啟動本專案 Bonjour Service、可互動的 Windows 桌面，以及已開啟 USB 偵錯並授權本電腦的 Android USB 裝置；執行前請先關閉其他 Neo AirPlay 接收器，避免 UxPlay 連接埠衝突。這項自動測試不會操作 iPhone/iPad，也不會量測實際音訊輸出；實機驗收時，請另外從 Apple 裝置選擇本接收器並確認畫面與音訊。服務層測試可使用 ADB 已連線的 USB 或已配對 TCP/IP 裝置；本次 UI 硬體測試只驗 USB。
+硬體 E2E 需要先建置引擎、安裝並啟動位於 `%ProgramFiles%\NeoAirPlay\Bonjour` 的 Bonjour Service、可互動的 Windows 桌面，以及已開啟 USB 偵錯並授權本電腦的 Android USB 裝置；執行前請先關閉其他 Neo AirPlay 接收器，避免 UxPlay 連接埠衝突。這項自動測試不會操作 iPhone/iPad，也不會量測實際音訊輸出；實機驗收時，請另外從 Apple 裝置選擇本接收器並確認畫面與音訊。服務層測試可使用 ADB 已連線的 USB 或已配對 TCP/IP 裝置；本次 UI 硬體測試只驗 USB。
 
 `NeoAirPlay.Framework` 放置模型與服務，WPF 介面、ViewModel 和命令留在 `NeoAirPlay.App`。測試專案分別為 `NeoAirPlay.Framework.Test` 與 `NeoAirPlay.App.Test`；`.neo_harness/verify.ps1` 會建置方案並執行單元測試。
+
+## GitHub Actions CI/CD 與下載
+
+- `develop` 每次 push 會在 GitHub-hosted Windows runner 執行 `.neo_harness/verify.ps1`。成功後，自動化會建立或更新 `develop` → `main` PR，並啟用 auto-merge；PR 本身也必須通過 `verify` 檢查。
+- PR 合併至 `main` 後，Release workflow 會對該次合併的原始碼重跑驗證、產生 Windows x64 可攜套件、建立 `vX.Y.Z` tag，並發布 GitHub Release。版本由目前 App 版本與既有 Release tags 中較新的版本升 patch；目前基準 `0.1.0` 的第一版為 `0.1.1`。Release 版本會寫回 `NeoAirPlay.App.csproj` 與 `engine-package.json`，再同步到 `develop`。主視窗標題會顯示 `Neo AirPlay (X.Y.Z)`。
+- GitHub Release 會提供 `NeoAirPlay-X.Y.Z-win-x64.zip`（App、必要引擎及 README，不含 Bonjour）、`neo-airplay-engine-win-x64.zip`（供 App 首次啟動補齊引擎）和 SHA-256 sidecar／`SHA256SUMS.txt`。App ZIP 可解壓後直接執行 `NeoAirPlay.exe`。
+
+啟用工作流程前，請在 GitHub repository 完成以下設定：
+
+1. 從最新 `main` 建立 `develop` 分支。此工作樹目前的遠端尚未有 `develop`。
+2. 建立 GitHub App，只授予此 repository 的 `Contents: Read and write`、`Pull requests: Read and write` 權限，安裝到此 repository。將 App 的 Client ID 設為 repository variable `RELEASE_APP_CLIENT_ID`，將私鑰 PEM 設為 repository secret `RELEASE_APP_PRIVATE_KEY`。
+3. 在 repository 設定啟用 Allow auto-merge。設定 `main` 規則要求 PR 與 `verify` 成功，並允許安裝的 GitHub App 繞過直接推送限制，以便 Release workflow 寫入版本／引擎 metadata。`.github/` 與 Release helper 腳本設有 CODEOWNERS；分支規則須啟用「Require review from Code Owners」。
+4. 註冊 Windows x64 self-hosted runner，labels 設為 `self-hosted`, `windows`, `x64`, `neo-airplay-release`。主機需安裝 .NET 10 SDK、PowerShell 7、Git、GitHub CLI (`gh`) 及可信任的 Bonjour；`scripts/build-engine.ps1` 會讀取本機 Bonjour 安裝以建置 UxPlay。runner 版本需支援 Node 24（2.327.1 以上），並保持在線。
+
+Release runner 會執行已合併的專案建置與測試程式碼。只允許可信任的維護者更新 `develop`，限制 runner 的 repository 存取，並在隔離、不存放個人資料或其他憑證的 Windows 主機上執行。Release workflow 只由 `main` push 觸發，不在 PR 上執行。
 
 ## 投影裝置
 
@@ -60,27 +75,41 @@ dotnet test tests/NeoAirPlay.App.Test/NeoAirPlay.App.Test.csproj --filter "Categ
 
 腳本會在 `.build\msys64` 安裝建置用的 MSYS2，下載 FDH2/UxPlay v1.73.7 的官方原始碼封存檔，編譯 `engine\uxplay.exe`，將執行期相依檔整理到 `engine\runtime`，並從 Genymobile 官方 GitHub staging scrcpy v4.1 Windows x64 與 ADB 至 `engine\android`。scrcpy 封存檔會先核對官方 SHA-256。這不是 Git clone，也不會下載 `leapbtw/uxplay-windows`。
 
+建置 UxPlay 需要從已安裝的可信任 Bonjour 目錄讀取 `dnssd.dll`；建置腳本不會修改或啟動 Windows 服務。App 啟動時會在使用者確認後處理 Bonjour 服務設定。
+
 若只需重新 staging Android 執行環境，可單獨執行：
 
 ```powershell
 .\scripts\Stage-ScrcpyRuntime.ps1
 ```
 
-首次建置前，Bonjour 執行檔會從 Windows 目前登錄的 Bonjour Service 路徑複製到專案：
+需要啟用 AirPlay 時，App 會在使用者確認並通過 UAC 後，從可信任的 Windows Bonjour 安裝複製執行檔到受保護的 `%ProgramFiles%\NeoAirPlay\Bonjour`：
 
 ```powershell
 .\scripts\Stage-BonjourRuntime.ps1
 ```
 
-該腳本只會複製 `mDNSResponder.exe` 與 `dnssd.dll`，並比對產品名稱、檔案版本和 SHA-256；不會複製 `uxplay-windows.exe` 或其他影音檔案。這台電腦目前的 Bonjour 檔案版本資訊為 3.1.0.2。
+若要人工執行 staging，請以系統管理員身分啟動 PowerShell。腳本只會複製 `mDNSResponder.exe` 與 `dnssd.dll` 到 `%ProgramFiles%\NeoAirPlay\Bonjour`，核對產品名稱、檔案版本和複製前後的 SHA-256；不會複製 `uxplay-windows.exe` 或其他影音檔案。建置 UxPlay 時則會直接讀取目前可信任的 Bonjour 安裝，不會修改 Windows 服務。
 
-將 Windows Bonjour Service 切換到專案路徑需要系統管理員權限：
+Neo AirPlay 在 Debug 或 Release 第一次啟動時會檢查 UxPlay/GStreamer 與 scrcpy/ADB 必要檔案。缺少時，App 會在背景下載對應 App 版本的引擎套件、驗證 SHA-256 與套件檔案清單後，再安裝到 App 的 `engine` 目錄。下載失敗時主視窗仍可使用，App 會在下次啟動重試。
+
+建立 Release 引擎套件前，先完成引擎建置，再執行：
+
+```powershell
+.\scripts\Pack-EngineRuntime.ps1
+```
+
+腳本會建立 `.build\neo-airplay-engine-win-x64.zip` 與 `.sha256` sidecar，並更新 App 內的引擎版本、Release 標籤和 SHA-256 設定。將 ZIP 附加至相同 `v<Version>` 標籤的 GitHub Release；目前 App 版本為 `0.1.0`，因此標籤是 `v0.1.0`。公開引擎套件不包含 Bonjour 元件。
+
+若本機已安裝 Bonjour Service，首次啟動時 App 會先說明所需的服務路徑變更，再詢問是否開啟 Windows 系統管理員權限提示。使用者確認後，App 會從可信任的系統安裝 staging 元件、備份原服務路徑，並將服務切換到受保護的 `%ProgramFiles%\NeoAirPlay\Bonjour`。資料夾僅授予系統管理員修改權限和必要的讀取權限，服務不會執行 App 可寫入目錄中的檔案。若找不到 Bonjour Service，App 會提供 Apple 官方安裝說明；不會自動下載或散布 Bonjour 二進位檔。若拒絕權限要求，AirPlay 暫不可用，Android 投影仍可使用。
+
+將 Windows Bonjour Service 切換到 Neo AirPlay 的受保護共用路徑需要系統管理員權限：
 
 ```powershell
 .\scripts\Install-BonjourService.ps1
 ```
 
-腳本先備份服務原始 `ImagePath` 至 `%ProgramData%\NeoAirPlay\BonjourServiceBackup.json`，再停止服務、切換至 `engine\bonjour\mDNSResponder.exe` 並重新啟動。要還原時，以系統管理員身分執行：
+腳本先備份服務原始 `ImagePath` 至 `%ProgramData%\NeoAirPlay\BonjourServiceBackup.json`，再停止服務、切換至 `%ProgramFiles%\NeoAirPlay\Bonjour\mDNSResponder.exe` 並重新啟動。要還原時，以系統管理員身分執行：
 
 ```powershell
 .\scripts\Restore-BonjourService.ps1
@@ -92,7 +121,7 @@ dotnet test tests/NeoAirPlay.App.Test/NeoAirPlay.App.Test.csproj --filter "Categ
 dotnet publish src/NeoAirPlay.App/NeoAirPlay.App.csproj -c Release -o dist/NeoAirPlay-Release
 ```
 
-發佈目錄中的 `engine` 會一併包含 UxPlay、GStreamer、Bonjour 與 scrcpy/ADB 執行檔；安裝完成後不需要從 `Downloads\uxplay-windows` 載入任何檔案。若搬移整個專案目錄，需重新執行 Bonjour 安裝腳本，讓 Windows 服務指向新位置。
+發佈目錄會包含建置時已有的 UxPlay、GStreamer 與 scrcpy/ADB 引擎檔案；Bonjour 執行檔不會進入 Debug 或 Release App 輸出。若發佈時沒有引擎檔案，首次啟動會從相同版本的 GitHub Release 下載上述引擎套件。Bonjour Service 使用固定的系統共用路徑，因此搬移 App 目錄不影響服務。
 
 ## 使用者資料
 
@@ -105,7 +134,7 @@ dotnet publish src/NeoAirPlay.App/NeoAirPlay.App.csproj -c Release -o dist/NeoAi
 
 電腦和 Apple 裝置需能在同一個區域網路互相連線。Windows 防火牆可能需要允許專案中的 `engine\uxplay.exe` 通過私人網路。Bonjour Service 使用 mDNS/DNS-SD；若網路隔離裝置間的多播探索，AirPlay 裝置清單可能看不到這台電腦。Android USB 投影需在手機開啟 USB 偵錯並接受本電腦的授權提示；無線投影需先在 Android 完成無線偵錯配對，並讓 ADB 裝置清單顯示該裝置。本 App 不會自動配對無線裝置。Android 11 以下可以投影畫面，但 scrcpy 音訊轉送需要 Android 11 以上。
 
-此版本使用穩定版 UxPlay v1.73.7，Bonjour Service 由本專案目錄執行。AirPlay 多房間音訊不在此功能範圍內。UxPlay 專案說明 Windows 版本以 MSYS2/MinGW 建置，並將 v1.74 標為實驗版；本專案因此鎖定 v1.73.7。
+此版本使用穩定版 UxPlay v1.73.7，Bonjour Service 由受保護的 Neo AirPlay 系統共用目錄執行。AirPlay 多房間音訊不在此功能範圍內。UxPlay 專案說明 Windows 版本以 MSYS2/MinGW 建置，並將 v1.74 標為實驗版；本專案因此鎖定 v1.73.7。
 
 ## 第三方元件與授權
 

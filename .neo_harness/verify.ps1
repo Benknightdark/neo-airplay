@@ -15,4 +15,10 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
+$versionScriptTests = Join-Path $projectRoot 'tests\scripts\Set-AppVersion.Tests.ps1'
+& $versionScriptTests
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
 exit 0

@@ -123,6 +123,44 @@ public sealed class MainViewModelTests
     }
 
     [Fact]
+    public async Task EnginePreparationDisablesEngineCommandsAndRestoresThemWhenFinished()
+    {
+        var androidEngine = new FakeAndroidMirrorEngine
+        {
+            AvailableDevices = [new AndroidDevice("usb-123", "Pixel 8", AndroidDeviceStatus.Ready)]
+        };
+        var viewModel = CreateViewModel(
+            new FakeSettingsStore(new ReceiverSettings()),
+            new FakeStartupRegistration(),
+            androidEngine: androidEngine);
+        await viewModel.RefreshAndroidDevicesAsync();
+        var refreshCommandInvalidations = 0;
+        var startAndroidCommandInvalidations = 0;
+        viewModel.RefreshAndroidDevicesCommand.CanExecuteChanged += (_, _) => refreshCommandInvalidations++;
+        viewModel.StartAndroidMirrorCommand.CanExecuteChanged += (_, _) => startAndroidCommandInvalidations++;
+
+        Assert.True(viewModel.StartCommand.CanExecute(null));
+        Assert.True(viewModel.RefreshAndroidDevicesCommand.CanExecute(null));
+        Assert.True(viewModel.StartAndroidMirrorCommand.CanExecute(null));
+
+        viewModel.SetEngineSetupStatus("正在準備引擎", isInProgress: true);
+
+        Assert.False(viewModel.StartCommand.CanExecute(null));
+        Assert.False(viewModel.RefreshAndroidDevicesCommand.CanExecute(null));
+        Assert.False(viewModel.StartAndroidMirrorCommand.CanExecute(null));
+        Assert.Equal(1, refreshCommandInvalidations);
+        Assert.Equal(1, startAndroidCommandInvalidations);
+
+        viewModel.SetEngineSetupStatus("引擎已就緒");
+
+        Assert.True(viewModel.StartCommand.CanExecute(null));
+        Assert.True(viewModel.RefreshAndroidDevicesCommand.CanExecute(null));
+        Assert.True(viewModel.StartAndroidMirrorCommand.CanExecute(null));
+        Assert.Equal(2, refreshCommandInvalidations);
+        Assert.Equal(2, startAndroidCommandInvalidations);
+    }
+
+    [Fact]
     public async Task StopAllReceiversAsyncStopsAirPlayAndAndroid()
     {
         var airPlayEngine = new FakeReceiverEngine();

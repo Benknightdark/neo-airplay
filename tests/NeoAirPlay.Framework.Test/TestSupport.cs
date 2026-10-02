@@ -44,7 +44,7 @@ internal sealed class TestLogger : IAppLogger
 internal sealed class FakeBonjourRuntimeInspector(BonjourRuntime? runtime, string? problem = null)
     : IBonjourRuntimeInspector
 {
-    public BonjourRuntime? GetProjectRuntime(string engineDirectory, out string? issue)
+    public BonjourRuntime? GetRuntime(out string? issue)
     {
         issue = problem;
         return runtime;

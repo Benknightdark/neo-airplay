@@ -5,7 +5,8 @@
 ## 權限與系統服務
 
 - README 說明 Install-BonjourService.ps1 與 Restore-BonjourService.ps1 需要系統管理員權限。
-- 安裝流程會備份 Bonjour Service 原始 ImagePath，再切換服務執行檔位置。執行前應先閱讀腳本；需要還原時依 README 使用還原腳本。
+- 安裝流程只接受 64 位元 Program Files 中的有效 Bonjour 原始安裝，備份 Bonjour Service 原始 ImagePath，再切換到 `%ProgramFiles%\NeoAirPlay\Bonjour`。安裝腳本重設該目錄 ACL、將擁有者設為 Administrators，並移除標準使用者的寫入權限，以免服務執行可寫入 App 目錄中的檔案。執行前應先閱讀腳本；需要還原時依 README 使用還原腳本。
+- App 首次啟動若需切換 Bonjour Service，會先向使用者說明服務路徑變更和備份行為，再透過 UAC 啟動 elevated helper；拒絕或取消時不執行服務腳本。
 - Harness 驗證入口不會執行這些服務管理腳本。
 
 ## 網路與外部程序
@@ -25,10 +26,14 @@
 
 - README 記載 Bonjour 執行元件取自本機安裝，並指出其授權條款限制對外再散布；README 明確要求不要把這些執行檔放入公開下載包。
 - scrcpy/ADB 執行環境從 Genymobile 官方 v4.1 Windows x64 發行包 staging，腳本核對固定 SHA-256，並保留官方封存檔內的 `LICENSE.txt`。scrcpy 專案 README 標示 Apache-2.0；發佈前仍須一併盤點該 Windows 封存包中各個第三方二進位檔的授權與通知。
+- App 下載版本固定的引擎 ZIP，先核對 App 內設定的外層 SHA-256，再檢查逐檔雜湊、必要檔案清單、路徑穿越與符號連結；公開 ZIP 排除 Bonjour。套件由 `scripts/Pack-EngineRuntime.ps1` 產生並附加到對應 GitHub Release。
 - 任何發佈內容變更都應重新核對 README 所列授權文件與目前檔案來源。此處只轉述專案文件，沒有獨立驗證授權條款。
 
 ## 自動化與未知事項
 
-- Harness 的單元測試使用程序與 Bonjour 替身；App UI E2E 以 `--e2e-profile` 把設定、記錄和 GStreamer 快取導向測試暫存目錄，並使用獨立 Mutex。測試不會啟動接收器或修改 Windows 啟動登錄值。
+- Harness 的單元測試使用程序與 Bonjour 替身；App UI E2E 以 `--e2e-profile` 把設定、記錄和 GStreamer 快取導向測試暫存目錄，並使用獨立 Mutex。測試不會啟動接收器或修改 Windows 啟動登錄值。Bonjour ACL 與服務路徑仍需在目標 Windows 機器人工驗收。
+- `ci.yml` 僅有 `contents: read` 權限。建立 develop → main PR 的工作流程在 `workflow_run` 上執行，不 checkout 未信任的 develop 程式碼；GitHub App 私鑰只交給 token action，PR 驗證工作不會取得它。
+- Release 需要自架 Windows runner 才能讀取可信任的 Bonjour 安裝。Release job 僅由 main push 啟動，先執行驗證及建置，之後才建立短期 GitHub App token；App 的 `Contents` 與 `Pull requests` 權限應只授予必要 repository。`main` 需要允許 App 繞過直接推送限制，因 Release 會寫回版本與引擎 metadata。
+- 自架 runner 會執行 main 上的專案建置、測試及 PowerShell 腳本。能寫入 develop 的人因此能提供會在 runner 執行的程式碼；只應授權可信任維護者寫入 develop，限制 runner 的 repository 存取，並用隔離且不保存其他憑證或個人資料的主機。GitHub 設定無法由 repository workflow 自行保證。
 - 目前沒有找到安全掃描、權限檢查或網路設定的自動化驗證。
 - 本文件未確認防火牆連接埠、威脅模型或記錄內容中的敏感資料種類；相關決策需以實際需求與程式行為確認。

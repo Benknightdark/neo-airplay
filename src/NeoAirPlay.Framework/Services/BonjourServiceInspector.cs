@@ -1,10 +1,13 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using Microsoft.Win32;
 
 namespace NeoAirPlay.Services;
 
 public sealed class BonjourServiceInspector : IBonjourRuntimeInspector
 {
+    private const string BonjourServiceSettingsResourceName = "NeoAirPlay.BonjourServiceSettings.json";
     private const string BonjourServiceName = "Bonjour Service";
     private const string ServiceRegistryPath = @"SYSTEM\CurrentControlSet\Services\" + BonjourServiceName;
     private const uint ServiceManagerConnect = 0x0001;
@@ -12,16 +15,16 @@ public sealed class BonjourServiceInspector : IBonjourRuntimeInspector
     private const uint ServiceRunningState = 0x00000004;
     private const int ServiceStatusProcessInfo = 0;
 
-    public BonjourRuntime? GetProjectRuntime(string engineDirectory, out string? problem)
+    public BonjourRuntime? GetRuntime(out string? problem)
     {
         problem = null;
-        var projectBonjourDirectory = ResolveProjectBonjourDirectory(engineDirectory);
-        var expectedResponder = Path.Combine(projectBonjourDirectory, "mDNSResponder.exe");
-        var expectedDnsSd = Path.Combine(projectBonjourDirectory, "dnssd.dll");
+        var runtimeDirectory = GetBonjourRuntimeDirectory();
+        var expectedResponder = Path.Combine(runtimeDirectory, "mDNSResponder.exe");
+        var expectedDnsSd = Path.Combine(runtimeDirectory, "dnssd.dll");
 
         if (!File.Exists(expectedResponder) || !File.Exists(expectedDnsSd))
         {
-            problem = "專案內尚未備妥 Bonjour 元件。請先完成 scripts\\build-engine.ps1。";
+            problem = "系統尚未備妥 Neo AirPlay 的 Bonjour 元件。請重新啟動 App，並在提示時允許啟用 Bonjour Service。";
             return null;
         }
 
@@ -31,7 +34,7 @@ public sealed class BonjourServiceInspector : IBonjourRuntimeInspector
         if (string.IsNullOrWhiteSpace(normalizedRegisteredPath)
             || !PathEquals(normalizedRegisteredPath, expectedResponder))
         {
-            problem = "Bonjour Service 尚未指向本專案的 engine\\bonjour\\mDNSResponder.exe。請執行 scripts\\Install-BonjourService.ps1。";
+            problem = $"Bonjour Service 尚未指向 {expectedResponder}。請重新啟動 App，並在提示時允許啟用 Bonjour Service。";
             return null;
         }
 
@@ -43,11 +46,168 @@ public sealed class BonjourServiceInspector : IBonjourRuntimeInspector
 
         if (serviceStatus.CurrentState != ServiceRunningState || serviceStatus.ProcessId == 0)
         {
-            problem = "專案內的 Bonjour Service 尚未執行。請從 Windows 服務管理員啟動它。";
+            problem = "Bonjour Service 尚未執行。請從 Windows 服務管理員啟動它。";
             return null;
         }
 
-        return new BonjourRuntime(projectBonjourDirectory);
+        return new BonjourRuntime(runtimeDirectory);
+    }
+
+    internal static string GetBonjourRuntimeDirectory()
+    {
+        var relativeDirectory = GetBonjourRelativePath("ProgramFilesRelativeDirectory");
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), relativeDirectory);
+    }
+
+    internal static string GetBonjourServiceBackupPath()
+    {
+        var relativePath = GetBonjourRelativePath("ProgramDataRelativeBackupPath");
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), relativePath);
+    }
+
+    private static string GetBonjourRelativePath(string propertyName)
+    {
+        using var stream = typeof(BonjourServiceInspector).Assembly
+            .GetManifestResourceStream(BonjourServiceSettingsResourceName)
+            ?? throw new InvalidOperationException("BonjourServiceSettings.json is missing from the Framework assembly.");
+        using var document = JsonDocument.Parse(stream);
+        if (!document.RootElement.TryGetProperty(propertyName, out var pathElement)
+            || pathElement.ValueKind != System.Text.Json.JsonValueKind.String)
+        {
+            throw new InvalidDataException($"BonjourServiceSettings.json is missing {propertyName}.");
+        }
+
+        var relativePath = pathElement.GetString();
+        if (string.IsNullOrWhiteSpace(relativePath) || Path.IsPathRooted(relativePath))
+        {
+            throw new InvalidDataException($"BonjourServiceSettings.json contains an invalid relative path for {propertyName}.");
+        }
+
+        var segments = relativePath.Split(['\\', '/'], StringSplitOptions.None);
+        if (segments.Any(segment => string.IsNullOrEmpty(segment)
+                || segment is "." or ".."
+                || segment.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not ('.' or '_' or '-'))))
+        {
+            throw new InvalidDataException($"BonjourServiceSettings.json contains an unsafe relative path for {propertyName}.");
+        }
+
+        return segments.Aggregate(string.Empty, (path, segment) =>
+            path.Length == 0 ? segment : Path.Combine(path, segment));
+    }
+
+    internal bool TryGetInstalledRuntimeDirectory(out string? directory)
+    {
+        directory = null;
+        using var serviceKey = Registry.LocalMachine.OpenSubKey(ServiceRegistryPath);
+        var executablePath = ExtractExecutablePath(serviceKey?.GetValue("ImagePath") as string);
+        if (!HasBonjourRuntimeFiles(executablePath))
+        {
+            executablePath = ReadBackedUpExecutablePath();
+        }
+
+        if (!HasBonjourRuntimeFiles(executablePath))
+        {
+            return false;
+        }
+
+        var candidateDirectory = Path.GetDirectoryName(executablePath);
+        if (string.IsNullOrWhiteSpace(candidateDirectory))
+        {
+            return false;
+        }
+
+        directory = candidateDirectory;
+        return true;
+    }
+
+    private static string? ReadBackedUpExecutablePath()
+    {
+        var backupPath = GetBonjourServiceBackupPath();
+        if (!File.Exists(backupPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(backupPath));
+            var root = document.RootElement;
+            if (!root.TryGetProperty("ServiceName", out var serviceName)
+                || !string.Equals(serviceName.GetString(), BonjourServiceName, StringComparison.Ordinal)
+                || !root.TryGetProperty("OriginalImagePath", out var originalImagePath))
+            {
+                return null;
+            }
+
+            return ExtractExecutablePath(originalImagePath.GetString());
+        }
+        catch (Exception exception) when (exception is IOException
+            or UnauthorizedAccessException
+            or InvalidOperationException
+            or System.Text.Json.JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static bool HasBonjourRuntimeFiles(string? executablePath)
+    {
+        if (string.IsNullOrWhiteSpace(executablePath) || !File.Exists(executablePath))
+        {
+            return false;
+        }
+
+        var directory = Path.GetDirectoryName(executablePath);
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            return false;
+        }
+
+        if (!IsUnderTrustedRuntimeRoot(executablePath))
+        {
+            return false;
+        }
+
+        var responderPath = Path.Combine(directory, "mDNSResponder.exe");
+        var dnsSdPath = Path.Combine(directory, "dnssd.dll");
+        if (!File.Exists(responderPath) || !File.Exists(dnsSdPath))
+        {
+            return false;
+        }
+
+        try
+        {
+            var responderVersion = FileVersionInfo.GetVersionInfo(responderPath);
+            var dnsSdVersion = FileVersionInfo.GetVersionInfo(dnsSdPath);
+            return string.Equals(responderVersion.ProductName, "Bonjour", StringComparison.Ordinal)
+                && string.Equals(dnsSdVersion.ProductName, "Bonjour", StringComparison.Ordinal)
+                && string.Equals(responderVersion.FileVersion, dnsSdVersion.FileVersion, StringComparison.Ordinal);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsUnderTrustedRuntimeRoot(string executablePath)
+    {
+        try
+        {
+            var fullExecutablePath = Path.GetFullPath(executablePath);
+            var trustedRoots = new[]
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)
+            };
+
+            return trustedRoots
+                .Where(root => !string.IsNullOrWhiteSpace(root))
+                .Select(root => Path.GetFullPath(root!).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar)
+                .Any(root => fullExecutablePath.StartsWith(root, StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or NotSupportedException)
+        {
+            return false;
+        }
     }
 
     private static bool TryQueryBonjourServiceStatus(out ServiceStatusProcess serviceStatus, out int errorCode)
@@ -95,21 +255,6 @@ public sealed class BonjourServiceInspector : IBonjourRuntimeInspector
         {
             _ = CloseServiceHandle(managerHandle);
         }
-    }
-
-    private static string ResolveProjectBonjourDirectory(string engineDirectory)
-    {
-        for (var current = new DirectoryInfo(Path.GetFullPath(engineDirectory)); current is not null; current = current.Parent)
-        {
-            var solutionMarker = Path.Combine(current.FullName, "NeoAirPlay.slnx");
-            var projectRuntime = Path.Combine(current.FullName, "engine", "bonjour");
-            if (File.Exists(solutionMarker) && Directory.Exists(projectRuntime))
-            {
-                return projectRuntime;
-            }
-        }
-
-        return Path.Combine(engineDirectory, "bonjour");
     }
 
     private static string? ExtractExecutablePath(string? imagePath)

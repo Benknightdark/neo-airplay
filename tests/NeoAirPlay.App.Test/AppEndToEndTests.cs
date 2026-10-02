@@ -47,7 +47,7 @@ public sealed class AppEndToEndTests
             using var automation = new UIA3Automation();
             var window = app.GetMainWindow(automation, TimeSpan.FromSeconds(20));
             Assert.NotNull(window);
-            Assert.Equal("Neo AirPlay", window.Title);
+            Assert.Matches(@"^Neo AirPlay \(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\)$", window.Title);
 
             var androidState = window.FindFirstDescendant(condition => condition.ByAutomationId("AndroidStateLabel"));
             var androidDeviceSelector = window.FindFirstDescendant(condition => condition.ByAutomationId("AndroidDeviceSelector"));

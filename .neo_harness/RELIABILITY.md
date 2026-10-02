@@ -4,9 +4,12 @@
 
 ## 啟動條件與失敗狀態
 
-- 引擎啟動前檢查 `engine/uxplay.exe`、專案內 Bonjour 執行元件，以及 GStreamer `runtime/bin` 與 `runtime/lib/gstreamer-1.0` 目錄。
+- 引擎啟動前檢查 `engine/uxplay.exe`、受保護的系統共用 Bonjour 執行元件，以及 GStreamer `runtime/bin` 與 `runtime/lib/gstreamer-1.0` 目錄。
 - 缺少必要元件時狀態設為 `DependencyMissing`，並寫入錯誤記錄；程序啟動失敗時狀態設為 `Faulted`。
 - 引擎使用非同步生命週期鎖避免啟停操作重疊。若程序已在執行，重複啟動要求會直接返回。
+- App 顯示主視窗後背景檢查 AirPlay 與 Android 引擎檔案；缺少時下載固定版本套件並驗證後安裝。下載或安裝失敗會顯示在總覽及記錄，不會關閉 App，且下次啟動會再檢查。
+- 引擎準備期間停用啟動 AirPlay、刷新 Android 裝置及啟動 Android 投影命令。E2E profile 會略過引擎準備。
+- Bonjour Service 尚未指向受保護的 `%ProgramFiles%\NeoAirPlay\Bonjour` 時，App 說明服務變更並在使用者確認後要求 UAC；若 Bonjour 不存在，AirPlay 顯示需要人工安裝，Android 仍可用。
 
 ## 停止與意外結束
 
@@ -34,7 +37,9 @@
 ## 驗證界線
 
 - `.neo_harness/verify.ps1` 建置 `NeoAirPlay.slnx` 並執行標記為 `Unit` 的 Framework 與 App 單元測試；不會啟動外部 UxPlay 程序或執行 Bonjour 服務管理腳本。
+- `.github/workflows/ci.yml` 在 develop push 與 main PR 執行同一驗證入口；develop 驗證成功後，`promote-develop.yml` 建立／更新到 main 的 PR 並設定 auto-merge。main push 由 `release.yml` 重跑驗證，再建立版本化 Release。
+- Release workflow 以觸發該 run 的 main commit 建置。版本取目前 App 版本及既有穩定 Release tags 中較大的值後升 patch；若另一個工作流程先建立了相同 tag，發佈腳本會停止而不覆寫別次建置，應重跑失敗的 Release workflow 以取得下一版。
 - `NeoAirPlay.App.Test` 的 E2E 測試需可互動的 Windows 桌面工作階段，使用 UI Automation 驗證實際 WPF 視窗及導覽。測試不連接 AirPlay 裝置、不啟動接收器，並以暫存 profile 隔離使用者資料。
 - `Category=HardwareE2E` 另外啟動真實 UxPlay 與 scrcpy，包含 Framework 引擎並行測試及透過 WPF 總覽控制 USB Android 的測試；驗證 scrcpy 視窗出現，以及停止 Android 後 AirPlay 程序仍在運行。這不會自動選擇 iPhone/iPad 的 AirPlay 來源，也不量測實際音訊輸出。
 - 單元與 UI E2E 測試不驗證區域網路探索、影音播放或外部 Bonjour Service 在目標環境中的實際行為；這些仍需在目標 Windows 與區域網路中確認。
-- 目前沒有 CI 工作流程；E2E 測試需另以下列命令明確執行：`dotnet test tests/NeoAirPlay.App.Test/NeoAirPlay.App.Test.csproj --filter "Category=E2E"`。
+- CI 不執行 UI E2E；若需確認 WPF 實際導覽，仍需在互動式桌面執行：`dotnet test tests/NeoAirPlay.App.Test/NeoAirPlay.App.Test.csproj --filter "Category=E2E"`。

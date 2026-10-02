@@ -7,6 +7,7 @@ internal sealed record AppDataPaths(
     string SettingsPath,
     string LogDirectory,
     string GStreamerRegistryPath,
+    string EnginePackageCacheDirectory,
     string MutexName,
     bool IsE2eProfile)
 {
@@ -42,6 +43,7 @@ internal sealed record AppDataPaths(
             Path.Combine(roamingRoot, "settings.json"),
             Path.Combine(localRoot, "Logs"),
             Path.Combine(localRoot, "gstreamer-registry.bin"),
+            Path.Combine(localRoot, "EnginePackages"),
             $"Local\\NeoAirPlay.E2E.{profileHash}",
             IsE2eProfile: true);
     }
@@ -59,6 +61,7 @@ internal sealed record AppDataPaths(
             Path.Combine(roamingRoot, "settings.json"),
             Path.Combine(localRoot, "Logs"),
             Path.Combine(localRoot, "gstreamer-registry.bin"),
+            Path.Combine(localRoot, "EnginePackages"),
             "Local\\NeoAirPlay.SingleInstance",
             IsE2eProfile: false);
     }

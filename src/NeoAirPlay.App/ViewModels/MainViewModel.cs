@@ -30,6 +30,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private bool _settingsApplyPending;
     private ReceiverState _androidState;
     private string _androidStatusMessage;
+    private string _engineSetupStatus = string.Empty;
+    private bool _isEnginePreparationInProgress;
     private AndroidDevice? _selectedAndroidDevice;
     private string _currentPage = "Home";
     private string _alertMessage = string.Empty;
@@ -95,6 +97,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
     public event EventHandler? ExitRequested;
     public event EventHandler? MinimizeRequested;
+
+    internal void SetEngineSetupStatus(string? message, bool isInProgress = false)
+    {
+        EngineSetupStatus = message ?? string.Empty;
+        IsEnginePreparationInProgress = isInProgress;
+    }
 
     public AsyncRelayCommand StartCommand { get; }
     public AsyncRelayCommand StopCommand { get; }
@@ -265,6 +273,32 @@ public sealed class MainViewModel : INotifyPropertyChanged
     {
         get => _androidStatusMessage;
         private set => SetProperty(ref _androidStatusMessage, value);
+    }
+
+    public string EngineSetupStatus
+    {
+        get => _engineSetupStatus;
+        private set
+        {
+            if (SetProperty(ref _engineSetupStatus, value))
+            {
+                OnPropertyChanged(nameof(HasEngineSetupStatus));
+            }
+        }
+    }
+
+    public bool HasEngineSetupStatus => !string.IsNullOrWhiteSpace(EngineSetupStatus);
+
+    public bool IsEnginePreparationInProgress
+    {
+        get => _isEnginePreparationInProgress;
+        private set
+        {
+            if (SetProperty(ref _isEnginePreparationInProgress, value))
+            {
+                NotifyCommands();
+            }
+        }
     }
 
     public AndroidDevice? SelectedAndroidDevice
@@ -505,11 +539,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    private bool CanStart() => State is ReceiverState.Stopped or ReceiverState.Faulted or ReceiverState.DependencyMissing;
+    private bool CanStart() => !IsEnginePreparationInProgress
+        && State is ReceiverState.Stopped or ReceiverState.Faulted or ReceiverState.DependencyMissing;
     private bool CanStop() => State is ReceiverState.Starting or ReceiverState.Running;
     private bool CanApplySettings() => SettingsApplyPending && State == ReceiverState.Running;
-    private bool CanRefreshAndroidDevices() => AndroidState is not (ReceiverState.Starting or ReceiverState.Stopping);
+    private bool CanRefreshAndroidDevices() => !IsEnginePreparationInProgress
+        && AndroidState is not (ReceiverState.Starting or ReceiverState.Stopping);
     private bool CanStartAndroidMirror() =>
+        !IsEnginePreparationInProgress
+        &&
         SelectedAndroidDevice is { IsReady: true }
         && AndroidState is ReceiverState.Stopped or ReceiverState.Faulted or ReceiverState.DependencyMissing;
     private bool CanStopAndroidMirror() => AndroidState is ReceiverState.Starting or ReceiverState.Running;
@@ -624,6 +662,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         StartCommand.NotifyCanExecuteChanged();
         StopCommand.NotifyCanExecuteChanged();
         ApplySettingsCommand.NotifyCanExecuteChanged();
+        NotifyAndroidCommands();
         OnPropertyChanged(nameof(ShowApplyWarning));
         OnPropertyChanged(nameof(SettingsHint));
     }

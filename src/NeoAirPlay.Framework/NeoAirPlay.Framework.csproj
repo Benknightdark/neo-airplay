@@ -10,10 +10,13 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="NeoAirPlay.Framework.Test" />
+    <InternalsVisibleTo Include="NeoAirPlay" />
   </ItemGroup>
 
   <ItemGroup>
     <EmbeddedResource Include="..\..\scripts\scrcpy-runtime-files.txt"
                      LogicalName="NeoAirPlay.Services.scrcpy-runtime-files.txt" />
+    <EmbeddedResource Include="..\..\scripts\BonjourServiceSettings.json"
+                      LogicalName="NeoAirPlay.BonjourServiceSettings.json" />
   </ItemGroup>
 </Project>

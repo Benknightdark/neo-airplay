@@ -16,7 +16,7 @@ Neo AirPlay 是 Windows 11 x64 的 iOS AirPlay 與 Android 投影接收器。WPF
 1. 開始修改前閱讀相關程式碼與 README；架構描述以目前程式為準，不推定尚未實作的設計。
 2. 保持既有服務介面與實作的依賴關係清楚。若要改動引擎、Bonjour 服務或發佈內容，先查閱架構及安全文件。
 3. 修改程式碼、XAML 或建置設定後執行根目錄的 .neo_harness/verify.ps1；它會建置方案並執行單元測試。需要驗證實際 WPF 導覽時，另外執行 scripts.md 所列的 UI E2E 命令。
-4. 目前沒有找到 CI 工作流程或靜態檢查設定；不可將建置結果描述成測試通過。文件變更需核對相對連結和命令表格式。
+4. GitHub Actions 位於 .github/workflows/：CI 在 develop push 與 main PR 執行 verify，Release workflow 在 main push 發佈 Windows 套件；仍無靜態分析設定。不可將未實際執行的建置或測試描述成通過。文件變更需核對相對連結和命令表格式。
 5. 若檢查失敗，閱讀完整錯誤、修正原因後重跑；無法執行時回報具體原因與未驗證項目。
 
 ## 完成條件

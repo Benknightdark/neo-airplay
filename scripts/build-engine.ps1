@@ -4,6 +4,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$bonjourHelpers = Join-Path $PSScriptRoot 'BonjourRuntimeHelpers.psm1'
+if (-not (Test-Path -LiteralPath $bonjourHelpers -PathType Leaf)) {
+    throw "找不到 Bonjour 執行元件輔助模組：$bonjourHelpers"
+}
+Import-Module -Name $bonjourHelpers -Force -ErrorAction Stop
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $buildRoot = Join-Path $projectRoot '.build'
 if (-not $Msys2Root) {
@@ -122,8 +127,28 @@ if (-not (Test-Path -LiteralPath $uxplaySource)) {
     }
 }
 
-& (Join-Path $PSScriptRoot 'Stage-BonjourRuntime.ps1')
-$bonjourDirectory = Join-Path $projectRoot 'engine\bonjour'
+$service = Get-CimInstance Win32_Service -Filter "Name='Bonjour Service'"
+if (-not $service) {
+    throw '建置 UxPlay 需要先安裝 Bonjour Service。App 首次啟動時可在確認後完成安裝。'
+}
+
+$bonjourSourceImagePath = [string]$service.PathName
+if (-not (Test-TrustedBonjourExecutablePath $bonjourSourceImagePath)) {
+    $backupPath = Get-BonjourServiceBackupPath
+    if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+        $bonjourBackup = Get-Content -LiteralPath $backupPath -Raw | ConvertFrom-Json
+        if (($bonjourBackup.ServiceName -eq 'Bonjour Service') -and
+            (Test-TrustedBonjourExecutablePath $bonjourBackup.OriginalImagePath)) {
+            $bonjourSourceImagePath = [string]$bonjourBackup.OriginalImagePath
+        }
+    }
+}
+if (-not (Test-TrustedBonjourExecutablePath $bonjourSourceImagePath)) {
+    throw '建置 UxPlay 找不到可信任且可用的 Bonjour 安裝來源。請在 Program Files 安裝 Bonjour。'
+}
+
+$bonjourSourceExecutable = Resolve-ServiceExecutablePath $bonjourSourceImagePath
+$bonjourDirectory = Split-Path -Parent $bonjourSourceExecutable
 $bonjourDll = Join-Path $bonjourDirectory 'dnssd.dll'
 $bonjourSdk = Join-Path $buildRoot 'bonjour-sdk'
 $bonjourInclude = Join-Path $bonjourSdk 'Include'

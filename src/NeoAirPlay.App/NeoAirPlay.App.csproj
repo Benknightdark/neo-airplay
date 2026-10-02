@@ -16,6 +16,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="NeoAirPlay.App.Test" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\NeoAirPlay.Framework\NeoAirPlay.Framework.csproj" />
   </ItemGroup>
 
@@ -24,5 +28,31 @@
              Link="engine\%(RecursiveDir)%(Filename)%(Extension)"
              CopyToOutputDirectory="PreserveNewest"
              CopyToPublishDirectory="PreserveNewest" />
+    <Content Update="..\..\engine\bonjour\**\*"
+             CopyToOutputDirectory="Never"
+             CopyToPublishDirectory="Never" />
+    <Content Include="..\..\scripts\Stage-BonjourRuntime.ps1"
+             Link="scripts\Stage-BonjourRuntime.ps1"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\scripts\BonjourRuntimeHelpers.psm1"
+             Link="scripts\BonjourRuntimeHelpers.psm1"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\scripts\BonjourServiceSettings.json"
+             Link="scripts\BonjourServiceSettings.json"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\scripts\Install-BonjourService.ps1"
+             Link="scripts\Install-BonjourService.ps1"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="..\..\scripts\Restore-BonjourService.ps1"
+             Link="scripts\Restore-BonjourService.ps1"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+    <None Update="engine-package.json"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
