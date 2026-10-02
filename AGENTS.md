@@ -1,6 +1,6 @@
 # 專案工作入口
 
-Neo AirPlay 是 Windows 11 x64 的 AirPlay 接收器。WPF/XAML 操作介面透過獨立接收程序處理鏡像畫面與音訊。使用者功能、建置方式、執行環境與授權注意事項以 [README.md](README.md) 為準。
+Neo AirPlay 是 Windows 11 x64 的 iOS AirPlay 與 Android 投影接收器。WPF/XAML 操作介面以 UxPlay 和 scrcpy 獨立程序處理鏡像畫面與音訊，兩者可同時運作。使用者功能、建置方式、執行環境與授權注意事項以 [README.md](README.md) 為準。
 
 ## 知識地圖
 
@@ -9,7 +9,7 @@ Neo AirPlay 是 Windows 11 x64 的 AirPlay 接收器。WPF/XAML 操作介面透�
 - [已驗證命令清單](.neo_harness/docs/scripts.md)
 - [安全與信任邊界](.neo_harness/SECURITY.md)
 - [程序生命週期與復原](.neo_harness/RELIABILITY.md)
-- WPF 應用程式位於 src/NeoAirPlay.App/，模型與服務位於 src/NeoAirPlay.Framework/，測試位於 tests/；建置及 Bonjour 服務管理腳本位於 scripts/，隨附執行元件位於 engine/。
+- WPF 應用程式位於 src/NeoAirPlay.App/，模型與服務位於 src/NeoAirPlay.Framework/，測試位於 tests/；引擎建置、scrcpy staging 及 Bonjour 服務管理腳本位於 scripts/，隨附執行元件位於 engine/。
 
 ## 工作規則
 

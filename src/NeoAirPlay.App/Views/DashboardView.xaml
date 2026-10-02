@@ -48,6 +48,61 @@
                 </Grid>
             </Border>
 
+            <Border AutomationProperties.AutomationId="AndroidMirrorCard"
+                    Style="{StaticResource CardBorderStyle}" Padding="24" Margin="0,0,0,16">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="Android 投影" Style="{StaticResource SectionTitleStyle}" />
+                        <TextBlock Text="scrcpy · USB 或已配對的 Wi-Fi 偵錯"
+                                   Foreground="{StaticResource MutedTextBrush}" FontSize="12" Margin="0,5,0,0" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Ellipse Width="8" Height="8" Fill="{Binding AndroidStateAccent}" Margin="0,0,8,0" />
+                        <TextBlock AutomationProperties.AutomationId="AndroidStateLabel"
+                                   Text="{Binding AndroidStateLabel}" Foreground="{StaticResource MutedTextBrush}"
+                                   FontSize="12" FontWeight="SemiBold" />
+                    </StackPanel>
+                    <TextBlock Grid.Row="1" Grid.ColumnSpan="2" AutomationProperties.AutomationId="AndroidStatusMessage"
+                               Text="{Binding AndroidStatusMessage}" Foreground="{StaticResource MutedTextBrush}"
+                               FontSize="12" TextWrapping="Wrap" Margin="0,14,0,12" />
+                    <Grid Grid.Row="2" Grid.ColumnSpan="2">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <ComboBox AutomationProperties.AutomationId="AndroidDeviceSelector"
+                                  ItemsSource="{Binding AndroidDevices}"
+                                  SelectedItem="{Binding SelectedAndroidDevice, Mode=TwoWay}"
+                                  DisplayMemberPath="DisplayName" MinHeight="38" Margin="0,0,10,0"
+                                  VerticalContentAlignment="Center"
+                                  ToolTip="選擇狀態為已連線的 Android 裝置" />
+                        <Button Grid.Column="1" AutomationProperties.AutomationId="RefreshAndroidDevices"
+                                Content="重新整理" Command="{Binding RefreshAndroidDevicesCommand}"
+                                Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,10,0" />
+                        <StackPanel Grid.Column="2" Orientation="Horizontal">
+                            <Button AutomationProperties.AutomationId="StartAndroidMirror"
+                                    Content="開始投影" Command="{Binding StartAndroidMirrorCommand}"
+                                    Style="{StaticResource PrimaryButtonStyle}"
+                                    Visibility="{Binding IsAndroidMirrorStopped, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                            <Button AutomationProperties.AutomationId="StopAndroidMirror"
+                                    Content="停止 Android 投影" Command="{Binding StopAndroidMirrorCommand}"
+                                    Style="{StaticResource SecondaryButtonStyle}"
+                                    Visibility="{Binding IsAndroidMirrorRunning, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                        </StackPanel>
+                    </Grid>
+                </Grid>
+            </Border>
+
             <Grid Margin="0,0,0,16">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="1.15*" />

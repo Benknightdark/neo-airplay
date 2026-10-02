@@ -12,6 +12,7 @@ public partial class App : Application
     private Mutex? _instanceMutex;
     private bool _ownsMutex;
     private UxPlayProcessEngine? _engine;
+    private ScrcpyAndroidMirrorEngine? _androidEngine;
 
     protected override async void OnStartup(StartupEventArgs e)
     {
@@ -55,10 +56,13 @@ public partial class App : Application
             var engine = new UxPlayProcessEngine(
                 logger,
                 gstreamerRegistryPath: dataPaths.GStreamerRegistryPath);
+            var androidEngine = new ScrcpyAndroidMirrorEngine(logger);
             _engine = engine;
+            _androidEngine = androidEngine;
 
             var viewModel = new MainViewModel(
                 engine,
+                androidEngine,
                 logger,
                 settingsStore,
                 startupRegistration,
@@ -91,6 +95,7 @@ public partial class App : Application
     protected override void OnExit(ExitEventArgs e)
     {
         _engine?.Dispose();
+        _androidEngine?.Dispose();
         if (_ownsMutex)
         {
             _instanceMutex?.ReleaseMutex();

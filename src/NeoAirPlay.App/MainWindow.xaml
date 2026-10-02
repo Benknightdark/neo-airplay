@@ -71,7 +71,7 @@
             <DockPanel Margin="0,0,0,22">
                 <StackPanel DockPanel.Dock="Left">
                     <TextBlock AutomationProperties.AutomationId="CurrentPageHeading" Text="{Binding CurrentPageLabel}" Style="{StaticResource PageTitleStyle}" />
-                    <TextBlock Text="將 Apple 裝置的畫面與音訊接收到這台電腦。"
+                    <TextBlock Text="同時接收 Apple AirPlay 與 Android USB／已配對 Wi-Fi 投影。"
                                Foreground="{StaticResource MutedTextBrush}" FontSize="12" Margin="0,5,0,0" />
                 </StackPanel>
                 <Button DockPanel.Dock="Right" Content="最小化至系統匣" Command="{Binding MinimizeCommand}"

@@ -84,7 +84,7 @@ public partial class MainWindow : Window
         _exitInProgress = true;
         try
         {
-            await _viewModel.StopReceiverAsync();
+            await _viewModel.StopAllReceiversAsync();
         }
         catch (Exception)
         {
@@ -92,9 +92,12 @@ public partial class MainWindow : Window
         }
         finally
         {
-            _allowClose = true;
-            Close();
-            Application.Current.Shutdown();
+            _ = Dispatcher.BeginInvoke(new Action(() =>
+            {
+                _allowClose = true;
+                Close();
+                Application.Current.Shutdown();
+            }));
         }
     }
 

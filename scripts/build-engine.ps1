@@ -270,3 +270,8 @@ Write-Host 'UxPlay 與 GStreamer 執行檔已放入專案 engine 目錄。'
 Write-Host "UxPlay: $(Join-Path $engineDirectory 'uxplay.exe')"
 Write-Host "Bonjour: $bonjourDirectory"
 Write-Host "影音執行期: $runtimeDirectory"
+
+& (Join-Path $PSScriptRoot 'Stage-ScrcpyRuntime.ps1')
+if ($LASTEXITCODE -ne 0) {
+    throw "scrcpy 執行環境 staging 失敗，結束代碼：$LASTEXITCODE"
+}

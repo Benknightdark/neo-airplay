@@ -11,4 +11,9 @@
   <ItemGroup>
     <InternalsVisibleTo Include="NeoAirPlay.Framework.Test" />
   </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\scripts\scrcpy-runtime-files.txt"
+                     LogicalName="NeoAirPlay.Services.scrcpy-runtime-files.txt" />
+  </ItemGroup>
 </Project>

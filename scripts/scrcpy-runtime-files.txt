@@ -1,0 +1,14 @@
+adb.exe
+AdbWinApi.dll
+AdbWinUsbApi.dll
+scrcpy.exe
+scrcpy-server
+avcodec-62.dll
+avformat-62.dll
+avutil-60.dll
+swresample-6.dll
+libusb-1.0.dll
+SDL3.dll
+scrcpy.png
+disconnected.png
+LICENSE.txt

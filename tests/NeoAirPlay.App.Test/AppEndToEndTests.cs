@@ -49,6 +49,17 @@ public sealed class AppEndToEndTests
             Assert.NotNull(window);
             Assert.Equal("Neo AirPlay", window.Title);
 
+            var androidState = window.FindFirstDescendant(condition => condition.ByAutomationId("AndroidStateLabel"));
+            var androidDeviceSelector = window.FindFirstDescendant(condition => condition.ByAutomationId("AndroidDeviceSelector"));
+            var refreshAndroidDevices = window.FindFirstDescendant(condition => condition.ByAutomationId("RefreshAndroidDevices"))?.AsButton();
+            var startAndroidMirror = window.FindFirstDescendant(condition => condition.ByAutomationId("StartAndroidMirror"))?.AsButton();
+            Assert.NotNull(androidState);
+            Assert.NotNull(androidDeviceSelector);
+            Assert.NotNull(refreshAndroidDevices);
+            Assert.True(refreshAndroidDevices.IsEnabled);
+            Assert.NotNull(startAndroidMirror);
+            Assert.False(startAndroidMirror.IsEnabled);
+
             AssertNavigation(window, "NavigateSettings", "設定");
             AssertNavigation(window, "NavigateDiagnostics", "診斷記錄");
             AssertNavigation(window, "NavigateHome", "總覽");
