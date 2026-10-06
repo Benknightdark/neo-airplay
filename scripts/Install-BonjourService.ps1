@@ -1,4 +1,4 @@
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 [CmdletBinding()]
 param()
 
@@ -15,6 +15,7 @@ $localDnsSd = Join-Path $bonjourDirectory 'dnssd.dll'
 $registryPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\Bonjour Service'
 $backupPath = Get-BonjourServiceBackupPath
 $backupDirectory = Split-Path -Parent $backupPath
+Protect-BonjourServiceBackupDirectory
 
 foreach ($requiredFile in @($localExecutable, $localDnsSd)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
@@ -22,27 +23,17 @@ foreach ($requiredFile in @($localExecutable, $localDnsSd)) {
     }
 }
 
-if ((Get-Item -LiteralPath $localExecutable).VersionInfo.ProductName -ne 'Bonjour' -or
-    (Get-Item -LiteralPath $localDnsSd).VersionInfo.ProductName -ne 'Bonjour') {
-    throw 'Neo AirPlay 系統共用目錄中的服務檔案未通過 Bonjour 產品資訊檢查。'
-}
-$versions = @(
-    (Get-Item -LiteralPath $localExecutable).VersionInfo.FileVersion
-    (Get-Item -LiteralPath $localDnsSd).VersionInfo.FileVersion
-) | Select-Object -Unique
-if ($versions.Count -ne 1) {
-    throw "Neo AirPlay 系統共用目錄中的 Bonjour 服務元件版本不一致：$($versions -join ', ')"
+if (-not (Test-UsableBonjourRuntimePair -ResponderPath $localExecutable -DnsSdPath $localDnsSd)) {
+    throw 'Neo AirPlay 系統共用目錄中的 Bonjour 執行檔與 x64 DNS-SD 元件未通過產品資訊、版本、架構或信任路徑檢查。'
 }
 
-if (-not (Test-Path -LiteralPath $registryPath)) {
-    throw '找不到既有 Bonjour Service。此腳本只會切換現有服務，不會建立新的服務。'
-}
-
-$serviceInfo = Get-CimInstance Win32_Service -Filter "Name='Bonjour Service'"
-if (-not $serviceInfo -or [string]::IsNullOrWhiteSpace($serviceInfo.StartName)) {
+$serviceExists = Test-Path -LiteralPath $registryPath
+$serviceInfo = if ($serviceExists) { Get-CimInstance Win32_Service -Filter "Name='Bonjour Service'" } else { $null }
+if ($serviceExists -and (-not $serviceInfo -or [string]::IsNullOrWhiteSpace($serviceInfo.StartName))) {
     throw '無法讀取 Bonjour Service 的執行帳號。'
 }
-$serviceAccountSid = switch -Regex ($serviceInfo.StartName) {
+$serviceAccountName = if ($serviceExists) { [string]$serviceInfo.StartName } else { 'LocalSystem' }
+$serviceAccountSid = switch -Regex ($serviceAccountName) {
     '^(LocalSystem|NT AUTHORITY\\SYSTEM)$' { 'S-1-5-18'; break }
     '^(LocalService|NT AUTHORITY\\LocalService)$' { 'S-1-5-19'; break }
     '^(NetworkService|NT AUTHORITY\\NetworkService)$' { 'S-1-5-20'; break }
@@ -53,7 +44,7 @@ $serviceAccountSid = switch -Regex ($serviceInfo.StartName) {
             ).Value
         }
         catch {
-            throw "無法解析 Bonjour Service 執行帳號的 SID：$($serviceInfo.StartName)"
+            throw "無法解析 Bonjour Service 執行帳號的 SID：$serviceAccountName"
         }
     }
 }
@@ -71,15 +62,20 @@ $directoryGrants = @(
     $serviceGrant
 )
 foreach ($grant in $directoryGrants) {
-    & "$env:SystemRoot\System32\icacls.exe" $bonjourDirectory /grant:r $grant | Out-Null
+    & "$env:SystemRoot\System32\icacls.exe" $bonjourDirectory /grant:r $grant /T /C | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        throw "無法限制 Bonjour 系統共用目錄權限：$($serviceInfo.StartName)"
+        throw "無法限制 Bonjour 系統共用目錄權限：$serviceAccountName"
     }
 }
 
-$service = Get-Service -Name $serviceName
-$originalImagePath = (Get-ItemProperty -LiteralPath $registryPath -Name ImagePath).ImagePath
-if ([string]::IsNullOrWhiteSpace($originalImagePath)) {
+$service = if ($serviceExists) { Get-Service -Name $serviceName } else { $null }
+$originalImagePath = if ($serviceExists) {
+    (Get-ItemProperty -LiteralPath $registryPath -Name ImagePath).ImagePath
+}
+else {
+    $null
+}
+if ($serviceExists -and [string]::IsNullOrWhiteSpace($originalImagePath)) {
     throw '既有 Bonjour Service 沒有可備份的 ImagePath。'
 }
 
@@ -87,8 +83,17 @@ function Get-UsableBonjourBackup {
     if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf)) { return $null }
     try {
         $candidate = Get-Content -LiteralPath $backupPath -Raw | ConvertFrom-Json
-        if ($candidate.ServiceName -ne $serviceName -or [string]::IsNullOrWhiteSpace($candidate.OriginalImagePath)) {
+        if ($candidate.ServiceName -ne $serviceName) {
             return $null
+        }
+
+        if ($candidate.PSObject.Properties.Name -contains 'ServiceExisted' -and -not $candidate.ServiceExisted) {
+            if ($serviceExists -and
+                (Resolve-ServiceExecutablePath $originalImagePath) -ine $normalizedTarget) {
+                return $null
+            }
+
+            return $candidate
         }
 
         if (-not (Test-TrustedBonjourExecutablePath $candidate.OriginalImagePath)) {
@@ -101,8 +106,28 @@ function Get-UsableBonjourBackup {
     }
 }
 
+function New-CurrentBonjourServiceBackupRecord {
+    $originalWasRunning = $serviceExists -and
+        $service.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Running
+    [pscustomobject][ordered]@{
+        ServiceName = $serviceName
+        ServiceExisted = [bool]$serviceExists
+        OriginalImagePath = if ($serviceExists) { $originalImagePath } else { $null }
+        OriginalWasRunning = $originalWasRunning
+        SavedAt = (Get-Date).ToString('o')
+    }
+}
+
+function Save-BonjourServiceBackupRecord {
+    param([Parameter(Mandatory)][object]$Record)
+
+    $temporaryBackup = "$backupPath.tmp"
+    $Record | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $temporaryBackup -Encoding utf8
+    Move-Item -LiteralPath $temporaryBackup -Destination $backupPath -Force
+}
+
 $normalizedTarget = [IO.Path]::GetFullPath($localExecutable)
-if ($originalImagePath.Trim('"') -ieq $normalizedTarget) {
+if ($serviceExists -and (Resolve-ServiceExecutablePath $originalImagePath) -ieq $normalizedTarget) {
     if ($service.Status -ne [System.ServiceProcess.ServiceControllerStatus]::Running) {
         Start-Service -Name $serviceName
         $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(20))
@@ -111,17 +136,57 @@ if ($originalImagePath.Trim('"') -ieq $normalizedTarget) {
     return
 }
 
-if (-not (Test-Path -LiteralPath $backupPath)) {
-    New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
-    $backup = [ordered]@{
-        ServiceName = $serviceName
-        OriginalImagePath = $originalImagePath
-        OriginalWasRunning = ($service.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Running)
-        SavedAt = (Get-Date).ToString('o')
+if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+    if (-not (Get-UsableBonjourBackup)) {
+        if ($serviceExists -and -not (Test-TrustedBonjourExecutablePath $originalImagePath)) {
+            throw "Bonjour Service 備份檔無效，且目前服務路徑也不可信任；為保留還原能力而停止安裝：$backupPath"
+        }
+
+        Save-BonjourServiceBackupRecord (New-CurrentBonjourServiceBackupRecord)
+        Write-Warning '舊的 Bonjour Service 備份無法安全沿用；已依目前服務狀態更新還原備份。'
     }
-    $temporaryBackup = "$backupPath.tmp"
-    $backup | ConvertTo-Json | Set-Content -LiteralPath $temporaryBackup -Encoding utf8
-    Move-Item -LiteralPath $temporaryBackup -Destination $backupPath -Force
+}
+else {
+    New-Item -ItemType Directory -Path $backupDirectory -Force | Out-Null
+    Save-BonjourServiceBackupRecord (New-CurrentBonjourServiceBackupRecord)
+}
+
+if (-not $serviceExists) {
+    try {
+        & $localExecutable '-install'
+        if ($LASTEXITCODE -ne 0) {
+            $serviceExists = Test-Path -LiteralPath $registryPath
+            throw "Bonjour Service 安裝命令失敗（結束代碼 $LASTEXITCODE）。"
+        }
+
+        $serviceExists = Test-Path -LiteralPath $registryPath
+        if (-not $serviceExists) {
+            throw 'Bonjour 安裝命令完成，但沒有建立 Windows 服務。'
+        }
+
+        $service = Get-Service -Name $serviceName
+        $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(20))
+        $registeredPath = (Get-ItemProperty -LiteralPath $registryPath -Name ImagePath).ImagePath
+        $registeredExecutable = Resolve-ServiceExecutablePath $registeredPath
+        if ([string]::IsNullOrWhiteSpace($registeredExecutable) -or
+            [IO.Path]::GetFullPath($registeredExecutable) -ine $normalizedTarget) {
+            throw "Bonjour Service 安裝後路徑檢查失敗：$registeredPath"
+        }
+
+        Write-Host "已建立並啟動 Bonjour Service：$normalizedTarget"
+        Write-Host "服務備份：$backupPath"
+        return
+    }
+    catch {
+        if (Test-Path -LiteralPath $registryPath) {
+            & $localExecutable '-remove' | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "安裝失敗後無法移除新建立的 Bonjour Service（結束代碼 $LASTEXITCODE）。"
+            }
+        }
+
+        throw
+    }
 }
 
 $rollbackImagePath = $originalImagePath

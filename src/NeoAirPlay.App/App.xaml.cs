@@ -153,150 +153,153 @@ public partial class App : Application
             EngineHttpClient,
             logger);
 
+        viewModel.SetEngineSetupStatus("正在檢查 Bonjour Service…", isInProgress: true);
+        var bonjourCoordinator = new BonjourStartupCoordinator(
+            new BonjourStartupInspector(),
+            token => LaunchElevatedSetupAsync(archivePath: null, configureBonjour: true, token),
+            ShowMissingBonjour,
+            ShowBonjourElevationReason);
+        BonjourStartupResult bonjourResult;
         try
         {
-            viewModel.SetEngineSetupStatus("正在檢查投影引擎…", isInProgress: true);
+            bonjourResult = await bonjourCoordinator.EnsureReadyAsync(logger, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            viewModel.SetEngineSetupStatus("Bonjour 準備已取消；下次啟動時會再試一次。", isInProgress: false);
+            return false;
+        }
+        catch (Exception exception)
+        {
+            var message = $"Bonjour Service 檢查失敗：{exception.Message}";
+            await logger.WriteAsync(LogLevel.Error, message, cancellationToken);
+            bonjourResult = new BonjourStartupResult(IsReady: false, message);
+        }
+
+        if (cancellationToken.IsCancellationRequested)
+        {
+            viewModel.SetEngineSetupStatus("啟動準備已取消；下次啟動時會再試一次。", isInProgress: false);
+            return false;
+        }
+
+        viewModel.SetEngineSetupStatus("正在檢查投影引擎…", isInProgress: true);
+        var engineReady = false;
+        string? engineMessage = null;
+        try
+        {
             var result = await Task.Run(
                 () => bootstrapper.PrepareAsync(progress.Report, cancellationToken),
                 cancellationToken);
 
             if (result.RequiresElevation)
             {
-                var inspector = new BonjourServiceInspector();
-                var setupBonjour = inspector.TryGetInstalledRuntimeDirectory(out _)
-                    && inspector.GetRuntime(out _) is null;
-                var description = setupBonjour
-                    ? "引擎安裝目錄需要系統管理員權限；同意後也會將已安裝的 Bonjour Service 切換至受保護的 Program Files 共用目錄。"
-                    : "引擎安裝目錄需要系統管理員權限，才能放入已驗證的投影引擎檔案。";
                 var answer = MessageBox.Show(
-                    $"{description}\n\nBonjour 原服務路徑會先備份；服務執行檔會放在受保護的系統共用目錄。是否繼續？Windows 接著會顯示系統管理員權限提示。",
+                    "引擎安裝目錄需要系統管理員權限，才能放入已驗證的投影引擎檔案。是否繼續？Windows 接著會顯示系統管理員權限提示。",
                     "Neo AirPlay 引擎設定",
                     MessageBoxButton.YesNo,
                     MessageBoxImage.Information);
                 if (answer != MessageBoxResult.Yes)
                 {
+                    engineMessage = "引擎檔案已下載；授權後才能安裝到此目錄。";
                     await logger.WriteAsync(LogLevel.Information, "使用者取消引擎管理員安裝。", cancellationToken);
-                    viewModel.SetEngineSetupStatus("引擎檔案已下載；授權後才能安裝到此目錄。", isInProgress: false);
-                    return false;
                 }
-
-                var elevatedExitCode = await LaunchElevatedSetupAsync(
-                    result.CachedArchivePath,
-                    setupBonjour,
-                    cancellationToken);
-                if (elevatedExitCode is null)
+                else
                 {
-                    viewModel.SetEngineSetupStatus("已取消系統管理員權限要求；下次啟動時會再試一次。", isInProgress: false);
-                    await logger.WriteAsync(LogLevel.Information, "使用者取消 Windows UAC 權限要求。", cancellationToken);
-                    return false;
-                }
-                if (elevatedExitCode != 0)
-                {
-                    var failure = $"系統管理員引擎安裝失敗（結束代碼 {elevatedExitCode}）。請查看診斷記錄。";
-                    viewModel.SetEngineSetupStatus(failure, isInProgress: false);
-                    await logger.WriteAsync(LogLevel.Error, failure, cancellationToken);
-                    return false;
-                }
-
-                if (!bootstrapper.IsRuntimeComplete())
-                {
-                    const string failure = "管理員安裝完成，但仍有引擎檔案缺少。請查看診斷記錄。";
-                    viewModel.SetEngineSetupStatus(failure, isInProgress: false);
-                    await logger.WriteAsync(LogLevel.Error, failure, cancellationToken);
-                    return false;
+                    var elevatedExitCode = await LaunchElevatedSetupAsync(
+                        result.CachedArchivePath,
+                        configureBonjour: false,
+                        cancellationToken);
+                    if (elevatedExitCode is null)
+                    {
+                        engineMessage = "已取消系統管理員權限要求；引擎檔案尚未安裝。";
+                        await logger.WriteAsync(LogLevel.Information, "使用者取消 Windows UAC 權限要求。", cancellationToken);
+                    }
+                    else if (elevatedExitCode != 0)
+                    {
+                        engineMessage = $"系統管理員引擎安裝失敗（結束代碼 {elevatedExitCode}）。請查看診斷記錄。";
+                        await logger.WriteAsync(LogLevel.Error, engineMessage, cancellationToken);
+                    }
+                    else if (!bootstrapper.IsRuntimeComplete())
+                    {
+                        engineMessage = "管理員安裝完成，但仍有引擎檔案缺少。請查看診斷記錄。";
+                        await logger.WriteAsync(LogLevel.Error, engineMessage, cancellationToken);
+                    }
+                    else
+                    {
+                        engineReady = true;
+                    }
                 }
             }
-            else if (!result.IsReady)
+            else if (result.IsReady)
             {
-                viewModel.SetEngineSetupStatus(result.Message, isInProgress: false);
-                return false;
+                engineReady = true;
             }
-
-            var bonjourReady = await EnsureBonjourAsync(logger, viewModel, cancellationToken);
-            if (!bonjourReady)
+            else
             {
-                return false;
+                engineMessage = result.Message;
+                await logger.WriteAsync(LogLevel.Error, engineMessage, cancellationToken);
             }
-
-            viewModel.SetEngineSetupStatus(string.Empty, isInProgress: false);
-            await logger.WriteAsync(LogLevel.Information, "投影引擎已準備完成。", cancellationToken);
-            return true;
         }
         catch (OperationCanceledException)
         {
-            viewModel.SetEngineSetupStatus("引擎準備已取消；下次啟動時會再試一次。", isInProgress: false);
-            return false;
+            engineMessage = "引擎準備已取消；下次啟動時會再試一次。";
         }
         catch (Exception exception)
         {
-            var message = $"引擎準備失敗：{exception.Message}";
-            viewModel.SetEngineSetupStatus(message, isInProgress: false);
-            await logger.WriteAsync(LogLevel.Error, message, cancellationToken);
-            return false;
+            engineMessage = $"引擎準備失敗：{exception.Message}";
+            await logger.WriteAsync(LogLevel.Error, engineMessage, cancellationToken);
         }
-    }
 
-    private static async Task<bool> EnsureBonjourAsync(
-        IAppLogger logger,
-        MainViewModel viewModel,
-        CancellationToken cancellationToken)
-    {
-        var inspector = new BonjourServiceInspector();
-        if (inspector.GetRuntime(out _) is not null)
+        var statusMessages = new[]
         {
+            bonjourResult.IsReady ? null : bonjourResult.Message,
+            engineReady ? null : engineMessage
+        }.Where(message => !string.IsNullOrWhiteSpace(message));
+        viewModel.SetEngineSetupStatus(string.Join(Environment.NewLine, statusMessages), isInProgress: false);
+
+        if (bonjourResult.IsReady && engineReady)
+        {
+            await logger.WriteAsync(LogLevel.Information, "投影引擎已準備完成。", cancellationToken);
             return true;
         }
 
-        if (!inspector.TryGetInstalledRuntimeDirectory(out _))
+        return false;
+    }
+
+    private static void ShowMissingBonjour(string? sourceProblem)
+    {
+        var problem = string.IsNullOrWhiteSpace(sourceProblem)
+            ? "AirPlay 需要 Bonjour Service，但找不到可用的 Bonjour 安裝檔案。"
+            : sourceProblem;
+        var answer = MessageBox.Show(
+            $"{problem}\n\n{BonjourSupportUrl}\n\n要現在開啟 Apple 支援頁面嗎？Android 投影仍可使用。",
+            "需要 Bonjour",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Information);
+        if (answer == MessageBoxResult.Yes)
         {
-            var answer = MessageBox.Show(
-                $"AirPlay 需要 Bonjour Service，但這台電腦找不到可用的 Bonjour 安裝。請先依 Apple 官方說明安裝，再重新啟動 Neo AirPlay。\n\n{BonjourSupportUrl}\n\n要現在開啟 Apple 支援頁面嗎？Android 投影仍可使用。",
-                "需要 Bonjour",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Information);
-            if (answer == MessageBoxResult.Yes)
+            try
             {
                 Process.Start(new ProcessStartInfo(BonjourSupportUrl) { UseShellExecute = true });
             }
-
-            const string message = "Android 引擎已就緒；AirPlay 需要先安裝 Bonjour Service。";
-            viewModel.SetEngineSetupStatus(message, isInProgress: false);
-            await logger.WriteAsync(LogLevel.Warning, message, cancellationToken);
-            return false;
+            catch (Exception exception)
+            {
+                MessageBox.Show(
+                    $"無法開啟 Apple 支援頁面：{exception.Message}\n\n{BonjourSupportUrl}",
+                    "需要 Bonjour",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
         }
+    }
 
-        var confirmation = MessageBox.Show(
-            "AirPlay 需要將 Bonjour Service 指向受保護的 Program Files 共用目錄。這會安裝 Bonjour 元件、備份原路徑並啟動服務；Windows 接著會要求系統管理員權限。是否繼續？\n\nAndroid 投影不受影響。",
+    private static void ShowBonjourElevationReason()
+    {
+        MessageBox.Show(
+            "AirPlay 需要啟動或修復 Bonjour Service。Neo AirPlay 會使用可信任的本機 Bonjour 檔案，並將服務放在受保護的 Program Files 共用目錄。Windows 接著會顯示系統管理員權限提示。",
             "啟用 Bonjour Service",
-            MessageBoxButton.YesNo,
+            MessageBoxButton.OK,
             MessageBoxImage.Information);
-        if (confirmation != MessageBoxResult.Yes)
-        {
-            const string declinedMessage = "AirPlay 尚未啟用 Bonjour Service；Android 投影仍可使用。";
-            viewModel.SetEngineSetupStatus(declinedMessage, isInProgress: false);
-            await logger.WriteAsync(LogLevel.Information, declinedMessage, cancellationToken);
-            return false;
-        }
-
-        var exitCode = await LaunchElevatedSetupAsync(archivePath: null, configureBonjour: true, cancellationToken);
-        if (exitCode is null)
-        {
-            const string canceledMessage = "已取消 Bonjour 管理員權限要求；AirPlay 尚未啟用。";
-            viewModel.SetEngineSetupStatus(canceledMessage, isInProgress: false);
-            await logger.WriteAsync(LogLevel.Information, canceledMessage, cancellationToken);
-            return false;
-        }
-        var runtime = inspector.GetRuntime(out var problem);
-        if (exitCode != 0 || runtime is null)
-        {
-            var failure = $"Bonjour Service 啟用失敗：{problem ?? $"管理員程序結束代碼 {exitCode}"}";
-            viewModel.SetEngineSetupStatus(failure, isInProgress: false);
-            await logger.WriteAsync(LogLevel.Error, failure, cancellationToken);
-            return false;
-        }
-
-        await logger.WriteAsync(LogLevel.Information, "Bonjour Service 已啟用。", cancellationToken);
-        return true;
     }
 
     private static async Task<int?> LaunchElevatedSetupAsync(

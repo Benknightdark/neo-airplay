@@ -1,4 +1,13 @@
 {
   "ProgramFilesRelativeDirectory": "NeoAirPlay\\Bonjour",
+  "ProgramFilesRelativeSourceExecutablePaths": [
+    "Bonjour\\mDNSResponder.exe",
+    "Bonjour Print Services\\mDNSResponder.exe"
+  ],
+  "ProgramFilesX86RelativeSourceExecutablePaths": [
+    "Bonjour\\mDNSResponder.exe",
+    "Bonjour Print Services\\mDNSResponder.exe"
+  ],
+  "MissingCompatibleX64DnsSdMessage": "已找到 Bonjour Service 執行檔，但沒有找到相同版本的 x64 DNS-SD 元件（dnssd.dll）。",
   "ProgramDataRelativeBackupPath": "NeoAirPlay\\BonjourServiceBackup.json"
 }

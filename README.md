@@ -75,7 +75,7 @@ Release runner 會執行已合併的專案建置與測試程式碼。只允許�
 
 腳本會在 `.build\msys64` 安裝建置用的 MSYS2，下載 FDH2/UxPlay v1.73.7 的官方原始碼封存檔，編譯 `engine\uxplay.exe`，將執行期相依檔整理到 `engine\runtime`，並從 Genymobile 官方 GitHub staging scrcpy v4.1 Windows x64 與 ADB 至 `engine\android`。scrcpy 封存檔會先核對官方 SHA-256。這不是 Git clone，也不會下載 `leapbtw/uxplay-windows`。
 
-建置 UxPlay 需要從已安裝的可信任 Bonjour 目錄讀取 `dnssd.dll`；建置腳本不會修改或啟動 Windows 服務。App 啟動時會在使用者確認後處理 Bonjour 服務設定。
+建置 UxPlay 需要 x64 `dnssd.dll`；建置腳本會從可信任的 64 位元 Bonjour 目錄或 Windows `System32` 尋找，並核對 Bonjour 產品資訊、版本及 PE 架構。Bonjour Service 的 `mDNSResponder.exe` 可位於 `%ProgramFiles%` 或 `%ProgramFiles(x86)%`；服務執行檔與 x64 DNS-SD DLL 不必在同一目錄。建置腳本不會修改或啟動 Windows 服務。一般 App 啟動時會檢查 Bonjour Service，必要時透過 UAC 修復或啟動。
 
 若只需重新 staging Android 執行環境，可單獨執行：
 
@@ -83,13 +83,13 @@ Release runner 會執行已合併的專案建置與測試程式碼。只允許�
 .\scripts\Stage-ScrcpyRuntime.ps1
 ```
 
-需要啟用 AirPlay 時，App 會在使用者確認並通過 UAC 後，從可信任的 Windows Bonjour 安裝複製執行檔到受保護的 `%ProgramFiles%\NeoAirPlay\Bonjour`：
+需要啟用 AirPlay 時，App 會在說明操作後要求 UAC，從可信任的 Windows Bonjour 安裝複製執行檔到受保護的 `%ProgramFiles%\NeoAirPlay\Bonjour`：
 
 ```powershell
 .\scripts\Stage-BonjourRuntime.ps1
 ```
 
-若要人工執行 staging，請以系統管理員身分啟動 PowerShell。腳本只會複製 `mDNSResponder.exe` 與 `dnssd.dll` 到 `%ProgramFiles%\NeoAirPlay\Bonjour`，核對產品名稱、檔案版本和複製前後的 SHA-256；不會複製 `uxplay-windows.exe` 或其他影音檔案。建置 UxPlay 時則會直接讀取目前可信任的 Bonjour 安裝，不會修改 Windows 服務。
+若要人工執行 staging，請以系統管理員身分啟動 PowerShell。腳本會從 `%ProgramFiles%` 或 `%ProgramFiles(x86)%` 的可信任 Bonjour 安裝尋找 `mDNSResponder.exe`，再從 64 位元 Bonjour 目錄或 Windows `System32` 獨立尋找相同版本的 x64 `dnssd.dll`；兩個元件都會核對 Bonjour 產品資訊及 PE 架構，並驗證複製前後的 SHA-256，最後放入 `%ProgramFiles%\NeoAirPlay\Bonjour`。不相容或缺少 x64 DNS-SD 元件時會停止並指出原因，不會改用 SysWOW64 的 x86 DLL。腳本不會複製 `uxplay-windows.exe` 或其他影音檔案，也不會下載 Bonjour。
 
 Neo AirPlay 在 Debug 或 Release 第一次啟動時會檢查 UxPlay/GStreamer 與 scrcpy/ADB 必要檔案。缺少時，App 會在背景下載對應 App 版本的引擎套件、驗證 SHA-256 與套件檔案清單後，再安裝到 App 的 `engine` 目錄。下載失敗時主視窗仍可使用，App 會在下次啟動重試。
 
@@ -101,7 +101,7 @@ Neo AirPlay 在 Debug 或 Release 第一次啟動時會檢查 UxPlay/GStreamer �
 
 腳本會建立 `.build\neo-airplay-engine-win-x64.zip` 與 `.sha256` sidecar，並更新 App 內的引擎版本、Release 標籤和 SHA-256 設定。將 ZIP 附加至相同 `v<Version>` 標籤的 GitHub Release；目前 App 版本為 `0.1.0`，因此標籤是 `v0.1.0`。公開引擎套件不包含 Bonjour 元件。
 
-若本機已安裝 Bonjour Service，首次啟動時 App 會先說明所需的服務路徑變更，再詢問是否開啟 Windows 系統管理員權限提示。使用者確認後，App 會從可信任的系統安裝 staging 元件、備份原服務路徑，並將服務切換到受保護的 `%ProgramFiles%\NeoAirPlay\Bonjour`。資料夾僅授予系統管理員修改權限和必要的讀取權限，服務不會執行 App 可寫入目錄中的檔案。若找不到 Bonjour Service，App 會提供 Apple 官方安裝說明；不會自動下載或散布 Bonjour 二進位檔。若拒絕權限要求，AirPlay 暫不可用，Android 投影仍可使用。
+一般啟動時，App 會確認 Bonjour Service 正在執行且指向受保護的 `%ProgramFiles%\NeoAirPlay\Bonjour`。若服務停止、路徑不符或服務項目不存在，App 會從 `%ProgramFiles%` 或 `%ProgramFiles(x86)%` 尋找 Bonjour `mDNSResponder.exe`，再從受信任的 64 位元 Bonjour 目錄或 Windows `System32` 尋找產品資訊與版本相符的 x64 `dnssd.dll`。因此既有 x86 Service 可搭配獨立安裝的 x64 DNS-SD DLL。兩個元件通過架構、產品、版本與來源路徑檢查後，App 會簡短說明並顯示 UAC；核准後將元件 staging 至受保護目錄，再啟動或建立服務。若找到服務執行檔但沒有相符的 x64 DNS-SD 元件，App 會明確指出缺少元件並提供 Apple 官方安裝資訊。既有服務的原始路徑會備份，服務項目原先不存在時也會記錄此狀態，供還原腳本移除新建服務。若舊備份無效，App 只會在目前服務路徑可信任或服務目前不存在時依現況更新備份；目前服務路徑不可信時會停止修改服務。資料夾僅授予系統管理員修改權限和必要的讀取權限，服務不會執行 App 可寫入目錄中的檔案；不會自動下載或散布 Bonjour 二進位檔。取消 UAC 或服務在 Windows 中被停用時，AirPlay 暫不可用，Android 投影仍可使用。
 
 將 Windows Bonjour Service 切換到 Neo AirPlay 的受保護共用路徑需要系統管理員權限：
 
@@ -109,11 +109,13 @@ Neo AirPlay 在 Debug 或 Release 第一次啟動時會檢查 UxPlay/GStreamer �
 .\scripts\Install-BonjourService.ps1
 ```
 
-腳本先備份服務原始 `ImagePath` 至 `%ProgramData%\NeoAirPlay\BonjourServiceBackup.json`，再停止服務、切換至 `%ProgramFiles%\NeoAirPlay\Bonjour\mDNSResponder.exe` 並重新啟動。要還原時，以系統管理員身分執行：
+腳本先備份原服務狀態至 `%ProgramData%\NeoAirPlay\BonjourServiceBackup.json`，再將既有服務切換至 `%ProgramFiles%\NeoAirPlay\Bonjour\mDNSResponder.exe` 並重新啟動；若服務原本不存在，會從 staging 執行檔建立並啟動。要還原時，以系統管理員身分執行：
 
 ```powershell
 .\scripts\Restore-BonjourService.ps1
 ```
+
+若備份記錄服務原先不存在，還原腳本只會在服務路徑仍指向 Neo AirPlay 共用執行檔時移除該服務；受保護目錄中的 Bonjour 檔案會保留，讓 App 下次啟動可重試。服務備份存於 `%ProgramData%\NeoAirPlay`，一般使用者只有讀取權限。
 
 最後建置可發佈版本：
 

@@ -5,8 +5,9 @@
 ## 權限與系統服務
 
 - README 說明 Install-BonjourService.ps1 與 Restore-BonjourService.ps1 需要系統管理員權限。
-- 安裝流程只接受 64 位元 Program Files 中的有效 Bonjour 原始安裝，備份 Bonjour Service 原始 ImagePath，再切換到 `%ProgramFiles%\NeoAirPlay\Bonjour`。安裝腳本重設該目錄 ACL、將擁有者設為 Administrators，並移除標準使用者的寫入權限，以免服務執行可寫入 App 目錄中的檔案。執行前應先閱讀腳本；需要還原時依 README 使用還原腳本。
-- App 首次啟動若需切換 Bonjour Service，會先向使用者說明服務路徑變更和備份行為，再透過 UAC 啟動 elevated helper；拒絕或取消時不執行服務腳本。
+- 安裝流程可從 64 位元或 32 位元 Program Files 讀取 Bonjour `mDNSResponder.exe`，並只從 64 位元 Program Files 或 Windows System32 讀取 x64 `dnssd.dll`。兩者都檢查 PE 架構、Bonjour 產品資訊與相同 FileVersion，再 staging 到 `%ProgramFiles%\NeoAirPlay\Bonjour`；不接受 SysWOW64/x86 DLL，也不讀取 App 可寫入路徑。既有服務會備份原始 ImagePath 與執行狀態；服務原先不存在時備份會標示未安裝，安裝透過 Bonjour 執行檔的 `-install` 建立服務。若舊備份無效，只有在目前服務路徑可信任或服務不存在時才依現況更新備份；目前服務路徑不可信時停止安裝。安裝腳本重設共用目錄 ACL、將擁有者設為 Administrators，並移除標準使用者的寫入權限。
+- 一般啟動若服務停止、路徑不符或缺少服務項目，App 會說明操作後透過 UAC 啟動 elevated helper；拒絕或取消時不執行服務腳本。若服務在 Windows 中被停用，App 不會改變該設定。
+- 還原腳本依備份的服務存在狀態，將既有服務路徑還原，或移除 Neo AirPlay 建立的服務；Bonjour 執行檔不會加入公開套件。
 - Harness 驗證入口不會執行這些服務管理腳本。
 
 ## 網路與外部程序

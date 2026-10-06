@@ -1,4 +1,4 @@
-#Requires -RunAsAdministrator
+﻿#Requires -RunAsAdministrator
 [CmdletBinding()]
 param()
 
@@ -10,11 +10,7 @@ if (-not (Test-Path -LiteralPath $bonjourHelpers -PathType Leaf)) {
 Import-Module -Name $bonjourHelpers -Force -ErrorAction Stop
 $destinationDirectory = Get-BonjourRuntimeDirectory
 $service = Get-CimInstance Win32_Service -Filter "Name='Bonjour Service'"
-if (-not $service) {
-    throw '找不到 Windows 的 Bonjour Service。請先安裝 Bonjour，再重新啟動 Neo AirPlay。'
-}
-
-$currentImagePath = [string]$service.PathName
+$currentImagePath = if ($service) { [string]$service.PathName } else { $null }
 $currentExecutable = Resolve-ServiceExecutablePath $currentImagePath
 $managedExecutable = Join-Path $destinationDirectory 'mDNSResponder.exe'
 $currentIsManagedTarget = $false
@@ -41,32 +37,41 @@ else {
         }
     }
 
-    if ([string]::IsNullOrWhiteSpace($sourceImagePath) -and
-        (Test-TrustedBonjourExecutablePath $currentImagePath)) {
+    if (-not [string]::IsNullOrWhiteSpace($sourceImagePath) -and
+        -not (Test-TrustedBonjourExecutablePath $sourceImagePath)) {
+        $sourceImagePath = $null
+    }
+
+    if ([string]::IsNullOrWhiteSpace($sourceImagePath) -and (Test-TrustedBonjourExecutablePath $currentImagePath)) {
         $sourceImagePath = $currentImagePath
+    }
+
+    if ([string]::IsNullOrWhiteSpace($sourceImagePath)) {
+        $sourceCandidates = @($managedExecutable) + @(Get-BonjourSourceExecutablePaths)
+        $sourceImagePath = $sourceCandidates | Where-Object { Test-TrustedBonjourExecutablePath $_ } | Select-Object -First 1
     }
 }
 
 if ([string]::IsNullOrWhiteSpace($sourceImagePath)) {
-    throw '找不到可信任且可用的 Bonjour 原始安裝檔案。請在 Program Files 安裝 Bonjour，再重新啟動 Neo AirPlay。'
+    throw '找不到可信任且可用的 Bonjour 原始安裝檔案。請依 Apple 官方說明安裝 Bonjour，再重新啟動 Neo AirPlay。'
 }
 $sourceExecutable = Resolve-ServiceExecutablePath $sourceImagePath
+$sourceDnsSd = Get-CompatibleBonjourDnsSdPath -ResponderPath $sourceExecutable
+if ([string]::IsNullOrWhiteSpace($sourceDnsSd)) {
+    throw (Get-BonjourMissingCompatibleX64DnsSdMessage)
+}
+if (-not (Test-UsableBonjourRuntimePair -ResponderPath $sourceExecutable -DnsSdPath $sourceDnsSd)) {
+    throw 'Bonjour Service 執行檔與 x64 DNS-SD 元件未通過產品資訊、版本、架構或信任路徑檢查。'
+}
 
-$sourceDirectory = Split-Path -Parent $sourceExecutable
-$sourceFiles = @('mDNSResponder.exe', 'dnssd.dll') | ForEach-Object {
-    $path = Join-Path $sourceDirectory $_
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        throw "Bonjour 執行檔目錄缺少必要檔案：$path"
-    }
-
-    $item = Get-Item -LiteralPath $path
-    if ($item.VersionInfo.ProductName -ne 'Bonjour') {
-        throw "拒絕複製非 Bonjour 元件：$path"
-    }
-
+$sourceFiles = @(
+    [pscustomobject]@{ Source = $sourceExecutable; Name = 'mDNSResponder.exe' }
+    [pscustomobject]@{ Source = $sourceDnsSd; Name = 'dnssd.dll' }
+) | ForEach-Object {
+    $item = Get-Item -LiteralPath $_.Source
     [pscustomobject]@{
-        Source = $path
-        Name = $_
+        Source = $_.Source
+        Name = $_.Name
         Version = $item.VersionInfo.FileVersion
         Product = $item.VersionInfo.ProductName
     }

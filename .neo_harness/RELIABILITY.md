@@ -9,7 +9,8 @@
 - 引擎使用非同步生命週期鎖避免啟停操作重疊。若程序已在執行，重複啟動要求會直接返回。
 - App 顯示主視窗後背景檢查 AirPlay 與 Android 引擎檔案；缺少時下載固定版本套件並驗證後安裝。下載或安裝失敗會顯示在總覽及記錄，不會關閉 App，且下次啟動會再檢查。
 - 引擎準備期間停用啟動 AirPlay、刷新 Android 裝置及啟動 Android 投影命令。E2E profile 會略過引擎準備。
-- Bonjour Service 尚未指向受保護的 `%ProgramFiles%\NeoAirPlay\Bonjour` 時，App 說明服務變更並在使用者確認後要求 UAC；若 Bonjour 不存在，AirPlay 顯示需要人工安裝，Android 仍可用。
+- 一般 App 啟動時，Bonjour 檢查先於引擎套件準備，因此引擎下載失敗不會略過服務處理。服務停止、路徑不符或項目不存在時，App 分別從可信任 Program Files / Program Files (x86) 尋找 Bonjour responder，以及從 64 位元 Program Files / Windows System32 尋找相同版本的 x64 DNS-SD DLL；通過檢查後顯示簡短原因並要求 UAC，成功後重新檢查服務狀態。
+- 找不到 responder 時，App 提供 Bonjour 安裝資訊；若找到 responder 但缺少同版本 x64 DLL，會明確指出缺少的 DNS-SD 元件。UAC 取消、服務停用或安裝失敗時，AirPlay 不啟動，Android 仍可用。E2E profile 不執行 Windows 服務操作；`--start` 會等 Bonjour 與引擎都就緒才啟動 AirPlay。
 
 ## 停止與意外結束
 
@@ -32,7 +33,7 @@
 
 - 接收器引擎狀態、啟動失敗原因與子程序輸出可由應用程式診斷頁及記錄檔查看。完整記錄位置為 `%LocalAppData%\NeoAirPlay\Logs\`；介面保留最近 300 筆。
 - 若狀態顯示缺少元件，先依 README.md 檢查建置與 Bonjour staging 步驟，不要在 Harness 驗證中自動執行建置環境或系統服務安裝腳本。
-- README 記錄 Bonjour Service 安裝與還原命令；服務切換需要系統管理員權限，操作前後應確認服務路徑。
+- README 記錄 Bonjour Service 安裝與還原命令；服務建立或路徑切換需要系統管理員權限，操作前後應確認服務狀態與路徑。有效備份可還原原路徑，或在服務原先不存在時移除新建服務；舊備份無效時只在目前服務路徑可信任或服務不存在的情況下依現況更新，否則停止安裝。
 
 ## 驗證界線
 

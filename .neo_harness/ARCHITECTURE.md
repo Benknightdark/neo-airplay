@@ -31,10 +31,10 @@
 - `ScrcpyAndroidMirrorEngine` 以隨附的 ADB 執行 `devices -l`，將 `device`、`unauthorized`、`offline` 分別呈現給使用者，再以獨立程序啟動 `engine/android/scrcpy.exe --serial <序號>`。USB 裝置與已透過 ADB 配對的 TCP/IP 裝置共用此流程。
 - App 建立兩個獨立引擎與狀態，Android 啟停不會停止 AirPlay；關閉 App 時兩個程序都會停止。
 - App 在主視窗顯示後背景檢查引擎檔案；缺件時從版本固定的 GitHub Release 下載套件，驗證外層 SHA-256、內部逐檔 SHA-256 和安全路徑後才安裝。準備期間會暫停啟動／刷新命令；失敗時記錄狀態並於下次 App 啟動重試。E2E profile 不執行下載或管理員操作。
-- 若 Bonjour Service 已存在但尚未指向受保護的 `%ProgramFiles%\NeoAirPlay\Bonjour`，App 先顯示服務變更說明，再透過 Windows UAC 啟動 elevated helper 執行 Bonjour staging 與安裝腳本；安裝腳本重設目錄 ACL，限制修改者為 Administrators，並授予必要的讀取權。若本機沒有 Bonjour，顯示人工安裝資訊，Android 不受影響。
+- 一般 App 啟動會檢查 Bonjour Service 是否正在執行且指向受保護的 `%ProgramFiles%\NeoAirPlay\Bonjour`。若服務停止、路徑不符或服務項目不存在，App 可從 Program Files 或 Program Files (x86) 尋找可信任 Bonjour `mDNSResponder.exe`，再從 64 位元 Program Files Bonjour 目錄或 Windows System32 獨立尋找同版本 x64 `dnssd.dll`；兩者都核對產品資訊，並以 PE Machine 欄位檢查架構。通過檢查後 App 顯示簡短說明並透過 UAC 執行 staging 與安裝腳本；缺少服務時使用 Bonjour 執行檔的 `-install` 建立並啟動服務。安裝腳本重設目錄 ACL，限制修改者為 Administrators，並授予必要的讀取權。若找不到 responder 或相符 x64 DNS-SD DLL，顯示對應原因和 Apple 官方安裝資訊；Android 不受影響。
 - 使用者設定存於 `%AppData%\NeoAirPlay\settings.json`；完整記錄存於 `%LocalAppData%\NeoAirPlay\Logs\`；影音執行環境登錄快取存於 `%LocalAppData%\NeoAirPlay\gstreamer-registry.bin`。
 - `--e2e-profile <path>` 只供 App UI E2E 測試使用，將設定、記錄、GStreamer 快取及單一執行個體 Mutex 導向測試暫存 profile。正常啟動仍使用既有使用者資料位置與 Mutex。
-- `scripts/build-engine.ps1` 會準備建置環境並產生引擎檔案；`scripts/Pack-EngineRuntime.ps1` 產生不含 Bonjour 的 Release 引擎包與 App SHA 設定。Bonjour staging、安裝與還原腳本可由人工執行；App 也會在使用者確認並通過 UAC 後呼叫 staging／安裝腳本。
+- `scripts/build-engine.ps1` 會準備建置環境並從可信任的 x64 Bonjour 目錄或 System32 讀取 x64 `dnssd.dll`；responder 可來自 x86 Bonjour 安裝。`scripts/Pack-EngineRuntime.ps1` 產生不含 Bonjour 的 Release 引擎包與 App SHA 設定。Bonjour staging、安裝與還原腳本可由人工執行；App 會在簡短說明及 UAC 核准後呼叫 staging／安裝腳本。備份會記錄 Bonjour Service 原先是否存在，還原時可恢復路徑或移除新建服務。
 
 ## 驗證界線
 

@@ -149,7 +149,10 @@ if (-not (Test-TrustedBonjourExecutablePath $bonjourSourceImagePath)) {
 
 $bonjourSourceExecutable = Resolve-ServiceExecutablePath $bonjourSourceImagePath
 $bonjourDirectory = Split-Path -Parent $bonjourSourceExecutable
-$bonjourDll = Join-Path $bonjourDirectory 'dnssd.dll'
+$bonjourDll = Get-CompatibleBonjourDnsSdPath -ResponderPath $bonjourSourceExecutable
+if ([string]::IsNullOrWhiteSpace($bonjourDll)) {
+    throw '建置 UxPlay 找不到與 Bonjour Service 版本相符的可信任 x64 DNS-SD 元件（dnssd.dll）。'
+}
 $bonjourSdk = Join-Path $buildRoot 'bonjour-sdk'
 $bonjourInclude = Join-Path $bonjourSdk 'Include'
 $bonjourLibDirectory = Join-Path $bonjourSdk 'Lib\x64'
