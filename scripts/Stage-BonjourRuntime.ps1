@@ -1,41 +1,77 @@
+﻿#Requires -RunAsAdministrator
 [CmdletBinding()]
 param()
 
 $ErrorActionPreference = 'Stop'
-$projectRoot = Split-Path -Parent $PSScriptRoot
-$destinationDirectory = Join-Path $projectRoot 'engine\bonjour'
+$bonjourHelpers = Join-Path $PSScriptRoot 'BonjourRuntimeHelpers.psm1'
+if (-not (Test-Path -LiteralPath $bonjourHelpers -PathType Leaf)) {
+    throw "找不到 Bonjour 執行元件輔助模組：$bonjourHelpers"
+}
+Import-Module -Name $bonjourHelpers -Force -ErrorAction Stop
+$destinationDirectory = Get-BonjourRuntimeDirectory
 $service = Get-CimInstance Win32_Service -Filter "Name='Bonjour Service'"
-if (-not $service) {
-    throw '找不到 Windows 的 Bonjour Service。請先安裝 Bonjour，或手動將 mDNSResponder.exe 與 dnssd.dll 放入 engine\bonjour。'
+$currentImagePath = if ($service) { [string]$service.PathName } else { $null }
+$currentExecutable = Resolve-ServiceExecutablePath $currentImagePath
+$managedExecutable = Join-Path $destinationDirectory 'mDNSResponder.exe'
+$currentIsManagedTarget = $false
+if (-not [string]::IsNullOrWhiteSpace($currentExecutable)) {
+    $currentIsManagedTarget = [IO.Path]::GetFullPath($currentExecutable) -ieq [IO.Path]::GetFullPath($managedExecutable)
 }
 
-$imagePath = $service.PathName.Trim()
-if ($imagePath.StartsWith('"')) {
-    $endQuote = $imagePath.IndexOf('"', 1)
-    if ($endQuote -lt 2) { throw "無法解析 Bonjour Service 路徑：$imagePath" }
-    $sourceExecutable = $imagePath.Substring(1, $endQuote - 1)
+$sourceImagePath = $null
+if ($currentIsManagedTarget -and (Test-TrustedBonjourExecutablePath $currentImagePath)) {
+    $sourceImagePath = $currentImagePath
 }
 else {
-    $match = [regex]::Match($imagePath, '^.+?\.exe', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-    if (-not $match.Success) { throw "無法解析 Bonjour Service 路徑：$imagePath" }
-    $sourceExecutable = $match.Value
+    $backupPath = Get-BonjourServiceBackupPath
+    if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+        try {
+            $backup = Get-Content -LiteralPath $backupPath -Raw | ConvertFrom-Json
+            if (($backup.ServiceName -eq 'Bonjour Service') -and
+                (Test-TrustedBonjourExecutablePath $backup.OriginalImagePath)) {
+                $sourceImagePath = [string]$backup.OriginalImagePath
+            }
+        }
+        catch {
+            $sourceImagePath = $null
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($sourceImagePath) -and
+        -not (Test-TrustedBonjourExecutablePath $sourceImagePath)) {
+        $sourceImagePath = $null
+    }
+
+    if ([string]::IsNullOrWhiteSpace($sourceImagePath) -and (Test-TrustedBonjourExecutablePath $currentImagePath)) {
+        $sourceImagePath = $currentImagePath
+    }
+
+    if ([string]::IsNullOrWhiteSpace($sourceImagePath)) {
+        $sourceCandidates = @($managedExecutable) + @(Get-BonjourSourceExecutablePaths)
+        $sourceImagePath = $sourceCandidates | Where-Object { Test-TrustedBonjourExecutablePath $_ } | Select-Object -First 1
+    }
 }
 
-$sourceDirectory = Split-Path -Parent $sourceExecutable
-$sourceFiles = @('mDNSResponder.exe', 'dnssd.dll') | ForEach-Object {
-    $path = Join-Path $sourceDirectory $_
-    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-        throw "Bonjour 執行檔目錄缺少必要檔案：$path"
-    }
+if ([string]::IsNullOrWhiteSpace($sourceImagePath)) {
+    throw '找不到可信任且可用的 Bonjour 原始安裝檔案。請依 Apple 官方說明安裝 Bonjour，再重新啟動 Neo AirPlay。'
+}
+$sourceExecutable = Resolve-ServiceExecutablePath $sourceImagePath
+$sourceDnsSd = Get-CompatibleBonjourDnsSdPath -ResponderPath $sourceExecutable
+if ([string]::IsNullOrWhiteSpace($sourceDnsSd)) {
+    throw (Get-BonjourMissingCompatibleX64DnsSdMessage)
+}
+if (-not (Test-UsableBonjourRuntimePair -ResponderPath $sourceExecutable -DnsSdPath $sourceDnsSd)) {
+    throw 'Bonjour Service 執行檔與 x64 DNS-SD 元件未通過產品資訊、版本、架構或信任路徑檢查。'
+}
 
-    $item = Get-Item -LiteralPath $path
-    if ($item.VersionInfo.ProductName -ne 'Bonjour') {
-        throw "拒絕複製非 Bonjour 元件：$path"
-    }
-
+$sourceFiles = @(
+    [pscustomobject]@{ Source = $sourceExecutable; Name = 'mDNSResponder.exe' }
+    [pscustomobject]@{ Source = $sourceDnsSd; Name = 'dnssd.dll' }
+) | ForEach-Object {
+    $item = Get-Item -LiteralPath $_.Source
     [pscustomobject]@{
-        Source = $path
-        Name = $_
+        Source = $_.Source
+        Name = $_.Name
         Version = $item.VersionInfo.FileVersion
         Product = $item.VersionInfo.ProductName
     }
@@ -51,6 +87,12 @@ foreach ($file in $sourceFiles) {
     $destination = Join-Path $destinationDirectory $file.Name
     if ([IO.Path]::GetFullPath($file.Source) -ine [IO.Path]::GetFullPath($destination)) {
         Copy-Item -LiteralPath $file.Source -Destination $destination -Force
+    }
+
+    $sourceHash = (Get-FileHash -LiteralPath $file.Source -Algorithm SHA256).Hash
+    $destinationHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+    if (-not [string]::Equals($sourceHash, $destinationHash, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Bonjour 元件複製後 SHA-256 不符：$destination"
     }
 }
 

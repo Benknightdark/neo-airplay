@@ -1,0 +1,152 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - src/NeoAirPlay.App/NeoAirPlay.App.csproj
+      - src/NeoAirPlay.App/engine-package.json
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on:
+      - self-hosted
+      - windows
+      - x64
+      - neo-airplay-release
+    timeout-minutes: 360
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build and run Unit tests
+        shell: pwsh
+        run: .\.neo_harness\verify.ps1
+
+      - name: Resolve the release version
+        id: release
+        shell: pwsh
+        env:
+          RELEASE_SOURCE_SHA: ${{ github.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git fetch origin main --tags
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Could not fetch main and release tags.'
+          }
+
+          $sourceSha = $env:RELEASE_SOURCE_SHA
+          $releaseCommit = (git log origin/main --format=%H --grep="Release-For: $sourceSha" -1).Trim()
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Could not look up an existing release metadata commit.'
+          }
+
+          if ($releaseCommit) {
+              $versionXml = git show "${releaseCommit}:src/NeoAirPlay.App/NeoAirPlay.App.csproj" | Out-String
+              if ($LASTEXITCODE -ne 0) {
+                  throw 'Could not read the existing release version.'
+              }
+              $version = [string]([xml]$versionXml).Project.PropertyGroup.Version
+              & .\scripts\Set-AppVersion.ps1 -Version $version | Out-Null
+          }
+          else {
+              $projectVersion = [version]([string]([xml](Get-Content .\src\NeoAirPlay.App\NeoAirPlay.App.csproj -Raw)).Project.PropertyGroup.Version)
+              $baseVersion = $projectVersion
+              $releaseTags = @(git tag --list 'v*')
+              if ($LASTEXITCODE -ne 0) {
+                  throw 'Could not list existing release tags.'
+              }
+              foreach ($releaseTag in $releaseTags) {
+                  if ($releaseTag -match '^v(?<version>(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))$') {
+                      $tagVersion = [version]$Matches.version
+                      if ($tagVersion -gt $baseVersion) {
+                          $baseVersion = $tagVersion
+                      }
+                  }
+              }
+              if ($baseVersion.Revision -ne -1 -or $baseVersion.Build -eq [int]::MaxValue) {
+                  throw "App patch 版本已達上限：$baseVersion"
+              }
+              $version = '{0}.{1}.{2}' -f $baseVersion.Major, $baseVersion.Minor, ($baseVersion.Build + 1)
+              & .\scripts\Set-AppVersion.ps1 -Version $version | Out-Null
+          }
+
+          $tag = "v$version"
+          $apiUri = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
+          $apiResponse = Invoke-WebRequest -Uri $apiUri -Headers @{ Accept = 'application/vnd.github+json'; Authorization = "Bearer $env:GITHUB_TOKEN"; 'User-Agent' = 'NeoAirPlay-Release' } -SkipHttpErrorCheck
+          $alreadyPublished = 'false'
+          if ($apiResponse.StatusCode -eq 200) {
+              $releaseInfo = $apiResponse.Content | ConvertFrom-Json
+              if (-not $releaseInfo.draft) {
+                  $alreadyPublished = 'true'
+                  Write-Host "GitHub Release $tag is already published; skipping duplicate release work."
+              }
+          }
+          elseif ($apiResponse.StatusCode -ne 404) {
+              throw "GitHub Release lookup returned HTTP $($apiResponse.StatusCode)."
+          }
+
+          if ($releaseCommit -and $alreadyPublished -ne 'true') {
+              $mainVersionXml = git show 'origin/main:src/NeoAirPlay.App/NeoAirPlay.App.csproj' | Out-String
+              if ($LASTEXITCODE -ne 0) {
+                  throw 'Could not read the current main App version.'
+              }
+              $mainVersion = [string]([xml]$mainVersionXml).Project.PropertyGroup.Version
+              if ([version]$mainVersion -gt [version]$version) {
+                  throw "Release $tag is incomplete but main has advanced to $mainVersion; stop to avoid replacing newer engine metadata."
+              }
+          }
+
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "already-published=$alreadyPublished" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Build engine and complete portable Release package
+        if: steps.release.outputs.already-published != 'true'
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: .\scripts\Build-ReleasePackage.ps1 -Version $env:RELEASE_VERSION
+
+      - name: Create GitHub App token
+        if: steps.release.outputs.already-published != 'true'
+        id: app-token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: neo-airplay
+
+      - name: Check out with the release App token
+        if: steps.release.outputs.already-published != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+          clean: false
+
+      - name: Commit version metadata and publish GitHub Release
+        if: steps.release.outputs.already-published != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_SOURCE_SHA: ${{ github.sha }}
+          RELEASE_ASSETS_DIRECTORY: ${{ github.workspace }}\.build\release-assets\${{ steps.release.outputs.version }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: .\scripts\Publish-GitHubRelease.ps1 -Version $env:RELEASE_VERSION -SourceSha $env:RELEASE_SOURCE_SHA -AssetsDirectory $env:RELEASE_ASSETS_DIRECTORY -Repository $env:GH_REPOSITORY

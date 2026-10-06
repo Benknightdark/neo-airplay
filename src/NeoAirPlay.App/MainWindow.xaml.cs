@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Drawing;
+using System.Reflection;
 using System.Windows;
 using Application = System.Windows.Application;
 using Forms = System.Windows.Forms;
@@ -21,6 +22,7 @@ public partial class MainWindow : Window
         _closeOnWindowClose = closeOnWindowClose;
         DataContext = viewModel;
         InitializeComponent();
+        Title = $"Neo AirPlay ({GetApplicationVersion()})";
 
         var trayMenu = new Forms.ContextMenuStrip();
         var openItem = new Forms.ToolStripMenuItem("開啟 Neo AirPlay");
@@ -41,7 +43,7 @@ public partial class MainWindow : Window
         _trayIcon = new Forms.NotifyIcon
         {
             Icon = SystemIcons.Application,
-            Text = "Neo AirPlay",
+            Text = Title,
             ContextMenuStrip = trayMenu,
             Visible = true
         };
@@ -60,6 +62,20 @@ public partial class MainWindow : Window
     }
 
     public void HideToTray() => Hide();
+
+    private static string GetApplicationVersion()
+    {
+        var informationalVersion = typeof(MainWindow).Assembly
+            .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()?
+            .InformationalVersion;
+        if (!string.IsNullOrWhiteSpace(informationalVersion))
+        {
+            return informationalVersion.Split('+', 2, StringSplitOptions.None)[0];
+        }
+
+        var assemblyVersion = typeof(MainWindow).Assembly.GetName().Version;
+        return assemblyVersion?.ToString(3) ?? "unknown";
+    }
 
     private void ShowFromTray()
     {
@@ -84,7 +100,7 @@ public partial class MainWindow : Window
         _exitInProgress = true;
         try
         {
-            await _viewModel.StopReceiverAsync();
+            await _viewModel.StopAllReceiversAsync();
         }
         catch (Exception)
         {
@@ -92,9 +108,12 @@ public partial class MainWindow : Window
         }
         finally
         {
-            _allowClose = true;
-            Close();
-            Application.Current.Shutdown();
+            _ = Dispatcher.BeginInvoke(new Action(() =>
+            {
+                _allowClose = true;
+                Close();
+                Application.Current.Shutdown();
+            }));
         }
     }
 

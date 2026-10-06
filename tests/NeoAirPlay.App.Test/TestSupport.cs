@@ -89,3 +89,45 @@ internal sealed class FakeReceiverEngine : IReceiverEngine
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
+
+internal sealed class FakeAndroidMirrorEngine : IAndroidMirrorEngine
+{
+    public ReceiverState State { get; private set; } = ReceiverState.Stopped;
+    public string StatusMessage { get; private set; } = "請連接 Android 裝置後重新整理清單。";
+    public IReadOnlyList<AndroidDevice> Devices { get; private set; } = Array.Empty<AndroidDevice>();
+    public IReadOnlyList<AndroidDevice> AvailableDevices { get; set; } = Array.Empty<AndroidDevice>();
+    public List<string> StartedSerials { get; } = [];
+    public int StopCount { get; private set; }
+    public event EventHandler? StatusChanged;
+
+    public Task<IReadOnlyList<AndroidDevice>> RefreshDevicesAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Devices = AvailableDevices;
+        StatusMessage = Devices.Count == 0 ? "目前沒有可投影的 Android 裝置。" : $"找到 {Devices.Count} 台 Android 裝置。";
+        StatusChanged?.Invoke(this, EventArgs.Empty);
+        return Task.FromResult(Devices);
+    }
+
+    public Task StartAsync(string deviceSerial, bool fullscreen = false, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        StartedSerials.Add(deviceSerial);
+        State = ReceiverState.Running;
+        StatusMessage = $"正在投影 Android 裝置「{deviceSerial}」。";
+        StatusChanged?.Invoke(this, EventArgs.Empty);
+        return Task.CompletedTask;
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        StopCount++;
+        State = ReceiverState.Stopped;
+        StatusMessage = "Android 投影已停止。";
+        StatusChanged?.Invoke(this, EventArgs.Empty);
+        return Task.CompletedTask;
+    }
+
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+}

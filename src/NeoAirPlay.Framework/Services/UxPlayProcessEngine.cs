@@ -83,7 +83,7 @@ public sealed class UxPlayProcessEngine : IReceiverEngine, IDisposable
                 return;
             }
 
-            var bonjour = _bonjourInspector.GetProjectRuntime(engineDirectory, out var problem);
+            var bonjour = _bonjourInspector.GetRuntime(out var problem);
             if (bonjour is null)
             {
                 var message = problem ?? "Bonjour Service 不可用。";

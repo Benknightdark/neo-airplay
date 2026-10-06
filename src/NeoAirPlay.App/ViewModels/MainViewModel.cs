@@ -15,6 +15,7 @@ namespace NeoAirPlay.ViewModels;
 public sealed class MainViewModel : INotifyPropertyChanged
 {
     private readonly IReceiverEngine _engine;
+    private readonly IAndroidMirrorEngine _androidEngine;
     private readonly IAppLogger _logger;
     private readonly ISettingsStore _settingsStore;
     private readonly IStartupRegistration _startupRegistration;
@@ -27,23 +28,32 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private bool _startOnLogin;
     private bool _settingsDirty;
     private bool _settingsApplyPending;
+    private ReceiverState _androidState;
+    private string _androidStatusMessage;
+    private string _engineSetupStatus = string.Empty;
+    private bool _isEnginePreparationInProgress;
+    private AndroidDevice? _selectedAndroidDevice;
     private string _currentPage = "Home";
     private string _alertMessage = string.Empty;
 
     public MainViewModel(
         IReceiverEngine engine,
+        IAndroidMirrorEngine androidEngine,
         IAppLogger logger,
         ISettingsStore settingsStore,
         IStartupRegistration startupRegistration,
         ReceiverSettings settings)
     {
         _engine = engine;
+        _androidEngine = androidEngine;
         _logger = logger;
         _settingsStore = settingsStore;
         _startupRegistration = startupRegistration;
         _savedSettings = settings;
         _state = engine.State;
         _statusMessage = engine.StatusMessage;
+        _androidState = androidEngine.State;
+        _androidStatusMessage = androidEngine.StatusMessage;
         _receiverName = settings.ReceiverName;
         _selectedRenderer = settings.Renderer;
         _fullscreen = settings.Fullscreen;
@@ -54,6 +64,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         StopCommand = new AsyncRelayCommand(StopReceiverAsync, CanStop);
         SaveSettingsCommand = new AsyncRelayCommand(SaveSettingsAsync, () => SettingsDirty);
         ApplySettingsCommand = new AsyncRelayCommand(ApplyPendingSettingsAsync, CanApplySettings);
+        RefreshAndroidDevicesCommand = new AsyncRelayCommand(RefreshAndroidDevicesAsync, CanRefreshAndroidDevices);
+        StartAndroidMirrorCommand = new AsyncRelayCommand(StartAndroidMirrorAsync, CanStartAndroidMirror);
+        StopAndroidMirrorCommand = new AsyncRelayCommand(StopAndroidMirrorAsync, CanStopAndroidMirror);
         NavigateCommand = new RelayCommand(parameter =>
         {
             if (parameter is string page && page is "Home" or "Settings" or "Diagnostics")
@@ -71,8 +84,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
         Subscribe(StopCommand);
         Subscribe(SaveSettingsCommand);
         Subscribe(ApplySettingsCommand);
+        Subscribe(RefreshAndroidDevicesCommand);
+        Subscribe(StartAndroidMirrorCommand);
+        Subscribe(StopAndroidMirrorCommand);
 
         _engine.StatusChanged += OnEngineStatusChanged;
+        _androidEngine.StatusChanged += OnAndroidEngineStatusChanged;
         _logger.EntryWritten += OnLogEntryWritten;
         _ = _logger.WriteAsync(LogLevel.Information, "Neo AirPlay 已啟動。");
     }
@@ -81,10 +98,19 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public event EventHandler? ExitRequested;
     public event EventHandler? MinimizeRequested;
 
+    internal void SetEngineSetupStatus(string? message, bool isInProgress = false)
+    {
+        EngineSetupStatus = message ?? string.Empty;
+        IsEnginePreparationInProgress = isInProgress;
+    }
+
     public AsyncRelayCommand StartCommand { get; }
     public AsyncRelayCommand StopCommand { get; }
     public AsyncRelayCommand SaveSettingsCommand { get; }
     public AsyncRelayCommand ApplySettingsCommand { get; }
+    public AsyncRelayCommand RefreshAndroidDevicesCommand { get; }
+    public AsyncRelayCommand StartAndroidMirrorCommand { get; }
+    public AsyncRelayCommand StopAndroidMirrorCommand { get; }
     public RelayCommand NavigateCommand { get; }
     public RelayCommand CopyReceiverNameCommand { get; }
     public RelayCommand OpenLogsCommand { get; }
@@ -92,6 +118,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public RelayCommand MinimizeCommand { get; }
     public RelayCommand DismissAlertCommand { get; }
     public ObservableCollection<AppLogEntry> Logs { get; } = [];
+    public ObservableCollection<AndroidDevice> AndroidDevices { get; } = [];
     public IReadOnlyList<string> RendererOptions { get; }
 
     public ReceiverState State
@@ -226,6 +253,87 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool IsReceiverRunning => State == ReceiverState.Running;
     public bool IsReceiverStopped => State is ReceiverState.Stopped or ReceiverState.Faulted or ReceiverState.DependencyMissing;
 
+    public ReceiverState AndroidState
+    {
+        get => _androidState;
+        private set
+        {
+            if (SetProperty(ref _androidState, value))
+            {
+                OnPropertyChanged(nameof(AndroidStateLabel));
+                OnPropertyChanged(nameof(AndroidStateAccent));
+                OnPropertyChanged(nameof(IsAndroidMirrorRunning));
+                OnPropertyChanged(nameof(IsAndroidMirrorStopped));
+                NotifyAndroidCommands();
+            }
+        }
+    }
+
+    public string AndroidStatusMessage
+    {
+        get => _androidStatusMessage;
+        private set => SetProperty(ref _androidStatusMessage, value);
+    }
+
+    public string EngineSetupStatus
+    {
+        get => _engineSetupStatus;
+        private set
+        {
+            if (SetProperty(ref _engineSetupStatus, value))
+            {
+                OnPropertyChanged(nameof(HasEngineSetupStatus));
+            }
+        }
+    }
+
+    public bool HasEngineSetupStatus => !string.IsNullOrWhiteSpace(EngineSetupStatus);
+
+    public bool IsEnginePreparationInProgress
+    {
+        get => _isEnginePreparationInProgress;
+        private set
+        {
+            if (SetProperty(ref _isEnginePreparationInProgress, value))
+            {
+                NotifyCommands();
+            }
+        }
+    }
+
+    public AndroidDevice? SelectedAndroidDevice
+    {
+        get => _selectedAndroidDevice;
+        set
+        {
+            if (SetProperty(ref _selectedAndroidDevice, value))
+            {
+                NotifyAndroidCommands();
+            }
+        }
+    }
+
+    public string AndroidStateLabel => AndroidState switch
+    {
+        ReceiverState.Starting => "正在啟動 Android 投影",
+        ReceiverState.Running => "Android 正在投影",
+        ReceiverState.Stopping => "正在停止 Android 投影",
+        ReceiverState.Faulted => "Android 投影遇到問題",
+        ReceiverState.DependencyMissing => "需要 Android 投影元件",
+        _ => "Android 尚未投影"
+    };
+
+    public string AndroidStateAccent => AndroidState switch
+    {
+        ReceiverState.Running => "#17A773",
+        ReceiverState.Starting or ReceiverState.Stopping => "#D78016",
+        ReceiverState.Faulted or ReceiverState.DependencyMissing => "#D34444",
+        _ => "#8A99AD"
+    };
+
+    public bool IsAndroidMirrorRunning => AndroidState == ReceiverState.Running;
+    public bool IsAndroidMirrorStopped => AndroidState is ReceiverState.Stopped or ReceiverState.Faulted or ReceiverState.DependencyMissing;
+
     public string AlertMessage
     {
         get => _alertMessage;
@@ -303,6 +411,49 @@ public sealed class MainViewModel : INotifyPropertyChanged
         await _engine.StopAsync();
         State = _engine.State;
         StatusMessage = _engine.StatusMessage;
+    }
+
+    public async Task StopAllReceiversAsync()
+    {
+        AlertMessage = string.Empty;
+        await Task.WhenAll(_engine.StopAsync(), _androidEngine.StopAsync());
+        State = _engine.State;
+        StatusMessage = _engine.StatusMessage;
+        RefreshAndroidStatus();
+    }
+
+    public async Task RefreshAndroidDevicesAsync()
+    {
+        var selectedSerial = SelectedAndroidDevice?.Serial;
+        var devices = await _androidEngine.RefreshDevicesAsync();
+        AndroidDevices.Clear();
+        foreach (var device in devices)
+        {
+            AndroidDevices.Add(device);
+        }
+
+        SelectedAndroidDevice = AndroidDevices.FirstOrDefault(device =>
+            string.Equals(device.Serial, selectedSerial, StringComparison.Ordinal))
+            ?? AndroidDevices.FirstOrDefault(device => device.IsReady)
+            ?? AndroidDevices.FirstOrDefault();
+        RefreshAndroidStatus();
+    }
+
+    public async Task StartAndroidMirrorAsync()
+    {
+        if (SelectedAndroidDevice is not { IsReady: true } device)
+        {
+            return;
+        }
+
+        await _androidEngine.StartAsync(device.Serial);
+        RefreshAndroidStatus();
+    }
+
+    public async Task StopAndroidMirrorAsync()
+    {
+        await _androidEngine.StopAsync();
+        RefreshAndroidStatus();
     }
 
     private async Task SaveSettingsAsync()
@@ -388,9 +539,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
     }
 
-    private bool CanStart() => State is ReceiverState.Stopped or ReceiverState.Faulted or ReceiverState.DependencyMissing;
+    private bool CanStart() => !IsEnginePreparationInProgress
+        && State is ReceiverState.Stopped or ReceiverState.Faulted or ReceiverState.DependencyMissing;
     private bool CanStop() => State is ReceiverState.Starting or ReceiverState.Running;
     private bool CanApplySettings() => SettingsApplyPending && State == ReceiverState.Running;
+    private bool CanRefreshAndroidDevices() => !IsEnginePreparationInProgress
+        && AndroidState is not (ReceiverState.Starting or ReceiverState.Stopping);
+    private bool CanStartAndroidMirror() =>
+        !IsEnginePreparationInProgress
+        &&
+        SelectedAndroidDevice is { IsReady: true }
+        && AndroidState is ReceiverState.Stopped or ReceiverState.Faulted or ReceiverState.DependencyMissing;
+    private bool CanStopAndroidMirror() => AndroidState is ReceiverState.Starting or ReceiverState.Running;
 
     private void OnEngineStatusChanged(object? sender, EventArgs e)
     {
@@ -402,6 +562,18 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         dispatcher.BeginInvoke(DispatcherPriority.DataBind, RefreshEngineStatus);
+    }
+
+    private void OnAndroidEngineStatusChanged(object? sender, EventArgs e)
+    {
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is null || dispatcher.CheckAccess())
+        {
+            RefreshAndroidStatus();
+            return;
+        }
+
+        dispatcher.BeginInvoke(DispatcherPriority.DataBind, RefreshAndroidStatus);
     }
 
     private void RefreshEngineStatus()
@@ -416,6 +588,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(ShowApplyWarning));
         OnPropertyChanged(nameof(SettingsHint));
         NotifyCommands();
+    }
+
+    private void RefreshAndroidStatus()
+    {
+        AndroidState = _androidEngine.State;
+        AndroidStatusMessage = _androidEngine.StatusMessage;
+        NotifyAndroidCommands();
     }
 
     private void OnLogEntryWritten(object? sender, AppLogEntry entry)
@@ -483,8 +662,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
         StartCommand.NotifyCanExecuteChanged();
         StopCommand.NotifyCanExecuteChanged();
         ApplySettingsCommand.NotifyCanExecuteChanged();
+        NotifyAndroidCommands();
         OnPropertyChanged(nameof(ShowApplyWarning));
         OnPropertyChanged(nameof(SettingsHint));
+    }
+
+    private void NotifyAndroidCommands()
+    {
+        RefreshAndroidDevicesCommand.NotifyCanExecuteChanged();
+        StartAndroidMirrorCommand.NotifyCanExecuteChanged();
+        StopAndroidMirrorCommand.NotifyCanExecuteChanged();
     }
 
     private bool SetProperty<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)

@@ -4,6 +4,17 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
         <StackPanel Margin="0,0,8,0">
+            <Border AutomationProperties.AutomationId="EngineSetupStatus"
+                    Background="#FFF8E8" BorderBrush="#F1D8A8" BorderThickness="1"
+                    CornerRadius="10" Padding="14,11" Margin="0,0,0,16"
+                    Visibility="{Binding HasEngineSetupStatus, Converter={StaticResource BooleanToVisibilityConverter}}">
+                <DockPanel>
+                    <TextBlock Text="⟳" Foreground="#A56A12" FontSize="15" Margin="0,0,10,0" />
+                    <TextBlock Text="{Binding EngineSetupStatus}" Foreground="#765018"
+                               FontSize="12" VerticalAlignment="Center" TextWrapping="Wrap" />
+                </DockPanel>
+            </Border>
+
             <Border Style="{StaticResource CardBorderStyle}" Padding="28" Margin="0,0,0,16">
                 <Grid>
                     <Grid.ColumnDefinitions>
@@ -45,6 +56,61 @@
                                        HorizontalAlignment="Center" Margin="0,4,0,0" />
                         </StackPanel>
                     </Border>
+                </Grid>
+            </Border>
+
+            <Border AutomationProperties.AutomationId="AndroidMirrorCard"
+                    Style="{StaticResource CardBorderStyle}" Padding="24" Margin="0,0,0,16">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="Android 投影" Style="{StaticResource SectionTitleStyle}" />
+                        <TextBlock Text="scrcpy · USB 或已配對的 Wi-Fi 偵錯"
+                                   Foreground="{StaticResource MutedTextBrush}" FontSize="12" Margin="0,5,0,0" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Ellipse Width="8" Height="8" Fill="{Binding AndroidStateAccent}" Margin="0,0,8,0" />
+                        <TextBlock AutomationProperties.AutomationId="AndroidStateLabel"
+                                   Text="{Binding AndroidStateLabel}" Foreground="{StaticResource MutedTextBrush}"
+                                   FontSize="12" FontWeight="SemiBold" />
+                    </StackPanel>
+                    <TextBlock Grid.Row="1" Grid.ColumnSpan="2" AutomationProperties.AutomationId="AndroidStatusMessage"
+                               Text="{Binding AndroidStatusMessage}" Foreground="{StaticResource MutedTextBrush}"
+                               FontSize="12" TextWrapping="Wrap" Margin="0,14,0,12" />
+                    <Grid Grid.Row="2" Grid.ColumnSpan="2">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <ComboBox AutomationProperties.AutomationId="AndroidDeviceSelector"
+                                  ItemsSource="{Binding AndroidDevices}"
+                                  SelectedItem="{Binding SelectedAndroidDevice, Mode=TwoWay}"
+                                  DisplayMemberPath="DisplayName" MinHeight="38" Margin="0,0,10,0"
+                                  VerticalContentAlignment="Center"
+                                  ToolTip="選擇狀態為已連線的 Android 裝置" />
+                        <Button Grid.Column="1" AutomationProperties.AutomationId="RefreshAndroidDevices"
+                                Content="重新整理" Command="{Binding RefreshAndroidDevicesCommand}"
+                                Style="{StaticResource SecondaryButtonStyle}" Margin="0,0,10,0" />
+                        <StackPanel Grid.Column="2" Orientation="Horizontal">
+                            <Button AutomationProperties.AutomationId="StartAndroidMirror"
+                                    Content="開始投影" Command="{Binding StartAndroidMirrorCommand}"
+                                    Style="{StaticResource PrimaryButtonStyle}"
+                                    Visibility="{Binding IsAndroidMirrorStopped, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                            <Button AutomationProperties.AutomationId="StopAndroidMirror"
+                                    Content="停止 Android 投影" Command="{Binding StopAndroidMirrorCommand}"
+                                    Style="{StaticResource SecondaryButtonStyle}"
+                                    Visibility="{Binding IsAndroidMirrorRunning, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                        </StackPanel>
+                    </Grid>
                 </Grid>
             </Border>
 
@@ -104,7 +170,7 @@
             <Border Background="#EEF5FF" BorderBrush="#D8E7FB" BorderThickness="1" CornerRadius="10" Padding="13,11">
                 <DockPanel>
                     <TextBlock Text="ⓘ" Foreground="#2878E5" FontSize="15" Margin="0,0,10,0" />
-                    <TextBlock Text="第一次使用前，請確認本專案的 Bonjour Service 已安裝且正在執行。"
+                    <TextBlock Text="第一次使用 AirPlay 時，App 會檢查 Bonjour Service；若需管理員權限，會先說明再詢問。"
                                Foreground="#3E587B" FontSize="11" VerticalAlignment="Center" TextWrapping="Wrap" />
                 </DockPanel>
             </Border>

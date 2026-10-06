@@ -44,7 +44,7 @@ internal sealed class TestLogger : IAppLogger
 internal sealed class FakeBonjourRuntimeInspector(BonjourRuntime? runtime, string? problem = null)
     : IBonjourRuntimeInspector
 {
-    public BonjourRuntime? GetProjectRuntime(string engineDirectory, out string? issue)
+    public BonjourRuntime? GetRuntime(out string? issue)
     {
         issue = problem;
         return runtime;
@@ -106,4 +106,21 @@ internal sealed class FakeReceiverProcess : IReceiverProcess
     }
 
     public void Dispose() => WasDisposed = true;
+}
+
+internal sealed class FakeAndroidCommandRunner : IAndroidCommandRunner
+{
+    public AndroidCommandResult Result { get; set; } = new(0, "List of devices attached\n", string.Empty);
+    public Exception? Error { get; set; }
+    public ProcessStartInfo? StartInfo { get; private set; }
+
+    public Task<AndroidCommandResult> RunAsync(
+        ProcessStartInfo startInfo,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        StartInfo = startInfo;
+        return Error is null ? Task.FromResult(Result) : Task.FromException<AndroidCommandResult>(Error);
+    }
 }

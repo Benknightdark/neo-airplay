@@ -1,0 +1,68 @@
+name: Promote develop to main
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+    branches:
+      - develop
+
+permissions:
+  contents: read
+
+jobs:
+  create-pull-request:
+    if: github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@f8d387b68d61c58ab83c6c016672934102569859 # v3.0.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: neo-airplay
+
+      - name: Create or update the develop PR and enable auto-merge
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+              throw 'GitHub-hosted Windows runner needs the GitHub CLI (gh).'
+          }
+
+          $aheadBy = gh api "repos/$env:GH_REPO/compare/main...develop" --jq '.ahead_by'
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Could not compare develop with main.'
+          }
+          if ([int]$aheadBy -le 0) {
+              Write-Host 'develop has no commits to promote.'
+              exit 0
+          }
+
+          $pullRequestNumber = gh pr list --repo $env:GH_REPO --base main --head develop --state open --json number --jq '.[0].number'
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Could not find an open develop to main pull request.'
+          }
+          if ([string]::IsNullOrWhiteSpace($pullRequestNumber)) {
+              gh pr create --repo $env:GH_REPO --base main --head develop --title 'Merge develop into main' --body 'This pull request was created after the develop CI checks passed.'
+              if ($LASTEXITCODE -ne 0) {
+                  throw 'Could not create the develop to main pull request.'
+              }
+              $pullRequestNumber = gh pr list --repo $env:GH_REPO --base main --head develop --state open --json number --jq '.[0].number'
+              if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($pullRequestNumber)) {
+                  throw 'Could not resolve the newly created pull request.'
+              }
+          }
+
+          gh pr merge $pullRequestNumber --repo $env:GH_REPO --auto --merge
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Could not enable auto-merge. Check main branch rules and the repository auto-merge setting.'
+          }

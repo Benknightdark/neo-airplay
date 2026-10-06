@@ -82,14 +82,121 @@ public sealed class MainViewModelTests
         Assert.False(viewModel.SettingsApplyPending);
     }
 
+    [Fact]
+    public async Task AndroidProjectionRunsAlongsideAirPlayAndStopsIndependently()
+    {
+        var airPlayEngine = new FakeReceiverEngine();
+        await airPlayEngine.StartAsync(
+            new ReceiverOptions("Neo AirPlay", "Auto", false),
+            TestContext.Current.CancellationToken);
+        var androidEngine = new FakeAndroidMirrorEngine
+        {
+            AvailableDevices =
+            [
+                new AndroidDevice("usb-123", "Pixel 8", AndroidDeviceStatus.Ready),
+                new AndroidDevice("usb-456", "Phone", AndroidDeviceStatus.Unauthorized)
+            ]
+        };
+        var viewModel = CreateViewModel(
+            new FakeSettingsStore(new ReceiverSettings()),
+            new FakeStartupRegistration(),
+            engine: airPlayEngine,
+            androidEngine: androidEngine);
+
+        await viewModel.RefreshAndroidDevicesCommand.ExecuteAsync();
+
+        Assert.Equal(2, viewModel.AndroidDevices.Count);
+        Assert.Equal("usb-123", viewModel.SelectedAndroidDevice?.Serial);
+        Assert.True(viewModel.StartAndroidMirrorCommand.CanExecute(null));
+
+        await viewModel.StartAndroidMirrorCommand.ExecuteAsync();
+
+        Assert.Equal(ReceiverState.Running, airPlayEngine.State);
+        Assert.Equal(ReceiverState.Running, viewModel.AndroidState);
+        Assert.Equal(["usb-123"], androidEngine.StartedSerials);
+
+        await viewModel.StopAndroidMirrorCommand.ExecuteAsync();
+
+        Assert.Equal(ReceiverState.Running, airPlayEngine.State);
+        Assert.Equal(ReceiverState.Stopped, viewModel.AndroidState);
+        Assert.Equal(1, androidEngine.StopCount);
+    }
+
+    [Fact]
+    public async Task EnginePreparationDisablesEngineCommandsAndRestoresThemWhenFinished()
+    {
+        var androidEngine = new FakeAndroidMirrorEngine
+        {
+            AvailableDevices = [new AndroidDevice("usb-123", "Pixel 8", AndroidDeviceStatus.Ready)]
+        };
+        var viewModel = CreateViewModel(
+            new FakeSettingsStore(new ReceiverSettings()),
+            new FakeStartupRegistration(),
+            androidEngine: androidEngine);
+        await viewModel.RefreshAndroidDevicesAsync();
+        var refreshCommandInvalidations = 0;
+        var startAndroidCommandInvalidations = 0;
+        viewModel.RefreshAndroidDevicesCommand.CanExecuteChanged += (_, _) => refreshCommandInvalidations++;
+        viewModel.StartAndroidMirrorCommand.CanExecuteChanged += (_, _) => startAndroidCommandInvalidations++;
+
+        Assert.True(viewModel.StartCommand.CanExecute(null));
+        Assert.True(viewModel.RefreshAndroidDevicesCommand.CanExecute(null));
+        Assert.True(viewModel.StartAndroidMirrorCommand.CanExecute(null));
+
+        viewModel.SetEngineSetupStatus("正在準備引擎", isInProgress: true);
+
+        Assert.False(viewModel.StartCommand.CanExecute(null));
+        Assert.False(viewModel.RefreshAndroidDevicesCommand.CanExecute(null));
+        Assert.False(viewModel.StartAndroidMirrorCommand.CanExecute(null));
+        Assert.Equal(1, refreshCommandInvalidations);
+        Assert.Equal(1, startAndroidCommandInvalidations);
+
+        viewModel.SetEngineSetupStatus("引擎已就緒");
+
+        Assert.True(viewModel.StartCommand.CanExecute(null));
+        Assert.True(viewModel.RefreshAndroidDevicesCommand.CanExecute(null));
+        Assert.True(viewModel.StartAndroidMirrorCommand.CanExecute(null));
+        Assert.Equal(2, refreshCommandInvalidations);
+        Assert.Equal(2, startAndroidCommandInvalidations);
+    }
+
+    [Fact]
+    public async Task StopAllReceiversAsyncStopsAirPlayAndAndroid()
+    {
+        var airPlayEngine = new FakeReceiverEngine();
+        await airPlayEngine.StartAsync(
+            new ReceiverOptions("Neo AirPlay", "Auto", false),
+            TestContext.Current.CancellationToken);
+        var androidEngine = new FakeAndroidMirrorEngine
+        {
+            AvailableDevices = [new AndroidDevice("usb-123", "Pixel 8", AndroidDeviceStatus.Ready)]
+        };
+        var viewModel = CreateViewModel(
+            new FakeSettingsStore(new ReceiverSettings()),
+            new FakeStartupRegistration(),
+            engine: airPlayEngine,
+            androidEngine: androidEngine);
+        await viewModel.RefreshAndroidDevicesAsync();
+        await viewModel.StartAndroidMirrorAsync();
+
+        await viewModel.StopAllReceiversAsync();
+
+        Assert.Equal(1, airPlayEngine.StopCount);
+        Assert.Equal(1, androidEngine.StopCount);
+        Assert.Equal(ReceiverState.Stopped, viewModel.State);
+        Assert.Equal(ReceiverState.Stopped, viewModel.AndroidState);
+    }
+
     private static MainViewModel CreateViewModel(
         FakeSettingsStore settingsStore,
         FakeStartupRegistration startupRegistration,
         FakeAppLogger? logger = null,
-        FakeReceiverEngine? engine = null)
+        FakeReceiverEngine? engine = null,
+        FakeAndroidMirrorEngine? androidEngine = null)
     {
         return new MainViewModel(
             engine ?? new FakeReceiverEngine(),
+            androidEngine ?? new FakeAndroidMirrorEngine(),
             logger ?? new FakeAppLogger(),
             settingsStore,
             startupRegistration,
