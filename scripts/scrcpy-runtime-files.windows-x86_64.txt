@@ -3,10 +3,10 @@ AdbWinApi.dll
 AdbWinUsbApi.dll
 scrcpy.exe
 scrcpy-server
-avcodec-62.dll
-avformat-62.dll
-avutil-60.dll
-swresample-6.dll
+avutil-61.dll
+avcodec-63.dll
+avformat-63.dll
+swresample-7.dll
 libusb-1.0.dll
 SDL3.dll
 scrcpy.png

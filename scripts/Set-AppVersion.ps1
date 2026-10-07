@@ -1,50 +1,120 @@
 [CmdletBinding()]
 param(
     [string]$Version,
-    [string]$ProjectPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'src\NeoAirPlay.App\NeoAirPlay.App.csproj')
+    [string]$ProjectRoot = (Split-Path -Parent $PSScriptRoot),
+    [switch]$SkipLockUpdate
 )
 
 $ErrorActionPreference = 'Stop'
-
-if (-not (Test-Path -LiteralPath $ProjectPath -PathType Leaf)) {
-    throw "找不到 App 專案檔：$ProjectPath"
+$packagePath = Join-Path $ProjectRoot 'package.json'
+$cargoPath = Join-Path $ProjectRoot 'Cargo.toml'
+$enginePackagePath = Join-Path $ProjectRoot 'src-tauri/engine-package.json'
+foreach ($path in @($packagePath, $cargoPath)) {
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Required version file does not exist: $path"
+    }
 }
 
-$projectContent = [IO.File]::ReadAllText($ProjectPath)
-[xml]$projectDocument = $projectContent
-$versionNodes = $projectDocument.SelectNodes('/Project/PropertyGroup/Version')
-if ($versionNodes.Count -ne 1) {
-    throw "App 專案必須且只能有一個 PropertyGroup/Version：$ProjectPath"
-}
-
-$currentVersion = $versionNodes[0].InnerText.Trim()
+$packageContent = [IO.File]::ReadAllText($packagePath)
+$package = $packageContent | ConvertFrom-Json -AsHashtable
+$currentVersion = [string]$package.version
 if ($currentVersion -notmatch '^(?<major>0|[1-9]\d*)\.(?<minor>0|[1-9]\d*)\.(?<patch>0|[1-9]\d*)$') {
-    throw "目前 App 版本不是穩定版三段 SemVer：$currentVersion"
+    throw "package.json does not contain a stable three-part SemVer version: $currentVersion"
 }
-
 if ([string]::IsNullOrWhiteSpace($Version)) {
     $patch = [long]::Parse($Matches.patch, [Globalization.CultureInfo]::InvariantCulture)
     if ($patch -eq [long]::MaxValue) {
-        throw "App patch 版本已達上限：$currentVersion"
+        throw "App patch version has reached its limit: $currentVersion"
     }
-
     $Version = '{0}.{1}.{2}' -f $Matches.major, $Matches.minor, ($patch + 1)
 }
-elseif ($Version -notmatch '^((0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))$') {
-    throw "指定版本不是穩定版三段 SemVer：$Version"
+elseif ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
+    throw "Requested version must be a stable three-part SemVer value: $Version"
 }
 
-$versionPattern = '(?s)(<Version>\s*)' + [regex]::Escape($currentVersion) + '(\s*</Version>)'
-$versionMatch = [regex]::Match($projectContent, $versionPattern)
-if (-not $versionMatch.Success) {
-    throw "無法在 App 專案檔中唯一定位版本節點：$ProjectPath"
+$packageVersionPattern = '(?m)^(\s*"version"\s*:\s*")[^"]+(")'
+$packageVersionMatch = [regex]::Matches($packageContent, $packageVersionPattern)
+if ($packageVersionMatch.Count -ne 1) {
+    throw "Could not uniquely locate the root package version in $packagePath"
+}
+$packageContent = [regex]::Replace(
+    $packageContent,
+    $packageVersionPattern,
+    [Text.RegularExpressions.MatchEvaluator]{
+        param($match)
+        $match.Groups[1].Value + $Version + $match.Groups[2].Value
+    },
+    1)
+
+$cargoContent = [IO.File]::ReadAllText($cargoPath)
+$workspaceSectionMatch = [regex]::Match($cargoContent, '(?m)^\[workspace\.package\]\r?$')
+if (-not $workspaceSectionMatch.Success) {
+    throw "Cargo.toml is missing the [workspace.package] section."
+}
+$sectionStart = $workspaceSectionMatch.Index
+$sectionHeaderRegex = [regex]::new('(?m)^\[')
+$sectionEndMatch = $sectionHeaderRegex.Match($cargoContent, $sectionStart + $workspaceSectionMatch.Length)
+$sectionEnd = if ($sectionEndMatch.Success) { $sectionEndMatch.Index } else { $cargoContent.Length }
+$workspaceSection = $cargoContent.Substring($sectionStart, $sectionEnd - $sectionStart)
+$cargoVersionPattern = '(?m)^(\s*version\s*=\s*")[^"]+(")'
+$cargoVersionMatches = [regex]::Matches($workspaceSection, $cargoVersionPattern)
+if ($cargoVersionMatches.Count -ne 1) {
+    throw "Cargo.toml [workspace.package] must contain exactly one version."
+}
+$updatedWorkspaceSection = [regex]::Replace(
+    $workspaceSection,
+    $cargoVersionPattern,
+    [Text.RegularExpressions.MatchEvaluator]{
+        param($match)
+        $match.Groups[1].Value + $Version + $match.Groups[2].Value
+    },
+    1)
+$cargoContent = $cargoContent.Substring(0, $sectionStart) + $updatedWorkspaceSection + $cargoContent.Substring($sectionEnd)
+
+$enginePackageContent = $null
+if (Test-Path -LiteralPath $enginePackagePath -PathType Leaf) {
+    $enginePackage = Get-Content -LiteralPath $enginePackagePath -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable
+    if ($enginePackage.Version -ne $Version) {
+        $enginePackage = [ordered]@{
+            SchemaVersion = 2
+            Version = $Version
+            ReleaseTag = "v$Version"
+            ManifestName = 'engine-package-manifest.json'
+            Targets = [ordered]@{}
+        }
+    }
+    else {
+        $enginePackage.SchemaVersion = 2
+        $enginePackage.ReleaseTag = "v$Version"
+        $enginePackage.ManifestName = 'engine-package-manifest.json'
+    }
+    $enginePackageContent = $enginePackage | ConvertTo-Json -Depth 10
 }
 
-$replacement = [Text.RegularExpressions.MatchEvaluator]{
-    param($match)
-    $match.Groups[1].Value + $Version + $match.Groups[2].Value
+function Write-AtomicText {
+    param([string]$Path, [string]$Content)
+    $temporaryPath = "$Path.tmp"
+    [IO.File]::WriteAllText($temporaryPath, $Content, [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $temporaryPath -Destination $Path -Force
 }
-$updatedContent = [regex]::Replace($projectContent, $versionPattern, $replacement, 1)
-[IO.File]::WriteAllText($ProjectPath, $updatedContent, [Text.UTF8Encoding]::new($false))
+
+Write-AtomicText -Path $packagePath -Content $packageContent
+Write-AtomicText -Path $cargoPath -Content $cargoContent
+if ($null -ne $enginePackageContent) {
+    Write-AtomicText -Path $enginePackagePath -Content $enginePackageContent
+}
+
+if (-not $SkipLockUpdate) {
+    Push-Location $ProjectRoot
+    try {
+        & cargo update --workspace --quiet
+        if ($LASTEXITCODE -ne 0) {
+            throw "cargo update --workspace failed with exit code $LASTEXITCODE"
+        }
+    }
+    finally {
+        Pop-Location
+    }
+}
 
 Write-Output $Version

@@ -1,36 +1,59 @@
+#Requires -Version 7.4
 [CmdletBinding()]
 param()
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$solutionPath = Join-Path $projectRoot 'NeoAirPlay.slnx'
+Push-Location $projectRoot
+try {
+    function Invoke-VerificationStep {
+        param(
+            [Parameter(Mandatory)][string]$Name,
+            [Parameter(Mandatory)][scriptblock]$Command
+        )
 
-& dotnet build $solutionPath
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+        Write-Host "==> $Name"
+        $global:LASTEXITCODE = 0
+        & $Command
+        if ($LASTEXITCODE -ne 0) {
+            throw "Verification step '$Name' failed with exit code $LASTEXITCODE."
+        }
+    }
+
+    Invoke-VerificationStep 'bun install' { bun install --frozen-lockfile --silent }
+    Invoke-VerificationStep 'frontend typecheck' { bun run typecheck }
+    Invoke-VerificationStep 'frontend unit tests' { bun run test --reporter=dot }
+    Invoke-VerificationStep 'frontend build' { bun run build --logLevel error }
+    Invoke-VerificationStep 'cargo format' { cargo fmt --all --check --quiet }
+    Invoke-VerificationStep 'cargo clippy' { cargo clippy --workspace --all-targets --locked --quiet -- -D warnings }
+    Invoke-VerificationStep 'cargo tests' { cargo test --workspace --locked --quiet }
+
+    if ($IsWindows) {
+        $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
+            throw "Windows PowerShell 5.1 was not found at '$windowsPowerShell'."
+        }
+
+        $bonjourCompatibilityTests = Join-Path $projectRoot 'tests\scripts\BonjourPowerShellCompatibility.Tests.ps1'
+        $scriptsDirectory = Join-Path $projectRoot 'scripts'
+        Invoke-VerificationStep 'Bonjour PowerShell 5.1 compatibility' {
+            & $windowsPowerShell -NoProfile -NonInteractive -File $bonjourCompatibilityTests `
+                -RepositoryRoot $projectRoot `
+                -AppScriptsDirectories $scriptsDirectory
+        }
+
+        Invoke-VerificationStep '.NET solution build' { dotnet build (Join-Path $projectRoot 'NeoAirPlay.slnx') -v q --nologo }
+        Invoke-VerificationStep '.NET unit tests' {
+            dotnet test (Join-Path $projectRoot 'NeoAirPlay.slnx') --no-build -v q --nologo --filter 'Category=Unit'
+        }
+    }
+
+    Invoke-VerificationStep 'Set-AppVersion smoke tests' {
+        & (Join-Path $projectRoot 'tests/scripts/Set-AppVersion.Tests.ps1')
+    }
+}
+finally {
+    Pop-Location
 }
 
-$windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
-    throw "Windows PowerShell 5.1 was not found at '$windowsPowerShell'."
-}
-
-$bonjourCompatibilityTests = Join-Path $projectRoot 'tests\scripts\BonjourPowerShellCompatibility.Tests.ps1'
-$appScriptsDirectory = Join-Path $projectRoot 'src\NeoAirPlay.App\bin\Debug\net10.0-windows\win-x64\scripts'
-& $windowsPowerShell -NoProfile -NonInteractive -File $bonjourCompatibilityTests -RepositoryRoot $projectRoot -AppScriptsDirectories $appScriptsDirectory
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
-}
-
-& dotnet test $solutionPath --no-build --filter "Category=Unit"
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
-}
-
-$versionScriptTests = Join-Path $projectRoot 'tests\scripts\Set-AppVersion.Tests.ps1'
-& $versionScriptTests
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
-}
-
-exit 0
+Write-Host 'Verification passed.'

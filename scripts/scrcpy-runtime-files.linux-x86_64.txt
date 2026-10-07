@@ -1,0 +1,6 @@
+adb
+scrcpy
+scrcpy-server
+scrcpy.png
+disconnected.png
+LICENSE

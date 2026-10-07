@@ -5,141 +5,160 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-
+if (-not $IsWindows) {
+    throw 'Build-ReleasePackage.ps1 creates Windows packages and must run on Windows.'
+}
 if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
-    throw "無效的穩定版 App 版本：$Version"
+    throw "Invalid stable App version: $Version"
 }
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$appProject = Join-Path $projectRoot 'src\NeoAirPlay.App\NeoAirPlay.App.csproj'
-$appSettingsPath = Join-Path $projectRoot 'src\NeoAirPlay.App\engine-package.json'
 $buildDirectory = Join-Path $projectRoot '.build'
 $releaseRoot = Join-Path $buildDirectory 'release-assets'
 $outputDirectory = Join-Path $releaseRoot $Version
-$publishDirectory = Join-Path $buildDirectory "publish-release-$Version"
-$engineArchive = Join-Path $buildDirectory 'neo-airplay-engine-win-x64.zip'
-$engineSidecar = "$engineArchive.sha256"
-$appArchiveName = "NeoAirPlay-$Version-win-x64.zip"
-$engineArchiveName = 'neo-airplay-engine-win-x64.zip'
-$appArchive = Join-Path $outputDirectory $appArchiveName
-$releaseEngineArchive = Join-Path $outputDirectory $engineArchiveName
+$tauriRoot = Join-Path $projectRoot 'src-tauri'
+$engineArchive = Join-Path $buildDirectory 'neo-airplay-engine-windows-x86_64.zip'
+$engineSettings = Join-Path $tauriRoot 'engine-package.json'
+$portableName = "NeoAirPlay-$Version-windows-x86_64.zip"
+$installerName = "NeoAirPlay-$Version-windows-x86_64-setup.exe"
+$portableArchive = Join-Path $outputDirectory $portableName
+$installerArchive = Join-Path $outputDirectory $installerName
 
-[xml]$project = Get-Content -LiteralPath $appProject -Raw
-$projectVersion = [string]$project.Project.PropertyGroup.Version
-if ($projectVersion -ne $Version) {
-    throw "App csproj 版本 $projectVersion 與套件版本 $Version 不一致。"
-}
-
-New-Item -ItemType Directory -Path $buildDirectory -Force | Out-Null
 $resolvedReleaseRoot = [IO.Path]::GetFullPath($releaseRoot).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
 $resolvedOutputDirectory = [IO.Path]::GetFullPath($outputDirectory)
 if (Test-Path -LiteralPath $resolvedOutputDirectory) {
     if (-not $resolvedOutputDirectory.StartsWith($resolvedReleaseRoot, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "拒絕清理 Release 輸出目錄外的路徑：$resolvedOutputDirectory"
+        throw "Refusing to remove a release output outside .build/release-assets: $resolvedOutputDirectory"
     }
-
     Remove-Item -LiteralPath $resolvedOutputDirectory -Recurse -Force
 }
 New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
 
-$buildEngineScript = Join-Path $PSScriptRoot 'build-engine.ps1'
-& $buildEngineScript
-if (-not $?) {
-    throw '引擎建置失敗。'
+& (Join-Path $PSScriptRoot 'build-engine.ps1') -Target windows-x86_64
+if ($LASTEXITCODE -ne 0) {
+    throw "Windows engine build failed with exit code $LASTEXITCODE"
 }
-
-$packEngineScript = Join-Path $PSScriptRoot 'Pack-EngineRuntime.ps1'
-& $packEngineScript -Version $Version
-if (-not $?) {
-    throw '引擎套件建立失敗。'
+& (Join-Path $PSScriptRoot 'Pack-EngineRuntime.ps1') -Target windows-x86_64 -Version $Version
+if ($LASTEXITCODE -ne 0) {
+    throw "Windows engine package creation failed with exit code $LASTEXITCODE"
 }
 if (-not (Test-Path -LiteralPath $engineArchive -PathType Leaf) -or
-    -not (Test-Path -LiteralPath $engineSidecar -PathType Leaf)) {
-    throw '引擎建置未產生 ZIP 與 SHA-256 sidecar。'
+    -not (Test-Path -LiteralPath $engineSettings -PathType Leaf)) {
+    throw 'Engine packaging did not produce the archive and schema v2 metadata.'
 }
 
-$publishArguments = @(
-    'publish',
-    $appProject,
-    '--configuration', 'Release',
-    '--runtime', 'win-x64',
-    '--self-contained', 'true',
-    '--output', $publishDirectory
+$metadata = Get-Content -LiteralPath $engineSettings -Raw -Encoding UTF8 | ConvertFrom-Json
+$target = $metadata.Targets.'windows-x86_64'
+$engineHash = (Get-FileHash -LiteralPath $engineArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($metadata.SchemaVersion -ne 2 -or
+    $metadata.Version -ne $Version -or
+    $metadata.ReleaseTag -ne "v$Version" -or
+    $target.AssetName -ne 'neo-airplay-engine-windows-x86_64.zip' -or
+    -not [string]::Equals($target.Sha256, $engineHash, [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'Windows engine metadata does not match the generated archive.'
+}
+
+Push-Location $projectRoot
+try {
+    & bun tauri build --bundles nsis
+    if ($LASTEXITCODE -ne 0) {
+        throw "Tauri NSIS build failed with exit code $LASTEXITCODE"
+    }
+}
+finally {
+    Pop-Location
+}
+
+$installerDirectory = Join-Path $projectRoot 'target/release/bundle/nsis'
+$installer = Get-ChildItem -LiteralPath $installerDirectory -File -Filter '*-setup.exe' |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+if (-not $installer) {
+    throw "Tauri build did not produce an NSIS installer in $installerDirectory"
+}
+Copy-Item -LiteralPath $installer.FullName -Destination $installerArchive -Force
+
+$portableDirectory = Join-Path $buildDirectory ("portable-stage-" + [guid]::NewGuid().ToString('N'))
+try {
+    New-Item -ItemType Directory -Path $portableDirectory -Force | Out-Null
+    $appExecutable = Join-Path $projectRoot 'target/release/neo-airplay.exe'
+    if (-not (Test-Path -LiteralPath $appExecutable -PathType Leaf)) {
+        throw "Tauri release executable is missing: $appExecutable"
+    }
+    Copy-Item -LiteralPath $appExecutable -Destination $portableDirectory
+    Copy-Item -LiteralPath $engineSettings -Destination $portableDirectory
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination $portableDirectory
+
+    $portableScripts = Join-Path $portableDirectory 'scripts'
+    New-Item -ItemType Directory -Path $portableScripts -Force | Out-Null
+    foreach ($file in @(
+        'BonjourRuntimeHelpers.psm1',
+        'BonjourServiceSettings.json',
+        'Install-BonjourService.ps1',
+        'Stage-BonjourRuntime.ps1',
+        'Restore-BonjourService.ps1'
+    )) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination $portableScripts
+    }
+
+    foreach ($helper in @('install-uxplay-macos.sh', 'install-uxplay-linux.sh', 'uxplay-release.json')) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $helper) -Destination $outputDirectory -Force
+    }
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [IO.Compression.ZipFile]::CreateFromDirectory(
+        $portableDirectory,
+        $portableArchive,
+        [IO.Compression.CompressionLevel]::Optimal,
+        $false)
+}
+finally {
+    if (Test-Path -LiteralPath $portableDirectory -PathType Container) {
+        $resolvedPortable = [IO.Path]::GetFullPath($portableDirectory)
+        $resolvedBuildRoot = [IO.Path]::GetFullPath($buildDirectory).TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        if (-not $resolvedPortable.StartsWith($resolvedBuildRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to remove a portable staging directory outside .build: $resolvedPortable"
+        }
+        Remove-Item -LiteralPath $resolvedPortable -Recurse -Force
+    }
+}
+
+Copy-Item -LiteralPath $engineArchive -Destination (Join-Path $outputDirectory ([IO.Path]::GetFileName($engineArchive))) -Force
+Copy-Item -LiteralPath $engineSettings -Destination (Join-Path $outputDirectory 'engine-package.json') -Force
+
+function Write-Sha256Sidecar {
+    param([Parameter(Mandatory)][string]$Path)
+    $fileName = [IO.Path]::GetFileName($Path)
+    $hash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    [IO.File]::WriteAllText("$Path.sha256", "$hash  $fileName$([Environment]::NewLine)", [Text.ASCIIEncoding]::new())
+    "$hash  $fileName"
+}
+
+$checksums = @(
+    (Write-Sha256Sidecar $installerArchive)
+    (Write-Sha256Sidecar $portableArchive)
+    (Write-Sha256Sidecar (Join-Path $outputDirectory ([IO.Path]::GetFileName($engineArchive))))
 )
-& dotnet @publishArguments
-if ($LASTEXITCODE -ne 0) {
-    throw "dotnet publish 失敗，結束代碼：$LASTEXITCODE"
-}
+[IO.File]::WriteAllLines((Join-Path $outputDirectory 'SHA256SUMS.txt'), $checksums, [Text.ASCIIEncoding]::new())
+[IO.File]::WriteAllText((Join-Path $outputDirectory 'release-version.txt'), "$Version$([Environment]::NewLine)", [Text.ASCIIEncoding]::new())
 
-$settingsPath = Join-Path $publishDirectory 'engine-package.json'
-if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
-    throw "發佈目錄缺少引擎套件設定：$settingsPath"
-}
-$settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json
-$actualEngineHash = (Get-FileHash -LiteralPath $engineArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($settings.Version -ne $Version -or
-    $settings.ReleaseTag -ne "v$Version" -or
-    $settings.AssetName -ne $engineArchiveName -or
-    $settings.Sha256 -ne $actualEngineHash) {
-    throw 'App 發佈輸出的引擎版本、Release tag 或 SHA-256 與引擎 ZIP 不一致。'
-}
-
-Copy-Item -LiteralPath (Join-Path $projectRoot 'README.md') -Destination (Join-Path $publishDirectory 'README.md')
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-[IO.Compression.ZipFile]::CreateFromDirectory(
-    $publishDirectory,
-    $appArchive,
-    [IO.Compression.CompressionLevel]::Optimal,
-    $false)
-Copy-Item -LiteralPath $engineArchive -Destination $releaseEngineArchive
-
-function Get-ZipEntryNames([string]$Path) {
-    $archive = [IO.Compression.ZipFile]::OpenRead($Path)
+foreach ($archivePath in @($portableArchive, (Join-Path $outputDirectory ([IO.Path]::GetFileName($engineArchive))))) {
+    $archive = [IO.Compression.ZipFile]::OpenRead($archivePath)
     try {
-        return @($archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
+        $forbidden = @($archive.Entries | Where-Object {
+            $_.FullName -match '(^|/)engine/bonjour(/|$)' -or
+            $_.FullName -match '(^|/)(mDNSResponder\.exe|dnssd\.dll)$'
+        })
+        if ($forbidden.Count -gt 0) {
+            throw "A public package contains Bonjour binaries: $($forbidden.FullName -join ', ')"
+        }
     }
     finally {
         $archive.Dispose()
     }
 }
 
-function Assert-NoBonjourBinaries([string]$Path) {
-    $forbiddenEntries = @(Get-ZipEntryNames $Path | Where-Object {
-        $_ -match '(^|/)engine/bonjour/' -or
-        $_ -match '(^|/)mDNSResponder\.exe$' -or
-        $_ -match '(^|/)dnssd\.dll$'
-    })
-    if ($forbiddenEntries.Count -gt 0) {
-        throw "公開套件包含 Bonjour 執行檔：$($forbiddenEntries -join ', ')"
-    }
-}
-
-foreach ($archivePath in @($appArchive, $releaseEngineArchive)) {
-    Assert-NoBonjourBinaries $archivePath
-}
-
-$appEntries = @(Get-ZipEntryNames $appArchive)
-foreach ($requiredEntry in @('NeoAirPlay.exe', 'engine/uxplay.exe', 'engine/android/scrcpy.exe', 'engine-package.json')) {
-    if ($requiredEntry -notin $appEntries) {
-        throw "完整可攜套件缺少必要檔案：$requiredEntry"
-    }
-}
-
-function Write-Sha256Sidecar([string]$Path) {
-    $fileName = [IO.Path]::GetFileName($Path)
-    $hash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
-    [IO.File]::WriteAllText("$Path.sha256", "$hash  $fileName`n", [Text.ASCIIEncoding]::new())
-    return "$hash  $fileName"
-}
-
-$hashLines = @(
-    (Write-Sha256Sidecar $appArchive)
-    (Write-Sha256Sidecar $releaseEngineArchive)
-)
-[IO.File]::WriteAllLines((Join-Path $outputDirectory 'SHA256SUMS.txt'), $hashLines, [Text.ASCIIEncoding]::new())
-[IO.File]::WriteAllText((Join-Path $outputDirectory 'release-version.txt'), "$Version`n", [Text.ASCIIEncoding]::new())
-Copy-Item -LiteralPath $settingsPath -Destination (Join-Path $outputDirectory 'engine-package.json')
-
-Write-Host "App Release 套件：$appArchive"
-Write-Host "引擎 Release 套件：$releaseEngineArchive"
-Write-Host "版本：$Version"
+Write-Output "Windows NSIS installer: $installerArchive"
+Write-Output "Windows portable package: $portableArchive"
+Write-Output "Windows engine package: $(Join-Path $outputDirectory ([IO.Path]::GetFileName($engineArchive)))"

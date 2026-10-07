@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
-    [string]$Msys2Root
+    [string]$Msys2Root,
+    [ValidateSet('windows-x86_64')]
+    [string]$Target = 'windows-x86_64'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -109,11 +111,28 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host '從 FDH2/UxPlay 官方 v1.73.7 原始碼封存檔建置，不會下載或使用 uxplay-windows 專案。'
-$sourceArchive = Join-Path $buildRoot 'uxplay-v1.73.7.tar.gz'
+$uxplayRelease = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'uxplay-release.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+$sourceArchive = Join-Path $buildRoot $uxplayRelease.AssetName
 $uxplaySourceRoot = Join-Path $buildRoot 'uxplay-source'
-$uxplaySource = Join-Path $uxplaySourceRoot 'UxPlay-1.73.7'
-if (-not (Test-Path -LiteralPath $sourceArchive)) {
-    Save-RemoteFile 'https://github.com/FDH2/UxPlay/archive/refs/tags/v1.73.7.tar.gz' $sourceArchive
+$uxplaySource = Join-Path $uxplaySourceRoot "UxPlay-$($uxplayRelease.Version)"
+if ($uxplayRelease.Version -ne '1.73.7' -or
+    $uxplayRelease.Sha256 -notmatch '^[A-Fa-f0-9]{64}$' -or
+    -not [string]::Equals($uxplayRelease.Url, 'https://github.com/FDH2/UxPlay/archive/refs/tags/v1.73.7.tar.gz', [StringComparison]::Ordinal)) {
+    throw 'UxPlay release settings are not the approved v1.73.7 source archive.'
+}
+if (Test-Path -LiteralPath $sourceArchive -PathType Leaf) {
+    $cachedHash = (Get-FileHash -LiteralPath $sourceArchive -Algorithm SHA256).Hash
+    if (-not [string]::Equals($cachedHash, $uxplayRelease.Sha256, [StringComparison]::OrdinalIgnoreCase)) {
+        Remove-Item -LiteralPath $sourceArchive -Force
+    }
+}
+if (-not (Test-Path -LiteralPath $sourceArchive -PathType Leaf)) {
+    Save-RemoteFile $uxplayRelease.Url $sourceArchive
+}
+$sourceHash = (Get-FileHash -LiteralPath $sourceArchive -Algorithm SHA256).Hash
+if (-not [string]::Equals($sourceHash, $uxplayRelease.Sha256, [StringComparison]::OrdinalIgnoreCase)) {
+    Remove-Item -LiteralPath $sourceArchive -Force
+    throw "UxPlay v$($uxplayRelease.Version) source SHA-256 did not match the pinned value."
 }
 if (-not (Test-Path -LiteralPath $uxplaySource)) {
     New-Item -ItemType Directory -Path $uxplaySourceRoot -Force | Out-Null
@@ -299,7 +318,7 @@ Write-Host "UxPlay: $(Join-Path $engineDirectory 'uxplay.exe')"
 Write-Host "Bonjour: $bonjourDirectory"
 Write-Host "影音執行期: $runtimeDirectory"
 
-& (Join-Path $PSScriptRoot 'Stage-ScrcpyRuntime.ps1')
+& (Join-Path $PSScriptRoot 'Stage-ScrcpyRuntime.ps1') -Target $Target
 if ($LASTEXITCODE -ne 0) {
     throw "scrcpy 執行環境 staging 失敗，結束代碼：$LASTEXITCODE"
 }

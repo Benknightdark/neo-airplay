@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Neo AirPlay",
+  "version": "../package.json",
+  "identifier": "com.benknightdark.neoairplay",
+  "build": {
+    "beforeDevCommand": "bun run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "bun run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Neo AirPlay",
+        "width": 1080,
+        "height": 720,
+        "minWidth": 900,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self'; connect-src ipc: http://ipc.localhost",
+      "capabilities": ["default"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "icon": ["icons/icon.png"],
+    "resources": {
+      "engine-package.json": "engine-package.json",
+      "../scripts/BonjourRuntimeHelpers.psm1": "scripts/BonjourRuntimeHelpers.psm1",
+      "../scripts/BonjourServiceSettings.json": "scripts/BonjourServiceSettings.json",
+      "../scripts/Install-BonjourService.ps1": "scripts/Install-BonjourService.ps1",
+      "../scripts/Stage-BonjourRuntime.ps1": "scripts/Stage-BonjourRuntime.ps1",
+      "../scripts/Restore-BonjourService.ps1": "scripts/Restore-BonjourService.ps1"
+    }
+  }
+}
