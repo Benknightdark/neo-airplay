@@ -42,7 +42,7 @@ if ($metadata.SchemaVersion -ne 2 -or
 Push-Location $projectRoot
 try {
     if ($IsMacOS) {
-        & rustup target add $targetTriple --toolchain 1.99.0 --quiet
+        & rustup target add $targetTriple --toolchain 1.99.0
         if ($LASTEXITCODE -ne 0) {
             throw "Could not install Rust target $targetTriple."
         }
