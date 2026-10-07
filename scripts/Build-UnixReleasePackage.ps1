@@ -24,18 +24,9 @@ $targetTriple = switch ($Target) {
 
 New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
 & (Join-Path $PSScriptRoot 'Set-AppVersion.ps1') -Version $Version -SkipLockUpdate
-if ($LASTEXITCODE -ne 0) {
-    throw "Version synchronization failed with exit code $LASTEXITCODE."
-}
 
 & (Join-Path $PSScriptRoot 'Stage-ScrcpyRuntime.ps1') -Target $Target
-if ($LASTEXITCODE -ne 0) {
-    throw "scrcpy staging failed with exit code $LASTEXITCODE."
-}
 & (Join-Path $PSScriptRoot 'Pack-EngineRuntime.ps1') -Target $Target -Version $Version
-if ($LASTEXITCODE -ne 0) {
-    throw "Engine package creation failed with exit code $LASTEXITCODE."
-}
 
 $metadata = Get-Content -LiteralPath $engineSettingsPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $targetSettings = $metadata.Targets.$Target

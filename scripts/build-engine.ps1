@@ -319,6 +319,3 @@ Write-Host "Bonjour: $bonjourDirectory"
 Write-Host "影音執行期: $runtimeDirectory"
 
 & (Join-Path $PSScriptRoot 'Stage-ScrcpyRuntime.ps1') -Target $Target
-if ($LASTEXITCODE -ne 0) {
-    throw "scrcpy 執行環境 staging 失敗，結束代碼：$LASTEXITCODE"
-}

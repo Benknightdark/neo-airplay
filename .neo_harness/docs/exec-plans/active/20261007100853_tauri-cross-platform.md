@@ -30,7 +30,7 @@
 | 4 | 移植安全的引擎套件下載、驗證與安裝 | 完成 |
 | 5 | 實作 Tauri commands、events、tray、啟動參數、自動啟動與結束清理 | 程式完成；Windows 與 Linux 編譯、命令整合測試待處理 |
 | 6 | 實作 Vue 頁面、store、診斷介面與前端測試 | 5 個 Vitest 與 macOS 原生 UI 導覽 E2E 通過；手機硬體情境待處理 |
-| 7 | 更新引擎 staging、打包、版本同步及 macOS/Linux UxPlay 指引 | 程式完成；Windows/Linux runner 與實機投影驗收待處理 |
+| 7 | 更新引擎 staging、打包、版本同步及 macOS/Linux UxPlay 指引 | 腳本已修正 PowerShell 子腳本狀態判斷；macOS 套件建置重跑、Windows/Linux 套件與實機投影驗收待處理 |
 | 8 | 更新 Harness、CI/release workflows 與 UI E2E | 本機 Harness 與一般 UI E2E 通過；遠端三平台 CI 及硬體 E2E 待處理 |
 | 9 | 完成文件、跨平台驗收後移除 .NET 專案 | 未開始；須先完成平台、UI 與硬體驗收 |
 
@@ -56,6 +56,7 @@
 - Windows 啟動時會移除舊版 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\NeoAirPlay` 值；macOS 第一次啟動 AirPlay 前顯示內建接收器衝突提示；Linux Avahi 採 systemd、D-Bus 與 PID 檔檢查，ADB 權限錯誤附 udev 指引。
 - WebdriverIO 以設定檔所在的 `e2e/` 作為 `rootDir`；修正 spec glob 後才能找到測試。頁面導覽會替換標題 DOM，測試改為每次輪詢重新查詢標題元素。
 - macOS `Run-UiE2e.ps1` 已通過，導航測試 1 項成功；Android 硬體規格依 `NEO_HARDWARE_E2E` 未設定而略過。當前主機沒有辨識到 Android/iOS USB 裝置，且 `uxplay`、`adb` 尚未安裝，實際投影驗收仍待設備連接及工具準備。
+- 首次 macOS 發佈套件建置發現包裝腳本在 PowerShell 子腳本後檢查 `$LASTEXITCODE`，將未設定的原生程序狀態誤判為失敗。已移除 Unix/Windows 包裝腳本、Windows engine staging 與 Release workflow 中同類的錯誤檢查；PowerShell 語法及 Harness 通過，套件建置需重跑。
 
 ## 具體步驟
 
@@ -91,4 +92,5 @@
 - 新增 Pinia store 的選取、設定儲存與錯誤狀態單元測試；新增 opt-in 的 Android UI 硬體 E2E 與 `neo-core` 雙引擎並行硬體測試。最新 Harness 中 5 個 Vitest 與 30 個 Rust 單元測試通過；硬體測試已編譯但依 `#[ignore]` 略過。
 - Windows 舊版自動啟動值清理、macOS AirPlay 衝突提示、Linux systemd/D-Bus Avahi 探測與 Android udev 權限指引已實作；尚未在 Windows/Linux 或 macOS 互動桌面做平台操作驗收。
 - macOS 一般 Tauri `--debug --no-bundle` 建置、embedded WebDriver E2E feature 建置與原生 UI 導覽/設定儲存 E2E 通過。硬體投影與其他作業系統互動仍未驗收。
+- 第一次 `Build-UnixReleasePackage.ps1 -Target macos-aarch64` 在版本同步後遭 `$LASTEXITCODE` 誤判而中止；已修正 PowerShell 腳本呼叫檢查，需用隔離工作樹重跑打包驗證。
 - 未移除 .NET 專案。Windows、Linux、AirPlay/Android 硬體及跨平台 Release workflow 尚無遠端執行結果，必須保留 .NET 並維持此計畫 active。

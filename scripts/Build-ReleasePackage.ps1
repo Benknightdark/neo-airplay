@@ -35,13 +35,7 @@ if (Test-Path -LiteralPath $resolvedOutputDirectory) {
 New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
 
 & (Join-Path $PSScriptRoot 'build-engine.ps1') -Target windows-x86_64
-if ($LASTEXITCODE -ne 0) {
-    throw "Windows engine build failed with exit code $LASTEXITCODE"
-}
 & (Join-Path $PSScriptRoot 'Pack-EngineRuntime.ps1') -Target windows-x86_64 -Version $Version
-if ($LASTEXITCODE -ne 0) {
-    throw "Windows engine package creation failed with exit code $LASTEXITCODE"
-}
 if (-not (Test-Path -LiteralPath $engineArchive -PathType Leaf) -or
     -not (Test-Path -LiteralPath $engineSettings -PathType Leaf)) {
     throw 'Engine packaging did not produce the archive and schema v2 metadata.'

@@ -127,7 +127,6 @@ jobs:
 
           if ($alreadyPublished -ne 'true') {
               & .\scripts\Set-AppVersion.ps1 -Version $version | Out-Null
-              if ($LASTEXITCODE -ne 0) { throw 'Could not prepare versioned Cargo and frontend metadata.' }
           }
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "already-published=$alreadyPublished" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -196,7 +195,6 @@ jobs:
           RELEASE_VERSION: ${{ needs.resolve-version.outputs.version }}
         run: |
           & .\scripts\Set-AppVersion.ps1 -Version $env:RELEASE_VERSION -SkipLockUpdate | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw 'Could not set the Windows app version.' }
           & .\scripts\Build-ReleasePackage.ps1 -Version $env:RELEASE_VERSION
 
       - name: Upload Windows packages
