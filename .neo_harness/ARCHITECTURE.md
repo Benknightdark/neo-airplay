@@ -1,46 +1,48 @@
 # 目前架構
 
-本文件描述目前工作樹中的 Windows x64 桌面接收器；依據為程式碼、專案設定與 [README.md](../README.md)。以下關係依目前程式碼整理，不代表有自動架構檢查。
+本文件描述目前工作樹中的 Tauri 桌面應用程式。關係依程式、設定和根目錄 [README.md](../README.md) 整理，不代表有自動架構檢查。
 
 ## 依賴概況
 
-- `NeoAirPlay.App` 是 WPF 啟動與呈現層。`App.xaml.cs` 組裝 Framework 服務、載入設定、建立 `MainViewModel` 與 `MainWindow`。
-- `MainWindow` 使用 `MainViewModel`；畫面由 `Views/` 下的 XAML 視圖組成，ViewModel 與 UI 命令留在 App。
-- `NeoAirPlay.Framework` 包含 `NeoAirPlay.Models` 與 `NeoAirPlay.Services`，提供設定、記錄、登入啟動註冊、Bonjour 檢查、UxPlay 外部程序生命週期，以及 ADB 裝置列舉和 scrcpy 外部程序生命週期服務。
-- App 透過 `IReceiverEngine`、`IAndroidMirrorEngine`、`ISettingsStore`、`IAppLogger`、`IStartupRegistration` 等介面使用服務；啟動時由 App 層的引擎套件準備器在主視窗顯示後檢查並補齊缺少的引擎檔案。
-- `NeoAirPlay.App.csproj` 將可散布的 `engine/` 檔案複製到輸出；Bonjour 元件不會複製到 App 輸出。App 從版本固定的 GitHub Release 套件補齊引擎缺件，並把 Bonjour 放在受保護的 `%ProgramFiles%\NeoAirPlay\Bonjour`；套件產生腳本位於 `scripts/Pack-EngineRuntime.ps1`。
+- `desktop/src/` 是 Vue 3 + TypeScript 介面。`App.vue` 組合總覽、設定及診斷頁；`useAppState` 管理載入狀態、動作與 1.5 秒狀態輪詢。
+- `desktop/src/api.ts` 透過 Tauri `invoke` 呼叫 Rust 命令。前端不直接操作程序、檔案或作業系統啟動設定。
+- `desktop/src-tauri/src/lib.rs` 註冊單一執行個體、命令、登入啟動插件、系統匣與視窗關閉行為，並建立 `AppState`。
+- `desktop/src-tauri/src/models.rs` 定義設定、引擎狀態、Android 裝置、記錄與總覽資料結構。
+- `desktop/src-tauri/src/state.rs` 保存 JSON 設定、每日 JSONL 記錄、列舉 Android 裝置及管理 UxPlay/scrcpy 子程序。
+- `desktop/src-tauri/capabilities/default.json` 只開放 Tauri 核心預設 IPC 權限。WDIO 權限只存在 E2E 組態與 `wdio` Rust feature。
+- `desktop/src-tauri/resources/engine/` 是選擇性第三方引擎資源位置；目前只含說明檔，預設套件不附帶引擎二進位檔。
 
 ## 專案責任
 
-| 專案或元件 | 責任 | 證據 |
+| 元件 | 責任 | 證據 |
 | :--- | :--- | :--- |
-| App 啟動與視窗 | 組裝服務、啟動主視窗並提供系統匣操作。 | `src/NeoAirPlay.App/App.xaml.cs`、`src/NeoAirPlay.App/MainWindow.xaml.cs` |
-| Views 與 ViewModel | Dashboard、Settings、Diagnostics 視圖呈現接收器狀態、設定與記錄；ViewModel 管理畫面狀態及命令。 | `src/NeoAirPlay.App/Views/`、`src/NeoAirPlay.App/ViewModels/MainViewModel.cs` |
-| Commands | 提供同步與非同步 UI 命令。 | `src/NeoAirPlay.App/Commands/` |
-| Framework Models | 保存接收器設定、選項、狀態及記錄資料。 | `src/NeoAirPlay.Framework/Models/` |
-| Framework Services | 管理接收器程序、Bonjour 執行元件檢查、設定、登入啟動註冊及記錄。 | `src/NeoAirPlay.Framework/Services/` |
-| Android 投影 | 解析 `adb devices -l` 裝置狀態，依選取序號啟動/停止 scrcpy；不執行無線配對。 | `src/NeoAirPlay.Framework/Services/ScrcpyAndroidMirrorEngine.cs`、`AndroidCommandRunner.cs` |
-| Framework 單元測試 | 驗證設定儲存、檔案記錄與接收器程序整合邏輯，並以替身隔離外部邊界。 | `tests/NeoAirPlay.Framework.Test/` |
-| App 單元與 UI E2E 測試 | 驗證 ViewModel 行為，並以 UI Automation 驅動 WPF 頁面導覽。 | `tests/NeoAirPlay.App.Test/` |
-| 隨附執行元件 | 建置腳本整理 UxPlay、影音執行環境、Bonjour 元件及官方 scrcpy/ADB 套件；App 專案複製可散布的輸出，首次啟動時可下載版本固定的引擎包，Bonjour 安裝至受保護的系統共用目錄。 | `src/NeoAirPlay.App/NeoAirPlay.App.csproj`、`scripts/` |
+| Vue 應用程式 | 顯示總覽、設定及診斷記錄，將使用者動作送至 API 模組。 | `desktop/src/App.vue`、`desktop/src/components/` |
+| 前端狀態與 IPC | 讀取總覽、呼叫 Tauri commands、顯示錯誤並輪詢引擎程序狀態。 | `desktop/src/composables/useAppState.ts`、`desktop/src/api.ts` |
+| Rust 命令入口 | 限制單一執行個體、註冊 Dashboard、設定與引擎啟停命令；設定登入啟動並建立系統匣。 | `desktop/src-tauri/src/lib.rs` |
+| 模型 | 定義跨 IPC 傳輸的序列化結構、設定預設值及 renderer 選項。 | `desktop/src-tauri/src/models.rs` |
+| 執行狀態、程序與記錄 | 管理設定 JSON、每日 JSONL、ADB 裝置清單及兩個分離的子程序。 | `desktop/src-tauri/src/state.rs` |
+| 前端單元測試 | 驗證狀態標籤、時間格式、總覽操作、設定表單與錯誤狀態。 | `desktop/src/lib/status.test.ts`、`desktop/src/components/DashboardPage.test.ts`、`desktop/src/components/SettingsPage.test.ts`、`desktop/src/composables/useAppState.test.ts` |
+| Rust 單元測試 | 驗證設定正規化、ADB 輸出解析、UxPlay 參數、renderer allowlist 與引擎程序生命週期。 | `desktop/src-tauri/src/models.rs`、`desktop/src-tauri/src/state.rs` |
+| 桌面 E2E | 以 WebdriverIO 啟動實際 Tauri 程式，檢查第二次啟動、頁面導覽、設定儲存及兩個假引擎程序的並行啟停。 | `desktop/e2e/main.spec.ts`、`desktop/e2e/fake-engine.rs`、`desktop/wdio.conf.ts` |
+| 正式應用程式啟動檢查 | 啟動目前平台的正式 bundle 執行檔 8 秒，並使用隔離的暫存使用者資料目錄。 | `desktop/scripts/smoke-bundle.mjs`、`.github/workflows/ci.yml` |
+| CI 與安裝套件 | 於原生 Windows、macOS、Linux runner 執行檢查和 E2E，產生並上傳平台安裝套件。 | `.github/workflows/ci.yml`、`desktop/src-tauri/tauri.conf.json` |
 
-## 依賴與執行邊界
+## 程序與執行元件
 
-- Framework 目標為 `net10.0-windows`，不參考 WPF。服務介面與實作放在 Framework；WPF ViewModel、Commands、視窗及啟動組裝放在 App。
-- `UxPlayProcessEngine` 以獨立程序執行 `engine/uxplay.exe`，設定其執行環境，並將標準輸出及錯誤寫入應用程式記錄。程序與 Bonjour 狀態可透過注入的介面替身隔離測試。
-- `ScrcpyAndroidMirrorEngine` 以隨附的 ADB 執行 `devices -l`，將 `device`、`unauthorized`、`offline` 分別呈現給使用者，再以獨立程序啟動 `engine/android/scrcpy.exe --serial <序號>`。USB 裝置與已透過 ADB 配對的 TCP/IP 裝置共用此流程。
-- App 建立兩個獨立引擎與狀態，Android 啟停不會停止 AirPlay；關閉 App 時兩個程序都會停止。
-- App 在主視窗顯示後背景檢查引擎檔案；缺件時從版本固定的 GitHub Release 下載套件，驗證外層 SHA-256、內部逐檔 SHA-256 和安全路徑後才安裝。準備期間會暫停啟動／刷新命令；失敗時記錄狀態並於下次 App 啟動重試。E2E profile 不執行下載或管理員操作。
-- 一般 App 啟動會檢查 Bonjour Service 是否正在執行且指向受保護的 `%ProgramFiles%\NeoAirPlay\Bonjour`。若服務停止、路徑不符或服務項目不存在，App 可從 Program Files 或 Program Files (x86) 尋找可信任 Bonjour `mDNSResponder.exe`，再從 64 位元 Program Files Bonjour 目錄或 Windows System32 獨立尋找同版本 x64 `dnssd.dll`；兩者都核對產品資訊，並以 PE Machine 欄位檢查架構。通過檢查後 App 顯示簡短說明並透過 UAC 執行 staging 與安裝腳本；缺少服務時使用 Bonjour 執行檔的 `-install` 建立並啟動服務。安裝腳本重設目錄 ACL，限制修改者為 Administrators，並授予必要的讀取權。若找不到 responder 或相符 x64 DNS-SD DLL，顯示對應原因和 Apple 官方安裝資訊；Android 不受影響。
-- 使用者設定存於 `%AppData%\NeoAirPlay\settings.json`；完整記錄存於 `%LocalAppData%\NeoAirPlay\Logs\`；影音執行環境登錄快取存於 `%LocalAppData%\NeoAirPlay\gstreamer-registry.bin`。
-- `--e2e-profile <path>` 只供 App UI E2E 測試使用，將設定、記錄、GStreamer 快取及單一執行個體 Mutex 導向測試暫存 profile。正常啟動仍使用既有使用者資料位置與 Mutex。
-- `scripts/build-engine.ps1` 會準備建置環境並從可信任的 x64 Bonjour 目錄或 System32 讀取 x64 `dnssd.dll`；responder 可來自 x86 Bonjour 安裝。`scripts/Pack-EngineRuntime.ps1` 產生不含 Bonjour 的 Release 引擎包與 App SHA 設定。Bonjour staging、安裝與還原腳本可由人工執行；App 會在簡短說明及 UAC 核准後呼叫 staging／安裝腳本。備份會記錄 Bonjour Service 原先是否存在，還原時可恢復路徑或移除新建服務。
+- AirPlay 與 Android 分別由 `EngineController` 持有程序及狀態；停止或故障其中一個不會呼叫另一個引擎。
+- 單一執行個體插件先於其他插件註冊；第二次啟動會喚醒並顯示既有主視窗，不會建立另一組引擎控制器。
+- AirPlay 啟動 UxPlay，使用獨立引數傳遞接收器名稱、全螢幕與 allowlist 中的 renderer。Android 只接受目前 ADB 清單中狀態為 `device` 的序號，並以 `--serial` 獨立引數啟動 scrcpy。
+- App 啟動時使用固定 revision 的 `fix-path-env` 讀取登入 shell 的 `PATH`，再從 Tauri resource directory 的 `engine/` 子目錄與作業系統 `PATH` 尋找引擎。Android 另外搜尋 `engine/android/`；macOS 與 Linux 也會檢查常見系統 binary 目錄。
+- App 會讀取子程序標準輸出和錯誤並寫入診斷記錄。Android ADB 列舉逾時為 15 秒，兩條輸出管道由背景讀取器同步排空。
+- 關閉主視窗會隱藏視窗並保留程式；系統匣選單可顯示視窗或結束程式。結束時 Rust state 會停止仍持有的 UxPlay/scrcpy 子程序。
+- 設定與記錄目錄由 Tauri path resolver 提供，分別使用 `app_config_dir()`、`app_log_dir()`。登入啟動由 Tauri autostart plugin 管理，支援值在啟動時同步至作業系統註冊項目。
+- 預設 renderer 選項依編譯平台提供：Windows 使用 D3D，macOS 使用 osxvideosink/glimagesink，Linux 使用 glimagesink/ximagesink/waylandsink。
+- UxPlay、GStreamer、ADB、scrcpy 及 DNS-SD 服務探索是外部執行環境。此 repository 預設不散布這些二進位檔；README 說明安裝方式與授權界線。
 
 ## 驗證界線
 
-- `.neo_harness/verify.ps1` 建置方案並執行標記為 `Unit` 的 Framework 與 App 測試；不執行 UI E2E。
-- App UI E2E 需有可互動的 Windows 桌面工作階段，驗證 WPF 啟動、頁面導覽及 Android 控制項，不連接裝置或啟動接收器。
-- `Category=HardwareE2E` 會啟動本機 UxPlay 與真實 scrcpy Android 投影；一項測試驗證 Framework 引擎並行，另一項透過 WPF 總覽啟動 USB 投影。測試要求互動式桌面、`%ProgramFiles%\NeoAirPlay\Bonjour` 中的 Bonjour Service 正在執行及 USB Android 裝置已授權。
-- `.github/workflows/ci.yml` 在 develop push 與 main PR 執行 Harness；develop CI 成功後由 `.github/workflows/promote-develop.yml` 建立／更新 PR 並設定 auto-merge。main push 由 `.github/workflows/release.yml` 在標記為 `neo-airplay-release` 的 Windows x64 runner 建置及發佈版本化套件。
-- CI 目前執行 build 與 Unit tests；不執行 UI E2E、硬體 E2E 或靜態架構檢查。依賴方向仍未由機器強制。
-- 本文件所列的依賴方向屬於程式碼觀察，不是架構保證。使用者可見功能、區域網路需求、建置及授權說明以根目錄 README.md 為準。
+- `.neo_harness/verify.ps1` 呼叫 `bun run verify`，執行 Vue/TypeScript 型別檢查、前端單元測試、Rust 格式檢查、Rust 單元測試、Clippy 與 Vite 建置。
+- `bun run test:e2e:ci` 額外建置 `wdio` 測試版本與假引擎，並啟動桌面 E2E。測試會驗證第二次啟動退出並由既有執行個體處理；假執行檔只放在隔離的 E2E profile。Linux CI 以 D-Bus session 和 Xvfb 啟動測試。
+- GitHub Actions 對 `ubuntu-24.04`、`windows-latest`、`macos-latest` 執行 verify、桌面 E2E 與原生安裝套件建置。各平台實際結果須以 workflow run 為準。
+- 安裝套件建置後會啟動該平台正式執行檔 8 秒；此 smoke check 確認程式能啟動，不驗證頁面操作或投影引擎串流。
+- E2E 會以假執行檔驗證兩個子程序並行啟停，不會連接實際 Android 裝置或啟動真實 UxPlay/scrcpy。AirPlay 網路探索、視訊、音訊及硬體加速仍需在目標 OS、裝置與區域網路人工驗收。

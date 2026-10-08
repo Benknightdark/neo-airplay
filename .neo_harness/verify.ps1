@@ -3,34 +3,34 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$solutionPath = Join-Path $projectRoot 'NeoAirPlay.slnx'
+$desktopRoot = Join-Path $projectRoot 'desktop'
 
-& dotnet build $solutionPath
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
+    throw 'Bun is required. Install the version documented in README.md.'
 }
 
-$windowsPowerShell = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
-    throw "Windows PowerShell 5.1 was not found at '$windowsPowerShell'."
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    throw 'Rust and Cargo are required. Install the stable toolchain documented in README.md.'
 }
 
-$bonjourCompatibilityTests = Join-Path $projectRoot 'tests\scripts\BonjourPowerShellCompatibility.Tests.ps1'
-$appScriptsDirectory = Join-Path $projectRoot 'src\NeoAirPlay.App\bin\Debug\net10.0-windows\win-x64\scripts'
-& $windowsPowerShell -NoProfile -NonInteractive -File $bonjourCompatibilityTests -RepositoryRoot $projectRoot -AppScriptsDirectories $appScriptsDirectory
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    throw 'Node.js 22 is required for frontend unit tests. Install the version documented in README.md.'
 }
 
-& dotnet test $solutionPath --no-build --filter "Category=Unit"
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+$nodeVersion = (& node --version).Trim()
+if ($LASTEXITCODE -ne 0 -or $nodeVersion -notmatch '^v22\.') {
+    throw "Node.js 22 is required for frontend unit tests. Found '$nodeVersion'."
 }
 
-$versionScriptTests = Join-Path $projectRoot 'tests\scripts\Set-AppVersion.Tests.ps1'
-& $versionScriptTests
-if ($LASTEXITCODE -ne 0) {
-    exit $LASTEXITCODE
+Push-Location $desktopRoot
+try {
+    & bun run --silent verify
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+}
+finally {
+    Pop-Location
 }
 
 exit 0

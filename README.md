@@ -1,149 +1,97 @@
 # Neo AirPlay
 
-Windows 11 x64 的 iOS AirPlay 與 Android 投影接收器，使用 WPF/XAML 建立操作介面。AirPlay 與 Android 使用獨立程序，可同時接收；Android 透過官方 scrcpy Windows 發行包處理畫面、音訊與裝置連線。程式原始碼由本專案自行建立；不包含或修改 `uxplay-windows` wrapper。
+Neo AirPlay 是 Windows、macOS 與 Linux 桌面接收器，使用 Tauri 2、Rust、Vue 3、TypeScript 與 Bun。AirPlay 由 UxPlay 處理，Android 由 ADB 與 scrcpy 處理；兩種投影各自執行，可同時使用。
 
-## 目前功能
+## 功能
 
-- 啟動與停止 AirPlay 接收器，狀態列會顯示缺少的引擎元件或錯誤。
-- 接收畫面鏡像與音訊，也支援音訊播放。
-- 使用 UxPlay 自己的播放視窗顯示鏡像畫面。
-- Android 可選擇已授權的 USB 或已配對 ADB TCP/IP 裝置，使用 scrcpy 獨立視窗投影；Android 11 以上支援音訊轉送。
-- AirPlay 與 Android 有各自的狀態和啟停控制，可以同時投影。
-- 設定接收器名稱、影片輸出 renderer、全螢幕播放，以及登入 Windows 後自動啟動。
-- 關閉主視窗時留在系統匣；診斷頁保留最近 300 筆記錄，完整記錄寫入使用者的 LocalAppData。
+- 啟動與停止 AirPlay 接收器，設定接收器名稱、影片 renderer 與全螢幕模式。
+- 列出 ADB 已連線的 USB 或網路 Android 裝置，選取裝置後啟動或停止 scrcpy。
+- AirPlay 與 Android 各自顯示狀態，診斷頁顯示最近 300 筆記錄；完整記錄寫入使用者記錄目錄。
+- 支援登入後自動啟動。關閉主視窗會將程式留在系統匣；從系統匣選單可重新開啟視窗或結束程式。
+- 引擎以獨立程序執行。應用程式定期更新程序狀態，結束時會嘗試停止兩個引擎。
 
-## 建置與啟動
+## 執行需求
 
-先安裝 .NET 10 SDK，再於專案根目錄執行：
+桌面程式本身不含 UxPlay、GStreamer、ADB 或 scrcpy 二進位檔。首次使用前，請安裝這些引擎及其作業系統相依套件，並讓 `uxplay`、`adb`、`scrcpy` 可從 `PATH` 找到；App 啟動時會恢復 GUI 程序的 `PATH`，macOS 與 Linux 會讀取登入 shell 環境。也可將合法可散布的執行檔放入 `desktop/src-tauri/resources/engine/`，建置套件時會一併放入應用程式資源目錄。若缺少引擎，App 仍會啟動，總覽會顯示缺少的元件。
 
-```powershell
-dotnet build NeoAirPlay.slnx
+- [UxPlay 官方專案](https://github.com/FDH2/UxPlay)：依作業系統安裝 UxPlay、GStreamer 及 DNS-SD 服務探索相依項目。Windows、macOS 與 Linux 的建置方式不同。
+- [scrcpy 官方專案](https://github.com/Genymobile/scrcpy)：安裝 scrcpy 與 Android Platform Tools 的 ADB。Android USB 投影需要在手機開啟 USB 偵錯並授權此電腦；無線裝置須先由使用者完成 Android 無線偵錯配對。
+- 電腦與 Apple 裝置需在可互通的區域網路。多播探索受網路隔離或防火牆設定影響。
+
+Tauri 的開發環境需求依平台而異，請依 [Tauri 官方先決條件](https://v2.tauri.app/start/prerequisites/) 安裝。Linux 建置需要 GTK、WebKitGTK 與 AppIndicator 開發套件；macOS 需要 Xcode Command Line Tools；Windows 需要 Microsoft C++ Build Tools 與 WebView2。
+
+## 開發與驗證
+
+安裝 Rust stable、Bun 1.4.2、Node.js 22 及目前平台所需的 Tauri 建置工具後，在專案根目錄執行：
+
+```sh
+cd desktop
+bun install --frozen-lockfile
+bun run tauri dev
 ```
 
-執行單元測試：
+執行單元測試、Rust 格式檢查、Clippy 與前端建置：
 
 ```powershell
-dotnet test NeoAirPlay.slnx --filter "Category=Unit"
+pwsh .neo_harness/verify.ps1
 ```
 
-執行 WPF UI E2E 測試需使用可互動的 Windows 桌面工作階段；測試會啟動 App、操作頁面導覽並確認 Android 控制項，不會連接裝置或啟動接收器：
+實際啟動桌面程式，驗證頁面導覽、設定儲存，以及 AirPlay/Android 引擎程序的並行啟停：
 
-```powershell
-dotnet test tests/NeoAirPlay.App.Test/NeoAirPlay.App.Test.csproj --filter "Category=E2E"
+```sh
+cd desktop
+bun run test:e2e:ci
 ```
 
-另有硬體 E2E，可在互動式桌面啟動真實 UxPlay 與 scrcpy。一項測試直接驗證兩個引擎並行；另一項啟動 WPF App，透過總覽刷新並選取 USB 手機、開始及停止投影，確認 scrcpy 視窗顯示且 Android 停止後 AirPlay 仍運行：
+E2E 需要可啟動桌面視窗的工作階段；Linux 無桌面工作階段時，可使用 `dbus-run-session -- xvfb-run --auto-servernum bun run --silent test:e2e:ci`。測試也會確認第二次啟動沿用既有執行個體；並行啟停流程使用隔離的假 ADB、UxPlay 與 scrcpy 程序，不會連接 Android 裝置或啟動使用者安裝的真實引擎。單元測試與桌面 E2E 不驗證區域網路探索、實際影音串流、音訊輸出或 GPU 加速。
 
-```powershell
-dotnet test tests/NeoAirPlay.App.Test/NeoAirPlay.App.Test.csproj --filter "Category=HardwareE2E"
+## 建置安裝套件
+
+在目標作業系統上執行：
+
+```sh
+cd desktop
+bun run bundle
 ```
 
-硬體 E2E 需要先建置引擎、安裝並啟動位於 `%ProgramFiles%\NeoAirPlay\Bonjour` 的 Bonjour Service、可互動的 Windows 桌面，以及已開啟 USB 偵錯並授權本電腦的 Android USB 裝置；執行前請先關閉其他 Neo AirPlay 接收器，避免 UxPlay 連接埠衝突。這項自動測試不會操作 iPhone/iPad，也不會量測實際音訊輸出；實機驗收時，請另外從 Apple 裝置選擇本接收器並確認畫面與音訊。服務層測試可使用 ADB 已連線的 USB 或已配對 TCP/IP 裝置；本次 UI 硬體測試只驗 USB。
+Tauri 會建置目前作業系統的安裝套件，輸出位於 `desktop/src-tauri/target/release/bundle/`。預設設定啟用該平台可用的所有格式，例如 Windows MSI／NSIS、macOS DMG／APP，以及 Linux DEB／RPM／AppImage。一般建置應使用目標作業系統的原生環境；macOS 也能交叉產生 Windows x64 NSIS 安裝檔。
 
-`NeoAirPlay.Framework` 放置模型與服務，WPF 介面、ViewModel 和命令留在 `NeoAirPlay.App`。測試專案分別為 `NeoAirPlay.Framework.Test` 與 `NeoAirPlay.App.Test`；`.neo_harness/verify.ps1` 會建置方案並執行單元測試。
+打包後可在建置主機啟動正式應用程式，確認程式至少能正常存活 8 秒：
 
-## GitHub Actions CI/CD 與下載
-
-- `develop` 每次 push 會在 GitHub-hosted Windows runner 執行 `.neo_harness/verify.ps1`。成功後，自動化會建立或更新 `develop` → `main` PR，並啟用 auto-merge；PR 本身也必須通過 `verify` 檢查。
-- PR 合併至 `main` 後，Release workflow 會對該次合併的原始碼重跑驗證、產生 Windows x64 可攜套件、建立 `vX.Y.Z` tag，並發布 GitHub Release。版本由目前 App 版本與既有 Release tags 中較新的版本升 patch；目前基準 `0.1.0` 的第一版為 `0.1.1`。Release 版本會寫回 `NeoAirPlay.App.csproj` 與 `engine-package.json`，再同步到 `develop`。主視窗標題會顯示 `Neo AirPlay (X.Y.Z)`。
-- GitHub Release 會提供 `NeoAirPlay-X.Y.Z-win-x64.zip`（App、必要引擎及 README，不含 Bonjour）、`neo-airplay-engine-win-x64.zip`（供 App 首次啟動補齊引擎）和 SHA-256 sidecar／`SHA256SUMS.txt`。App ZIP 可解壓後直接執行 `NeoAirPlay.exe`。
-
-啟用工作流程前，請在 GitHub repository 完成以下設定：
-
-1. 從最新 `main` 建立 `develop` 分支。此工作樹目前的遠端尚未有 `develop`。
-2. 建立 GitHub App，只授予此 repository 的 `Contents: Read and write`、`Pull requests: Read and write` 權限，安裝到此 repository。將 App 的 Client ID 設為 repository variable `RELEASE_APP_CLIENT_ID`，將私鑰 PEM 設為 repository secret `RELEASE_APP_PRIVATE_KEY`。
-3. 在 repository 設定啟用 Allow auto-merge。設定 `main` 規則要求 PR 與 `verify` 成功，並允許安裝的 GitHub App 繞過直接推送限制，以便 Release workflow 寫入版本／引擎 metadata。`.github/` 與 Release helper 腳本設有 CODEOWNERS；分支規則須啟用「Require review from Code Owners」。
-4. 註冊 Windows x64 self-hosted runner，labels 設為 `self-hosted`, `windows`, `x64`, `neo-airplay-release`。主機需安裝 .NET 10 SDK、PowerShell 7、Git、GitHub CLI (`gh`) 及可信任的 Bonjour；`scripts/build-engine.ps1` 會讀取本機 Bonjour 安裝以建置 UxPlay。runner 版本需支援 Node 24（2.327.1 以上），並保持在線。
-
-Release runner 會執行已合併的專案建置與測試程式碼。只允許可信任的維護者更新 `develop`，限制 runner 的 repository 存取，並在隔離、不存放個人資料或其他憑證的 Windows 主機上執行。Release workflow 只由 `main` push 觸發，不在 PR 上執行。
-
-## 投影裝置
-
-### iPhone、iPad 或 Mac
-
-啟動 AirPlay 接收器後，從 Apple 裝置的螢幕鏡像或音訊播放清單選擇接收器名稱。畫面與音訊會在 UxPlay 獨立視窗中輸出。
-
-### Android
-
-在手機啟用 USB 偵錯並授權這台電腦；使用 Wi-Fi 時，先在 Android 完成無線偵錯配對並確認 ADB 清單看得到裝置。回到總覽按「重新整理」，選擇狀態為「已連線」的裝置，再按「開始投影」。Android 視窗可由 scrcpy 自行關閉，或按「停止 Android 投影」。Android 11 以上支援音訊轉送。
-
-第一次建置 UxPlay、GStreamer 與 Android scrcpy 執行環境時執行：
-
-```powershell
-.\scripts\build-engine.ps1
+```sh
+cd desktop
+bun run --silent smoke:bundle
 ```
 
-腳本會在 `.build\msys64` 安裝建置用的 MSYS2，下載 FDH2/UxPlay v1.73.7 的官方原始碼封存檔，編譯 `engine\uxplay.exe`，將執行期相依檔整理到 `engine\runtime`，並從 Genymobile 官方 GitHub staging scrcpy v4.1 Windows x64 與 ADB 至 `engine\android`。scrcpy 封存檔會先核對官方 SHA-256。這不是 Git clone，也不會下載 `leapbtw/uxplay-windows`。
+Linux 需要圖形與 D-Bus 工作階段；沒有桌面工作階段時可執行 `dbus-run-session -- xvfb-run --auto-servernum bun run --silent smoke:bundle`。這項檢查會啟動 Linux AppImage 封裝內或 DEB 安裝的應用程式執行檔、macOS `.app` 內的執行檔或 Windows release 執行檔，並使用暫存使用者資料目錄。它檢查正式應用程式啟動，不取代桌面 E2E、引擎串流或安裝後的人工驗收。
 
-建置 UxPlay 需要 x64 `dnssd.dll`；建置腳本會從可信任的 64 位元 Bonjour 目錄或 Windows `System32` 尋找，並核對 Bonjour 產品資訊、版本及 PE 架構。Bonjour Service 的 `mDNSResponder.exe` 可位於 `%ProgramFiles%` 或 `%ProgramFiles(x86)%`；服務執行檔與 x64 DNS-SD DLL 不必在同一目錄。建置腳本不會修改或啟動 Windows 服務。一般 App 啟動時會檢查 Bonjour Service，必要時透過 UAC 修復或啟動。
+### 從 macOS 交叉建置 Windows NSIS
 
-若只需重新 staging Android 執行環境，可單獨執行：
+安裝 LLVM、NSIS 與 `cargo-xwin`，再新增 MSVC Rust target：
 
-```powershell
-.\scripts\Stage-ScrcpyRuntime.ps1
+```sh
+brew install llvm makensis
+cargo install --locked cargo-xwin
+rustup target add x86_64-pc-windows-msvc
+export PATH="$(brew --prefix llvm)/bin:$PATH"
 ```
 
-需要啟用 AirPlay 時，App 會在說明操作後要求 UAC，從可信任的 Windows Bonjour 安裝複製執行檔到受保護的 `%ProgramFiles%\NeoAirPlay\Bonjour`：
+在 `desktop/` 執行：
 
-```powershell
-.\scripts\Stage-BonjourRuntime.ps1
+```sh
+bun run tauri build --ci --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis
 ```
 
-若要人工執行 staging，請以系統管理員身分啟動 PowerShell。腳本會從 `%ProgramFiles%` 或 `%ProgramFiles(x86)%` 的可信任 Bonjour 安裝尋找 `mDNSResponder.exe`，再從 64 位元 Bonjour 目錄或 Windows `System32` 獨立尋找相同版本的 x64 `dnssd.dll`；兩個元件都會核對 Bonjour 產品資訊及 PE 架構，並驗證複製前後的 SHA-256，最後放入 `%ProgramFiles%\NeoAirPlay\Bonjour`。不相容或缺少 x64 DNS-SD 元件時會停止並指出原因，不會改用 SysWOW64 的 x86 DLL。腳本不會複製 `uxplay-windows.exe` 或其他影音檔案，也不會下載 Bonjour。
+Tauri 將此交叉建置方式標示為實驗性，產生的 NSIS 安裝檔仍需在 Windows 驗證安裝與執行；MSI 必須在 Windows 建置。此流程目前不簽署 Windows 執行檔或安裝檔。請參閱 [Tauri Windows 安裝套件文件](https://v2.tauri.app/distribute/windows-installer/)。
 
-Neo AirPlay 在 Debug 或 Release 第一次啟動時會檢查 UxPlay/GStreamer 與 scrcpy/ADB 必要檔案。缺少時，App 會在背景下載對應 App 版本的引擎套件、驗證 SHA-256 與套件檔案清單後，再安裝到 App 的 `engine` 目錄。下載失敗時主視窗仍可使用，App 會在下次啟動重試。
+目前沒有設定 Windows 發行者憑證或 Apple Developer ID 憑證。macOS 使用 ad-hoc 簽章且未 notarize；從網路下載後，macOS 仍可能要求使用者在「隱私權與安全性」允許開啟。正式公開發佈前，需依 [Tauri 簽章與 notarization 指引](https://v2.tauri.app/distribute/sign/macos/) 配置憑證與 CI secrets。
 
-建立 Release 引擎套件前，先完成引擎建置，再執行：
-
-```powershell
-.\scripts\Pack-EngineRuntime.ps1
-```
-
-腳本會建立 `.build\neo-airplay-engine-win-x64.zip` 與 `.sha256` sidecar，並更新 App 內的引擎版本、Release 標籤和 SHA-256 設定。將 ZIP 附加至相同 `v<Version>` 標籤的 GitHub Release；目前 App 版本為 `0.1.0`，因此標籤是 `v0.1.0`。公開引擎套件不包含 Bonjour 元件。
-
-一般啟動時，App 會確認 Bonjour Service 正在執行且指向受保護的 `%ProgramFiles%\NeoAirPlay\Bonjour`。若服務停止、路徑不符或服務項目不存在，App 會從 `%ProgramFiles%` 或 `%ProgramFiles(x86)%` 尋找 Bonjour `mDNSResponder.exe`，再從受信任的 64 位元 Bonjour 目錄或 Windows `System32` 尋找產品資訊與版本相符的 x64 `dnssd.dll`。因此既有 x86 Service 可搭配獨立安裝的 x64 DNS-SD DLL。兩個元件通過架構、產品、版本與來源路徑檢查後，App 會簡短說明並顯示 UAC；核准後將元件 staging 至受保護目錄，再啟動或建立服務。若找到服務執行檔但沒有相符的 x64 DNS-SD 元件，App 會明確指出缺少元件並提供 Apple 官方安裝資訊。既有服務的原始路徑會備份，服務項目原先不存在時也會記錄此狀態，供還原腳本移除新建服務。若舊備份無效，App 只會在目前服務路徑可信任或服務目前不存在時依現況更新備份；目前服務路徑不可信時會停止修改服務。資料夾僅授予系統管理員修改權限和必要的讀取權限，服務不會執行 App 可寫入目錄中的檔案；不會自動下載或散布 Bonjour 二進位檔。取消 UAC 或服務在 Windows 中被停用時，AirPlay 暫不可用，Android 投影仍可使用。
-
-將 Windows Bonjour Service 切換到 Neo AirPlay 的受保護共用路徑需要系統管理員權限：
-
-```powershell
-.\scripts\Install-BonjourService.ps1
-```
-
-腳本先備份原服務狀態至 `%ProgramData%\NeoAirPlay\BonjourServiceBackup.json`，再將既有服務切換至 `%ProgramFiles%\NeoAirPlay\Bonjour\mDNSResponder.exe` 並重新啟動；若服務原本不存在，會從 staging 執行檔建立並啟動。要還原時，以系統管理員身分執行：
-
-```powershell
-.\scripts\Restore-BonjourService.ps1
-```
-
-若備份記錄服務原先不存在，還原腳本只會在服務路徑仍指向 Neo AirPlay 共用執行檔時移除該服務；受保護目錄中的 Bonjour 檔案會保留，讓 App 下次啟動可重試。服務備份存於 `%ProgramData%\NeoAirPlay`，一般使用者只有讀取權限。
-
-最後建置可發佈版本：
-
-```powershell
-dotnet publish src/NeoAirPlay.App/NeoAirPlay.App.csproj -c Release -o dist/NeoAirPlay-Release
-```
-
-發佈目錄會包含建置時已有的 UxPlay、GStreamer 與 scrcpy/ADB 引擎檔案；Bonjour 執行檔不會進入 Debug 或 Release App 輸出。若發佈時沒有引擎檔案，首次啟動會從相同版本的 GitHub Release 下載上述引擎套件。Bonjour Service 使用固定的系統共用路徑，因此搬移 App 目錄不影響服務。
+GitHub Actions 在 `develop` 或 `main` push，以及以 `main` 為目標的 Pull Request 上，於 Windows、macOS、Linux 執行單元檢查和桌面 E2E，並產生該平台的安裝套件。打包後的正式應用程式也會通過啟動 smoke check。成功的工作流程會把套件上傳為保留 14 天的 Actions artifact；目前不會自動建立公開 GitHub Release。
 
 ## 使用者資料
 
-- 設定：`%AppData%\NeoAirPlay\settings.json`
-- 記錄：`%LocalAppData%\NeoAirPlay\Logs\`
-- GStreamer 登錄快取：`%LocalAppData%\NeoAirPlay\gstreamer-registry.bin`
-- 自動啟動：目前使用者的 Windows `Run` 登錄機碼
-
-## 網路與限制
-
-電腦和 Apple 裝置需能在同一個區域網路互相連線。Windows 防火牆可能需要允許專案中的 `engine\uxplay.exe` 通過私人網路。Bonjour Service 使用 mDNS/DNS-SD；若網路隔離裝置間的多播探索，AirPlay 裝置清單可能看不到這台電腦。Android USB 投影需在手機開啟 USB 偵錯並接受本電腦的授權提示；無線投影需先在 Android 完成無線偵錯配對，並讓 ADB 裝置清單顯示該裝置。本 App 不會自動配對無線裝置。Android 11 以下可以投影畫面，但 scrcpy 音訊轉送需要 Android 11 以上。
-
-此版本使用穩定版 UxPlay v1.73.7，Bonjour Service 由受保護的 Neo AirPlay 系統共用目錄執行。AirPlay 多房間音訊不在此功能範圍內。UxPlay 專案說明 Windows 版本以 MSYS2/MinGW 建置，並將 v1.74 標為實驗版；本專案因此鎖定 v1.73.7。
+設定 JSON 與每日 JSONL 記錄存放在 Tauri 為目前使用者解析出的應用程式設定及記錄目錄。診斷頁載入當日記錄的最新 300 筆。
 
 ## 第三方元件與授權
 
-- UxPlay：GPL-3.0；建置後的授權文字位於 `engine\licenses\UxPlay-GPL-3.0.txt`。
-- scrcpy：Apache-2.0；官方發行包隨附的 `LICENSE.txt` 會保留在 `engine\android`。
-- GStreamer 與 MSYS2 執行期套件：授權文字由建置腳本複製到 `engine\runtime\licenses`。
-- Apple DNS-SD 標頭：授權文字保留在下載的 `dns_sd.h` 內。
-- 本機 Bonjour Service 元件：目前由這台電腦已登錄的 Bonjour 安裝複製，只供本機專案使用。Apple 的 Windows Bonjour 條款限制將 Bonjour 軟體對外再散布；不要把專案中的 Bonjour 執行檔放入公開下載包。授權依據請參閱 [Apple Bonjour for Windows 條款](https://developer.apple.com/licensing-trademarks/files/bonjour4win.pdf)。
-
-參考專案：[FDH2/UxPlay](https://github.com/FDH2/UxPlay)。本專案使用其公開的 UxPlay 原始碼作為外部執行引擎，UI、Windows 後端、設定與服務管理皆在此專案自行撰寫。
+UxPlay、GStreamer、scrcpy、ADB 及其相依元件由使用者安裝或自行放入引擎資源資料夾；預設安裝套件不附帶這些二進位檔。若建置時加入第三方執行檔，發佈者需保留各元件要求的授權文字與通知，並確認其散布條件。請參閱 [UxPlay](https://github.com/FDH2/UxPlay) 與 [scrcpy](https://github.com/Genymobile/scrcpy) 官方專案說明。
