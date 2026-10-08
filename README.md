@@ -12,7 +12,15 @@ Neo AirPlay 是 Windows、macOS 與 Linux 桌面接收器，使用 Tauri 2、Rus
 
 ## 執行需求
 
-桌面程式本身不含 UxPlay、GStreamer、ADB 或 scrcpy 二進位檔。首次使用前，請安裝這些引擎及其作業系統相依套件，並讓 `uxplay`、`adb`、`scrcpy` 可從 `PATH` 找到；App 啟動時會恢復 GUI 程序的 `PATH`，macOS 與 Linux 會讀取登入 shell 環境。也可將合法可散布的執行檔放入 `desktop/src-tauri/resources/engine/`，建置套件時會一併放入應用程式資源目錄。若缺少引擎，App 仍會啟動，總覽會顯示缺少的元件。
+桌面程式首次啟動會檢查 UxPlay、GStreamer、ADB 與 scrcpy，缺少時自動執行安裝流程；開發與安裝套件建置命令也會先準備這些工具。安裝需要網路，系統套件可能要求管理員授權；macOS 會開啟 Terminal，Linux 使用終端 sudo 或桌面的 polkit 授權，Windows 使用 UAC。介面會顯示安裝狀態、記錄位置與重試按鈕。安裝套件的依賴準備會在安裝後第一次開啟 App 時執行。
+
+| 平台 | 自動準備方式 |
+| :--- | :--- |
+| macOS | 準備 Homebrew、Xcode Command Line Tools、GStreamer、scrcpy 與 Android Platform Tools，從固定的官方來源建置 UxPlay 至 `~/.local/bin`。 |
+| Linux | 透過 apt、dnf 或 pacman 安裝影音及編譯相依套件，準備 ADB、scrcpy、Avahi 並建置 UxPlay。需要可用的套件庫與系統服務管理環境。 |
+| Windows | 準備 WinGet、MSYS2 UCRT64、GStreamer、scrcpy 與 ADB，再建置固定 commit 的 UxPlay。這條路徑使用官方 **1.74 實驗版**的內建 mDNS，以避開需人工取得的 Bonjour SDK；尚需 Windows 實機驗證。 |
+
+安裝腳本位於 [desktop/src-tauri/resources/setup/](desktop/src-tauri/resources/setup/)。UxPlay 原始碼下載後會核對固定 SHA-256。套件不預先附帶第三方二進位檔；也可將合法可散布的完整引擎與相依檔案放入 `desktop/src-tauri/resources/engine/`。App 會檢查資源目錄、系統 `PATH`、使用者 `~/.local/bin` 與常見 MSYS2／WinGet 位置。
 
 - [UxPlay 官方專案](https://github.com/FDH2/UxPlay)：依作業系統安裝 UxPlay、GStreamer 及 DNS-SD 服務探索相依項目。Windows、macOS 與 Linux 的建置方式不同。
 - [scrcpy 官方專案](https://github.com/Genymobile/scrcpy)：安裝 scrcpy 與 Android Platform Tools 的 ADB。Android USB 投影需要在手機開啟 USB 偵錯並授權此電腦；無線裝置須先由使用者完成 Android 無線偵錯配對。
@@ -22,7 +30,19 @@ Tauri 的開發環境需求依平台而異，請依 [Tauri 官方先決條件](h
 
 ## 開發與驗證
 
-安裝 Rust stable、Bun 1.4.2、Node.js 22 及目前平台所需的 Tauri 建置工具後，在專案根目錄執行：
+第一次取得專案時，在根目錄準備開發工具及投影依賴。macOS／Linux：
+
+```sh
+bash setup.sh
+```
+
+Windows PowerShell：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
+```
+
+這些入口會準備 Rust stable、Bun 1.4.2、Node.js 22.23.3、平台建置工具及前端套件。完成後開啟新終端，讓已安裝工具的環境設定生效；作業系統安裝程式要求授權或重新啟動時，需完成系統提示。已有開發工具時，可直接在專案根目錄執行：
 
 ```sh
 cd desktop
@@ -55,6 +75,8 @@ bun run bundle
 ```
 
 Tauri 會建置目前作業系統的安裝套件，輸出位於 `desktop/src-tauri/target/release/bundle/`。預設設定啟用該平台可用的所有格式，例如 Windows MSI／NSIS、macOS DMG／APP，以及 Linux DEB／RPM／AppImage。一般建置應使用目標作業系統的原生環境；macOS 也能交叉產生 Windows x64 NSIS 安裝檔。
+
+CI、隔離 E2E 與 bundle smoke check 會設定 `NEO_AIRPLAY_SKIP_SETUP=1`，避免測試過程安裝系統軟體。其他無網路或僅編譯的環境也可明確設定此變數；此時需自行確保實際使用機器的工具可用。
 
 打包後可在建置主機啟動正式應用程式，確認程式至少能正常存活 8 秒：
 
@@ -94,4 +116,6 @@ GitHub Actions 在 `develop` 或 `main` push，以及以 `main` 為目標的 Pul
 
 ## 第三方元件與授權
 
-UxPlay、GStreamer、scrcpy、ADB 及其相依元件由使用者安裝或自行放入引擎資源資料夾；預設安裝套件不附帶這些二進位檔。若建置時加入第三方執行檔，發佈者需保留各元件要求的授權文字與通知，並確認其散布條件。請參閱 [UxPlay](https://github.com/FDH2/UxPlay) 與 [scrcpy](https://github.com/Genymobile/scrcpy) 官方專案說明。
+UxPlay、GStreamer、scrcpy、ADB 及其相依元件由準備腳本下載、建置或透過套件管理器安裝；預設安裝套件不附帶這些二進位檔。若建置時加入第三方執行檔，發佈者需保留各元件要求的授權文字與通知，並確認其散布條件。請參閱 [UxPlay](https://github.com/FDH2/UxPlay) 與 [scrcpy](https://github.com/Genymobile/scrcpy) 官方專案說明。
+
+專案檢查的修正、驗證證據及尚待實機驗收的項目記錄於 [Review 記錄](.neo_harness/docs/review-and-setup.md)。

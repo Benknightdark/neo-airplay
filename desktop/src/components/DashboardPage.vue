@@ -19,6 +19,23 @@ const emit = defineEmits<{
 const selectedSerial = ref("");
 const availableDevices = computed(() => props.dashboard.devices.filter((device) => device.status === "ready"));
 const selectedDevice = computed(() => availableDevices.value.find((device) => device.serial === selectedSerial.value));
+const unavailableDeviceHint = computed(() => {
+  const devices = props.dashboard.devices;
+
+  if (devices.every((device) => device.status === "unauthorized")) {
+    return "找到未授權的裝置。請在 Android 裝置上確認並允許此電腦的偵錯連線。";
+  }
+
+  if (devices.every((device) => device.status === "offline")) {
+    return "裝置目前離線，請確認手機已連線並重新整理裝置清單。";
+  }
+
+  if (devices.every((device) => device.status === "unknown")) {
+    return "無法辨識裝置狀態，請重新整理裝置清單或檢查 ADB 連線。";
+  }
+
+  return "找到裝置，但目前沒有可用裝置。請確認裝置連線或偵錯授權後重新整理。";
+});
 
 watch(availableDevices, (devices) => {
   if (!devices.some((device) => device.serial === selectedSerial.value)) {
@@ -109,7 +126,7 @@ function toggleAndroid(): void {
             <button class="button-icon" type="button" aria-label="重新整理 Android 裝置" data-testid="android-refresh" :disabled="busy" @click="emit('refresh-devices')">⟳</button>
           </div>
           <p v-if="dashboard.devices.length === 0" class="field-hint">尚未找到裝置。請連接手機並開啟 USB 偵錯。</p>
-          <p v-else-if="availableDevices.length === 0" class="field-hint">已找到裝置，但尚未授權 USB 偵錯。</p>
+          <p v-else-if="availableDevices.length === 0" class="field-hint" data-testid="android-device-hint">{{ unavailableDeviceHint }}</p>
         </div>
         <div class="card-actions android-actions">
           <button

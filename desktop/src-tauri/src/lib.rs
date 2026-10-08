@@ -1,3 +1,4 @@
+mod dependencies;
 mod models;
 mod state;
 
@@ -8,6 +9,23 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Manager, State, WindowEvent};
 use tauri_plugin_autostart::ManagerExt;
 
+#[derive(Default)]
+struct SettingsTransaction(std::sync::Mutex<()>);
+
+#[tauri::command]
+fn get_dependencies(
+    state: State<'_, dependencies::DependencyManager>,
+) -> Result<dependencies::DependencySnapshot, String> {
+    state.snapshot()
+}
+
+#[tauri::command]
+fn install_dependencies(
+    state: State<'_, dependencies::DependencyManager>,
+) -> Result<dependencies::DependencySnapshot, String> {
+    state.start()
+}
+
 #[tauri::command]
 fn get_dashboard(state: State<'_, AppState>) -> Result<DashboardSnapshot, String> {
     state.dashboard()
@@ -17,8 +35,10 @@ fn get_dashboard(state: State<'_, AppState>) -> Result<DashboardSnapshot, String
 fn save_settings(
     app: AppHandle,
     state: State<'_, AppState>,
+    transaction: State<'_, SettingsTransaction>,
     settings: ReceiverSettings,
 ) -> Result<ReceiverSettings, String> {
+    let _transaction = transaction.0.lock().map_err(|_| "設定儲存狀態無法更新。")?;
     let current = state.settings()?;
     let next = settings.sanitized();
 
@@ -83,6 +103,7 @@ fn stop_android_mirror(state: State<'_, AppState>) -> Result<models::EngineSnaps
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
+        .manage(SettingsTransaction::default())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);
         }))
@@ -107,8 +128,8 @@ pub fn run() {
             };
             std::fs::create_dir_all(&config_dir)?;
             std::fs::create_dir_all(&log_dir)?;
-            let state =
-                AppState::new(config_dir, log_dir, resource_dir).map_err(std::io::Error::other)?;
+            let state = AppState::new(config_dir.clone(), log_dir, resource_dir.clone())
+                .map_err(std::io::Error::other)?;
             if state
                 .settings()
                 .map_err(std::io::Error::other)?
@@ -119,6 +140,14 @@ pub fn run() {
                     .map_err(|error| std::io::Error::other(error.to_string()))?;
             }
             app.manage(state);
+            let dependencies = dependencies::DependencyManager::new(
+                resource_dir,
+                &config_dir,
+                e2e_profile.is_none()
+                    && std::env::var_os("NEO_AIRPLAY_SKIP_SETUP").is_none_or(|value| value != "1"),
+            );
+            dependencies.start().map_err(std::io::Error::other)?;
+            app.manage(dependencies);
 
             let show_item = MenuItem::with_id(app, "show", "顯示主視窗", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "結束 Neo AirPlay", true, None::<&str>)?;
@@ -165,6 +194,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_dashboard,
+            get_dependencies,
+            install_dependencies,
             save_settings,
             start_airplay,
             stop_airplay,

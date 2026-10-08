@@ -7,22 +7,30 @@ export function useAppState() {
   const busy = ref(false);
   const error = ref<string | null>(null);
   let dashboardPollingTimer: number | undefined;
+  let latestDashboardRequest = 0;
+  let dashboardRefreshRequestsInFlight = 0;
 
   async function refresh(clearError = false): Promise<void> {
     if (clearError) error.value = null;
+    const requestId = ++latestDashboardRequest;
+    dashboardRefreshRequestsInFlight += 1;
     try {
-      dashboard.value = await api.getDashboard();
+      const next = await api.getDashboard();
+      if (requestId === latestDashboardRequest) dashboard.value = next;
     } catch (reason) {
-      error.value = errorMessage(reason);
+      if (requestId === latestDashboardRequest) error.value = errorMessage(reason);
+    } finally {
+      dashboardRefreshRequestsInFlight -= 1;
     }
   }
 
   async function runAction(action: () => Promise<unknown>): Promise<void> {
+    if (busy.value) return;
     busy.value = true;
     error.value = null;
     try {
       await action();
-      dashboard.value = await api.getDashboard();
+      await refresh();
     } catch (reason) {
       error.value = errorMessage(reason);
       await refresh();
@@ -34,7 +42,7 @@ export function useAppState() {
 
   onMounted(() => {
     dashboardPollingTimer = window.setInterval(() => {
-      if (!busy.value) void refresh();
+      if (!busy.value && dashboardRefreshRequestsInFlight === 0) void refresh();
     }, 1500);
   });
 

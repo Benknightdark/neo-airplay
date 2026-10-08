@@ -7,7 +7,7 @@ const result = spawnSync(
   ["run", "tauri", "build", "--debug", "--no-bundle", "--features", "wdio", "--config", "src-tauri/tauri.e2e.conf.json"],
   {
     cwd: process.cwd(),
-    env: { ...process.env, VITE_WDIO: "true" },
+    env: { ...process.env, VITE_WDIO: "true", NEO_AIRPLAY_SKIP_SETUP: "1" },
     encoding: "utf8",
     maxBuffer: 32 * 1024 * 1024,
   },

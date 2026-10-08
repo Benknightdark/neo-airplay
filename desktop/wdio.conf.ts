@@ -2,16 +2,14 @@ import { chmodSync, copyFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-const appBinaryPath = resolve(
-  "src-tauri/target/debug/neo-airplay" + (process.platform === "win32" ? ".exe" : ""),
-);
+const targetDir = resolve(process.env.CARGO_TARGET_DIR ?? "src-tauri/target");
+const appBinaryPath = join(targetDir, "debug", `neo-airplay${process.platform === "win32" ? ".exe" : ""}`);
 const profilePath = join(tmpdir(), `neo-airplay-wdio-${process.pid}`);
 process.env.NEO_AIRPLAY_E2E_APP_BINARY = appBinaryPath;
 process.env.NEO_AIRPLAY_E2E_PROFILE = profilePath;
 rmSync(profilePath, { force: true, recursive: true });
 mkdirSync(profilePath, { recursive: true });
 
-const targetDir = resolve(process.env.CARGO_TARGET_DIR ?? "src-tauri/target");
 const fixtureName = `fake-engine${process.platform === "win32" ? ".exe" : ""}`;
 const fixturePath = join(targetDir, "neo-airplay-e2e-engine", fixtureName);
 const engineDirectory = join(profilePath, "engine");

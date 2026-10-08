@@ -4,6 +4,7 @@ use crate::models::{
 };
 use chrono::Local;
 use std::collections::VecDeque;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -13,6 +14,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const MAX_RECENT_LOGS: usize = 300;
+const MAX_CAPTURED_PROCESS_OUTPUT_BYTES: usize = 1024 * 1024;
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct AppState {
@@ -21,6 +23,7 @@ pub struct AppState {
     logger: AppLogger,
     airplay: EngineController,
     android: EngineController,
+    android_refresh: Mutex<()>,
     devices: Mutex<Vec<AndroidDevice>>,
 }
 
@@ -44,6 +47,7 @@ impl AppState {
                 logger.clone(),
             ),
             android: EngineController::new(EngineKind::Android, resource_dir, logger.clone()),
+            android_refresh: Mutex::new(()),
             logger,
             devices: Mutex::new(Vec::new()),
         })
@@ -58,11 +62,11 @@ impl AppState {
 
     pub fn save_settings(&self, settings: ReceiverSettings) -> Result<(), String> {
         let settings = settings.sanitized();
-        write_settings(&self.settings_path, &settings)?;
         let mut current = self
             .settings
             .lock()
             .map_err(|_| "設定狀態無法更新。".to_owned())?;
+        write_settings(&self.settings_path, &settings)?;
         *current = settings;
         Ok(())
     }
@@ -96,6 +100,10 @@ impl AppState {
     }
 
     pub fn refresh_android_devices(&self) -> Result<Vec<AndroidDevice>, String> {
+        let _refresh = self
+            .android_refresh
+            .lock()
+            .map_err(|_| "Android 裝置更新狀態無法讀取。".to_owned())?;
         let Some(adb_path) = find_executable(&self.android.resource_dir, "adb", true) else {
             let message = "找不到 ADB。請安裝 Android Platform Tools 或 scrcpy。".to_owned();
             self.logger.write(LogLevel::Error, &message);
@@ -356,6 +364,7 @@ impl EngineController {
         let mut command = Command::new(&executable);
         command
             .args(args)
+            .env("PATH", resolved_path(&self.resource_dir))
             .current_dir(executable.parent().unwrap_or(&self.resource_dir))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -554,7 +563,7 @@ impl Drop for EngineController {
     }
 }
 
-fn find_executable(resource_dir: &Path, name: &str, android: bool) -> Option<PathBuf> {
+pub(crate) fn find_executable(resource_dir: &Path, name: &str, android: bool) -> Option<PathBuf> {
     let resource_dirs = if android {
         vec![
             resource_dir.join("engine/android"),
@@ -567,7 +576,7 @@ fn find_executable(resource_dir: &Path, name: &str, android: bool) -> Option<Pat
     for directory in resource_dirs {
         for candidate_name in &names {
             let candidate = directory.join(candidate_name);
-            if candidate.is_file() {
+            if is_executable_file(&candidate) {
                 return Some(candidate);
             }
         }
@@ -579,7 +588,7 @@ fn find_executable(resource_dir: &Path, name: &str, android: bool) -> Option<Pat
     for directory in search_directories {
         for candidate_name in &names {
             let candidate = directory.join(candidate_name);
-            if candidate.is_file() {
+            if is_executable_file(&candidate) {
                 return Some(candidate);
             }
         }
@@ -587,28 +596,129 @@ fn find_executable(resource_dir: &Path, name: &str, android: bool) -> Option<Pat
     None
 }
 
+pub(crate) fn resolved_path(resource_dir: &Path) -> OsString {
+    let mut paths = vec![
+        resource_dir.join("engine/android"),
+        resource_dir.join("engine"),
+        resource_dir.to_owned(),
+    ];
+    paths.extend(
+        std::env::var_os("PATH")
+            .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
+    paths.extend(system_search_paths());
+
+    let mut unique = Vec::with_capacity(paths.len());
+    for path in paths {
+        if !unique.iter().any(|existing| existing == &path) {
+            unique.push(path);
+        }
+    }
+    std::env::join_paths(unique).unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
+}
+
 fn system_search_paths() -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        vec![
+        let mut paths = vec![
             PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/Library/Frameworks/GStreamer.framework/Versions/1.0/bin"),
             PathBuf::from("/usr/local/bin"),
             PathBuf::from("/usr/bin"),
             PathBuf::from("/bin"),
-        ]
+        ];
+        if let Some(home) = std::env::var_os("HOME") {
+            paths.insert(1, PathBuf::from(home).join(".local/bin"));
+        }
+        paths
     }
     #[cfg(target_os = "linux")]
     {
-        vec![
+        let mut paths = vec![
             PathBuf::from("/usr/local/bin"),
             PathBuf::from("/usr/bin"),
             PathBuf::from("/bin"),
             PathBuf::from("/snap/bin"),
-        ]
+        ];
+        if let Some(home) = std::env::var_os("HOME") {
+            paths.insert(0, PathBuf::from(home).join(".local/bin"));
+        }
+        paths
     }
     #[cfg(target_os = "windows")]
     {
-        Vec::new()
+        let mut paths = Vec::new();
+        if let Some(root) = std::env::var_os("NEO_AIRPLAY_MSYS2_ROOT") {
+            append_msys_paths(&mut paths, PathBuf::from(root));
+        }
+        if let Some(system_drive) = std::env::var_os("SystemDrive") {
+            let drive = system_drive.to_string_lossy();
+            let drive = drive.trim_end_matches(['\\', '/']);
+            append_msys_paths(&mut paths, PathBuf::from(format!("{drive}\\msys64")));
+        }
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            let local_app_data = PathBuf::from(local_app_data);
+            append_msys_paths(&mut paths, local_app_data.join("msys64"));
+            paths.push(local_app_data.join("Microsoft/WinGet/Links"));
+            add_winget_package_paths(&mut paths, &local_app_data);
+        }
+        if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+            append_msys_paths(&mut paths, PathBuf::from(user_profile).join("msys64"));
+        }
+        paths
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn append_msys_paths(paths: &mut Vec<PathBuf>, root: PathBuf) {
+    paths.push(root.join("ucrt64/bin"));
+    paths.push(root.join("clangarm64/bin"));
+}
+
+#[cfg(target_os = "windows")]
+fn add_winget_package_paths(paths: &mut Vec<PathBuf>, local_app_data: &Path) {
+    let packages_dir = local_app_data.join("Microsoft/WinGet/Packages");
+    for package_id in ["Genymobile.scrcpy", "Google.PlatformTools"] {
+        let prefix = format!("{package_id}_");
+        let Ok(packages) = fs::read_dir(&packages_dir) else {
+            continue;
+        };
+        for package in packages.flatten() {
+            let package_path = package.path();
+            if !package.file_name().to_string_lossy().starts_with(&prefix) || !package_path.is_dir()
+            {
+                continue;
+            }
+            paths.push(package_path.clone());
+            if let Ok(contents) = fs::read_dir(package_path) {
+                paths.extend(
+                    contents
+                        .flatten()
+                        .map(|entry| entry.path())
+                        .filter(|path| path.is_dir()),
+                );
+            }
+        }
+    }
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
     }
 }
 
@@ -628,8 +738,27 @@ fn run_with_timeout(
     args: &[String],
     timeout: Duration,
 ) -> Result<Output, String> {
-    let mut child = Command::new(executable)
-        .args(args)
+    run_with_timeout_in_path(executable, args, timeout, None).map_err(|error| {
+        if error == "程序執行逾時。" {
+            "ADB 裝置查詢逾時。".to_owned()
+        } else {
+            error
+        }
+    })
+}
+
+pub(crate) fn run_with_timeout_in_path(
+    executable: &Path,
+    args: &[String],
+    timeout: Duration,
+    path: Option<&OsStr>,
+) -> Result<Output, String> {
+    let mut command = Command::new(executable);
+    command.args(args);
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+    let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -662,7 +791,7 @@ fn run_with_timeout(
             let _ = child.wait();
             let _ = finish_pipe(stdout_reader);
             let _ = finish_pipe(stderr_reader);
-            return Err("ADB 裝置查詢逾時。".to_owned());
+            return Err("程序執行逾時。".to_owned());
         }
         thread::sleep(Duration::from_millis(40));
     }
@@ -670,23 +799,46 @@ fn run_with_timeout(
 
 fn read_pipe<R: Read + Send + 'static>(
     mut reader: R,
-) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
+) -> thread::JoinHandle<std::io::Result<CapturedPipe>> {
     thread::spawn(move || {
-        let mut output = Vec::new();
-        reader.read_to_end(&mut output)?;
-        Ok(output)
+        let mut output = Vec::with_capacity(MAX_CAPTURED_PROCESS_OUTPUT_BYTES.min(8192));
+        let mut exceeded_limit = false;
+        let mut buffer = [0_u8; 8192];
+        loop {
+            let count = reader.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            let remaining = MAX_CAPTURED_PROCESS_OUTPUT_BYTES.saturating_sub(output.len());
+            let captured = count.min(remaining);
+            output.extend_from_slice(&buffer[..captured]);
+            exceeded_limit |= captured < count;
+        }
+        Ok(CapturedPipe {
+            bytes: output,
+            exceeded_limit,
+        })
     })
 }
 
+struct CapturedPipe {
+    bytes: Vec<u8>,
+    exceeded_limit: bool,
+}
+
 fn finish_pipe(
-    reader: Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+    reader: Option<thread::JoinHandle<std::io::Result<CapturedPipe>>>,
 ) -> Result<Vec<u8>, String> {
     reader
         .map(|reader| {
-            reader
+            let output = reader
                 .join()
                 .map_err(|_| "無法讀取 ADB 程序輸出。".to_owned())?
-                .map_err(|error| format!("無法讀取 ADB 程序輸出：{error}"))
+                .map_err(|error| format!("無法讀取 ADB 程序輸出：{error}"))?;
+            if output.exceeded_limit {
+                return Err("外部程序輸出超過 1 MiB 上限。".to_owned());
+            }
+            Ok(output.bytes)
         })
         .unwrap_or_else(|| Ok(Vec::new()))
 }
@@ -798,13 +950,16 @@ fn push_recent(entries: &mut VecDeque<AppLogEntry>, entry: AppLogEntry) {
 #[cfg(test)]
 mod tests {
     use super::{
-        airplay_arguments, load_settings, parse_adb_devices, renderer_argument, write_settings,
-        AppLogger, EngineController, EngineKind,
+        airplay_arguments, finish_pipe, is_executable_file, load_settings, parse_adb_devices,
+        read_pipe, renderer_argument, write_settings, AppLogger, AppState, EngineController,
+        EngineKind, MAX_CAPTURED_PROCESS_OUTPUT_BYTES,
     };
     use crate::models::{AndroidDeviceStatus, EngineSnapshot, EngineStatus, ReceiverSettings};
     use std::fs;
+    use std::io::Cursor;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
+    use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
     #[test]
@@ -864,6 +1019,71 @@ mod tests {
 
         assert_eq!(load_settings(&path), settings);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn concurrent_settings_saves_keep_memory_and_disk_in_sync() {
+        const WORKERS: usize = 8;
+        const SAVES_PER_WORKER: usize = 40;
+
+        let directory = test_directory("concurrent-settings");
+        let state = Arc::new(
+            AppState::new(
+                directory.join("config"),
+                directory.join("logs"),
+                PathBuf::new(),
+            )
+            .unwrap(),
+        );
+        let barrier = Arc::new(Barrier::new(WORKERS));
+        let workers = (0..WORKERS)
+            .map(|worker| {
+                let state = Arc::clone(&state);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    for save in 0..SAVES_PER_WORKER {
+                        state
+                            .save_settings(ReceiverSettings {
+                                receiver_name: format!("worker-{worker}-save-{save}"),
+                                ..ReceiverSettings::default()
+                            })
+                            .unwrap();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        let persisted = load_settings(&directory.join("config/settings.json"));
+        assert_eq!(persisted, state.settings().unwrap());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_check_rejects_files_without_execute_permission() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = test_directory("non-executable");
+        let engine_directory = directory.join("engine");
+        fs::create_dir_all(&engine_directory).unwrap();
+        let executable = engine_directory.join("uxplay");
+        fs::write(&executable, b"not executable").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert!(!is_executable_file(&executable));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn process_output_capture_rejects_overflow_after_draining_pipe() {
+        let output = vec![b'x'; MAX_CAPTURED_PROCESS_OUTPUT_BYTES + 1];
+        let result = finish_pipe(Some(read_pipe(Cursor::new(output))));
+        assert_eq!(result.unwrap_err(), "外部程序輸出超過 1 MiB 上限。");
     }
 
     #[test]

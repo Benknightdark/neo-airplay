@@ -8,8 +8,11 @@ import { $, expect } from "@wdio/globals";
 describe("Neo AirPlay 桌面流程", () => {
   it("啟動後顯示兩種投影服務", async () => {
     await expect($("[data-testid='dashboard-page']")).toBeDisplayed();
+    await expect($("[data-testid='dependency-panel']")).not.toBeDisplayed();
     await expect($("[data-testid='airplay-start']")).toBeDisplayed();
+    await expect($("[data-testid='airplay-start']")).toBeEnabled();
     await expect($("[data-testid='android-refresh']")).toBeDisplayed();
+    await expect($("[data-testid='android-refresh']")).toBeEnabled();
     await expect($("[data-testid='airplay-status']")).toHaveText(expect.stringContaining("未啟動"));
   });
 

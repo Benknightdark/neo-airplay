@@ -6,7 +6,7 @@
 
 - 前端透過 Tauri IPC 呼叫已註冊命令。正式 capability 只包含 `core:default`；E2E 使用的 WDIO capability 位於測試覆寫設定，不會加入正式組態。
 - Content Security Policy 限制頁面資源為本機來源及 Tauri IPC。前端沒有載入外部腳本或遠端內容。
-- 程式不要求系統管理員權限、不安裝 Windows Bonjour Service，也不建立防火牆規則。
+- App 本身以一般使用者權限執行；依賴安裝腳本可透過 sudo、polkit、UAC 或平台安裝程式要求系統套件安裝授權。App 不建立防火牆規則。
 - Tauri autostart plugin 只註冊登入啟動項目；設定為停用時會移除該註冊。
 
 ## 外部程序與網路
@@ -15,7 +15,7 @@
 - App 啟動時使用 `fix-path-env` 恢復程序 `PATH`；macOS 與 Linux 會啟動使用者設定的登入 shell 讀取環境，因此 shell 啟動設定屬於信任邊界。
 - Android 投影只可使用剛由 ADB 列舉且狀態為 `device` 的裝置序號。App 不執行 ADB 配對或 TCP/IP 連線命令。
 - 引擎執行檔會從應用程式資源目錄或啟動時取得的系統 `PATH` 尋找。這些位置是程式碼執行信任邊界；使用者應只安裝或放置可信任來源的 UxPlay、ADB、scrcpy 及相依檔案。
-- UxPlay 提供區域網路 AirPlay 接收服務。App 不管理 mDNS/DNS-SD、Avahi、Bonjour 或 OS 防火牆；請依各平台 UxPlay 說明設定必要服務與網路。
+- UxPlay 提供區域網路 AirPlay 接收服務。Linux 準備腳本會安裝並啟用 Avahi。macOS 使用系統 Bonjour；Windows 固定採用 UxPlay 官方 1.74 實驗來源的內建 mDNS。OS 防火牆與區域網路可達性仍需由使用者允許。
 - App 會將 UxPlay、scrcpy 與 ADB 的輸出寫入本機診斷記錄。Android 投影啟動資訊可能含裝置型號與序號；分享記錄前應先檢查內容。
 
 ## 使用者資料與 E2E
@@ -28,5 +28,6 @@
 
 - 預設套件不含 UxPlay、GStreamer、ADB、scrcpy、Bonjour 或 Avahi 二進位檔。使用者安裝時需依上游授權與通知要求保留第三方文件。
 - 本機可選擇將引擎檔案放在 `desktop/src-tauri/resources/engine/`；加入任何外部執行檔前，需確認散布授權、來源與必要的授權文件。
+- 自動準備會下載並執行官方套件管理器或工具安裝腳本。UxPlay 來源固定於腳本記錄的 commit 並核對 SHA-256；作業系統套件信任其套件庫的簽章與驗證機制。Rust 不接受由前端傳入的安裝指令或 URL。
 - GitHub Actions 權限為 `contents: read`，只建置、測試並上傳限期 Actions artifact，不建立 tag、推送版本檔或公開 Release。
 - 專案未設定依賴弱點掃描、Windows 發行者憑證、Apple Developer ID 或執行檔來源驗證。macOS 僅使用 ad-hoc 簽章且未 notarize；這些發佈控制不能視為已完成。

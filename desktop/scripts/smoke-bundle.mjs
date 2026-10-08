@@ -37,6 +37,7 @@ if (!existsSync(executablePath)) {
 
 const temporaryHome = mkdtempSync(join(tmpdir(), "neo-airplay-bundle-smoke-"));
 const environment = { ...process.env };
+environment.NEO_AIRPLAY_SKIP_SETUP = "1";
 
 if (process.platform === "win32") {
   environment.APPDATA = join(temporaryHome, "AppData/Roaming");

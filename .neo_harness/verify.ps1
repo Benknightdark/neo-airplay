@@ -18,8 +18,8 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 }
 
 $nodeVersion = (& node --version).Trim()
-if ($LASTEXITCODE -ne 0 -or $nodeVersion -notmatch '^v22\.') {
-    throw "Node.js 22 is required for frontend unit tests. Found '$nodeVersion'."
+if ($LASTEXITCODE -ne 0 -or $nodeVersion -notmatch '^v22\.' -or [version]$nodeVersion.TrimStart('v') -lt [version]'22.22.2') {
+    throw "Node.js 22.22.2 or newer within the 22.x line is required for frontend unit tests. Found '$nodeVersion'."
 }
 
 Push-Location $desktopRoot

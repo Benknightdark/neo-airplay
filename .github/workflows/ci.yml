@@ -12,6 +12,9 @@ on:
 permissions:
   contents: read
 
+env:
+  NEO_AIRPLAY_SKIP_SETUP: "1"
+
 jobs:
   verify:
     name: verify (${{ matrix.os }})

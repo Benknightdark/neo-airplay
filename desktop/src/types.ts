@@ -2,6 +2,13 @@ export type EngineStatus = "stopped" | "starting" | "running" | "stopping" | "fa
 export type AndroidDeviceStatus = "ready" | "unauthorized" | "offline" | "unknown";
 export type LogLevel = "information" | "warning" | "error";
 
+export interface DependencySnapshot {
+  status: "checking" | "installing" | "ready" | "failed" | "disabled";
+  message: string;
+  missing: string[];
+  logPath: string;
+}
+
 export interface EngineSnapshot {
   status: EngineStatus;
   message: string;

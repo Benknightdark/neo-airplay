@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from "vue";
 import DashboardPage from "./components/DashboardPage.vue";
 import DiagnosticsPage from "./components/DiagnosticsPage.vue";
 import SettingsPage from "./components/SettingsPage.vue";
+import DependencyPanel from "./components/DependencyPanel.vue";
 import { useAppState } from "./composables/useAppState";
 
 type PageKey = "overview" | "settings" | "diagnostics";
@@ -14,6 +15,7 @@ const pages: { key: PageKey; label: string; icon: string }[] = [
 ];
 
 const activePage = ref<PageKey>("overview");
+const preparingDependencies = ref(true);
 const { dashboard, busy, error, refresh, startAirplay, stopAirplay, refreshDevices, startAndroid, stopAndroid, saveSettings } = useAppState();
 const pageTitle = computed(() => pages.find((page) => page.key === activePage.value)?.label ?? "總覽");
 
@@ -67,12 +69,13 @@ onMounted(() => {
       </header>
 
       <div v-if="error" class="alert-banner" role="alert" data-testid="app-error">{{ error }}</div>
+      <DependencyPanel @busy="preparingDependencies = $event" />
       <div v-if="!dashboard" class="loading-state" role="status">正在載入接收器狀態…</div>
 
       <DashboardPage
         v-else-if="activePage === 'overview'"
         :dashboard="dashboard"
-        :busy="busy"
+        :busy="busy || preparingDependencies"
         @start-airplay="startAirplay"
         @stop-airplay="stopAirplay"
         @refresh-devices="refreshDevices"
