@@ -122,13 +122,28 @@ pub fn run() {
             let e2e_profile = e2e_profile_directory();
             let (config_dir, log_dir) =
                 application_directories(app.handle(), e2e_profile.as_deref())?;
-            let resource_dir = match &e2e_profile {
-                Some(profile) => profile.clone(),
-                None => app.path().resource_dir()?,
+            let engine_dir = match &e2e_profile {
+                Some(profile) => profile.join("engine"),
+                None => {
+                    #[cfg(debug_assertions)]
+                    let engine_dir =
+                        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../engine");
+
+                    #[cfg(not(debug_assertions))]
+                    let engine_dir = {
+                        let engine_dir = app.path().app_local_data_dir()?.join("engine");
+                        let bundled_engine = app.path().resource_dir()?.join("engine");
+                        seed_bundled_engine(&bundled_engine, &engine_dir)?;
+                        engine_dir
+                    };
+
+                    engine_dir
+                }
             };
             std::fs::create_dir_all(&config_dir)?;
             std::fs::create_dir_all(&log_dir)?;
-            let state = AppState::new(config_dir.clone(), log_dir, resource_dir.clone())
+            std::fs::create_dir_all(&engine_dir)?;
+            let state = AppState::new(config_dir.clone(), log_dir, engine_dir.clone())
                 .map_err(std::io::Error::other)?;
             if state
                 .settings()
@@ -141,11 +156,13 @@ pub fn run() {
             }
             app.manage(state);
             let dependencies = dependencies::DependencyManager::new(
-                resource_dir,
+                engine_dir,
                 &config_dir,
                 e2e_profile.is_none()
                     && std::env::var_os("NEO_AIRPLAY_SKIP_SETUP").is_none_or(|value| value != "1"),
             );
+            // Check and repair missing runtime tools on every normal app start. The manager
+            // performs this work on a background thread so the window can open immediately.
             dependencies.start().map_err(std::io::Error::other)?;
             app.manage(dependencies);
 
@@ -205,6 +222,42 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("無法啟動 Neo AirPlay 桌面應用程式");
+}
+
+#[cfg(not(debug_assertions))]
+fn seed_bundled_engine(
+    bundled_engine: &std::path::Path,
+    engine_dir: &std::path::Path,
+) -> Result<(), std::io::Error> {
+    use std::fs;
+
+    let marker = engine_dir.join(format!(".bundled-{}", env!("CARGO_PKG_VERSION")));
+    if marker.exists() || !bundled_engine.is_dir() {
+        return Ok(());
+    }
+
+    fn copy_contents(
+        source: &std::path::Path,
+        destination: &std::path::Path,
+    ) -> std::io::Result<()> {
+        fs::create_dir_all(destination)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            let metadata = fs::metadata(&source_path)?;
+            if metadata.is_dir() {
+                copy_contents(&source_path, &destination_path)?;
+            } else if metadata.is_file() {
+                fs::copy(&source_path, &destination_path)?;
+                fs::set_permissions(&destination_path, metadata.permissions())?;
+            }
+        }
+        Ok(())
+    }
+
+    copy_contents(bundled_engine, engine_dir)?;
+    fs::write(marker, b"seeded\n")
 }
 
 fn show_main_window(app: &AppHandle) {

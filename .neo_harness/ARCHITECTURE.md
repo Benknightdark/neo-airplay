@@ -10,9 +10,9 @@
 - `desktop/src-tauri/src/models.rs` 定義設定、引擎狀態、Android 裝置、記錄與總覽資料結構。
 - `desktop/src-tauri/src/state.rs` 保存 JSON 設定、每日 JSONL 記錄、列舉 Android 裝置及管理 UxPlay/scrcpy 子程序。
 - `desktop/src-tauri/src/dependencies.rs` 在背景檢查並準備投影工具；`DependencyPanel.vue` 透過獨立 IPC 命令顯示狀態及重試。
-- `desktop/src-tauri/resources/setup/` 保存共用平台安裝腳本。建置 hooks 呼叫同一組腳本，Rust 以 `include_str!` 將對應腳本編入正式執行檔。
+- `desktop/scripts/install.sh` 與 `install.ps1` 保存共用平台安裝腳本。`setup:runtime` 與 Rust 背景檢查共用這些腳本；Rust 以 `include_str!` 將對應腳本編入正式執行檔。
 - `desktop/src-tauri/capabilities/default.json` 只開放 Tauri 核心預設 IPC 權限。WDIO 權限只存在 E2E 組態與 `wdio` Rust feature。
-- `desktop/src-tauri/resources/engine/` 是選擇性第三方引擎資源位置；目前只含說明檔，預設套件不附帶引擎二進位檔。
+- `desktop/engine/` 是本機引擎目錄，只有 `.GITKEEP` 納入版控；Tauri 從這裡打包工具。Debug 使用此目錄，Release 將套件內的 `engine/` 種入使用者資料目錄後再執行。
 
 ## 專案責任
 
@@ -23,7 +23,7 @@
 | Rust 命令入口 | 限制單一執行個體、註冊 Dashboard、設定與引擎啟停命令；設定登入啟動並建立系統匣。 | `desktop/src-tauri/src/lib.rs` |
 | 模型 | 定義跨 IPC 傳輸的序列化結構、設定預設值及 renderer 選項。 | `desktop/src-tauri/src/models.rs` |
 | 執行狀態、程序與記錄 | 管理設定 JSON、每日 JSONL、ADB 裝置清單及兩個分離的子程序。 | `desktop/src-tauri/src/state.rs` |
-| 依賴準備 | 共用平台安裝腳本、背景檢查與安裝、介面進度與重試。 | `desktop/src-tauri/src/dependencies.rs`、`desktop/src-tauri/resources/setup/`、`desktop/src/components/DependencyPanel.vue` |
+| 依賴準備 | 共用平台安裝腳本、背景檢查與安裝、介面進度與重試。 | `desktop/src-tauri/src/dependencies.rs`、`desktop/scripts/install.sh`、`desktop/scripts/install.ps1`、`desktop/src/components/DependencyPanel.vue` |
 | 前端單元測試 | 驗證狀態標籤、時間格式、總覽操作、設定表單與錯誤狀態。 | `desktop/src/lib/status.test.ts`、`desktop/src/components/DashboardPage.test.ts`、`desktop/src/components/SettingsPage.test.ts`、`desktop/src/composables/useAppState.test.ts` |
 | Rust 單元測試 | 驗證設定正規化、ADB 輸出解析、UxPlay 參數、renderer allowlist 與引擎程序生命週期。 | `desktop/src-tauri/src/models.rs`、`desktop/src-tauri/src/state.rs` |
 | 桌面 E2E | 以 WebdriverIO 啟動實際 Tauri 程式，檢查第二次啟動、頁面導覽、設定儲存及兩個假引擎程序的並行啟停。 | `desktop/e2e/main.spec.ts`、`desktop/e2e/fake-engine.rs`、`desktop/wdio.conf.ts` |
@@ -35,13 +35,13 @@
 - AirPlay 與 Android 分別由 `EngineController` 持有程序及狀態；停止或故障其中一個不會呼叫另一個引擎。
 - 單一執行個體插件先於其他插件註冊；第二次啟動會喚醒並顯示既有主視窗，不會建立另一組引擎控制器。
 - AirPlay 啟動 UxPlay，使用獨立引數傳遞接收器名稱、全螢幕與 allowlist 中的 renderer。Android 只接受目前 ADB 清單中狀態為 `device` 的序號，並以 `--serial` 獨立引數啟動 scrcpy。
-- App 啟動時使用固定 revision 的 `fix-path-env` 讀取登入 shell 的 `PATH`，再從 Tauri resource directory 的 `engine/` 子目錄與作業系統 `PATH` 尋找引擎。Android 另外搜尋 `engine/android/`；macOS 與 Linux 會檢查使用者 `~/.local/bin`、常見系統 binary 目錄；Windows 會檢查 MSYS2 與 WinGet 位置。Unix 執行檔必須有執行權限。
+- App 只從目前模式使用的 `engine/` 目錄尋找 UxPlay、ADB、scrcpy 與 GStreamer 檢查工具；Debug 指向 `desktop/engine/`，Release 指向使用者資料目錄的 `engine/`。執行程序的 `PATH` 只包含該目錄及其 Android 子目錄。Unix 執行檔必須有執行權限。
 - App 會讀取子程序標準輸出和錯誤並寫入診斷記錄。Android ADB 列舉逾時為 15 秒，兩條輸出管道由背景讀取器同步排空。
 - 關閉主視窗會隱藏視窗並保留程式；系統匣選單可顯示視窗或結束程式。結束時 Rust state 會停止仍持有的 UxPlay/scrcpy 子程序。
 - 設定與記錄目錄由 Tauri path resolver 提供，分別使用 `app_config_dir()`、`app_log_dir()`。登入啟動由 Tauri autostart plugin 管理，支援值在啟動時同步至作業系統註冊項目。
 - 設定 command 的 transaction mutex 涵蓋 OS 登入啟動變更、設定寫入及失敗復原；state 的設定 mutex 涵蓋暫存檔寫入和記憶體更新。ADB 查詢也會序列化，前端忽略過期輪詢結果和重複動作。
 - 預設 renderer 選項依編譯平台提供：Windows 使用 D3D，macOS 使用 osxvideosink/glimagesink，Linux 使用 glimagesink/ximagesink/waylandsink。
-- UxPlay、GStreamer、ADB、scrcpy 及 DNS-SD 服務探索是外部執行環境。此 repository 預設不散布這些二進位檔；建置 hooks 與首次啟動會自動補備。CI、E2E 及 smoke check 明確停用補備；README 說明平台限制與授權界線。
+- UxPlay、GStreamer、ADB、scrcpy 及 DNS-SD 服務探索是外部執行環境。正常 App 每次啟動都會在背景檢查並補備缺少的依賴；CI、E2E 及 smoke check 明確停用補備。執行檔只從 `engine/` 目錄啟動；平台安裝腳本仍使用 OS 套件管理器取得系統函式庫及建置工具。
 
 ## 驗證界線
 

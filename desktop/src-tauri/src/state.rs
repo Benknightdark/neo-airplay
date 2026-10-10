@@ -28,11 +28,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(
-        config_dir: PathBuf,
-        log_dir: PathBuf,
-        resource_dir: PathBuf,
-    ) -> Result<Self, String> {
+    pub fn new(config_dir: PathBuf, log_dir: PathBuf, engine_dir: PathBuf) -> Result<Self, String> {
         fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
         fs::create_dir_all(&log_dir).map_err(|error| error.to_string())?;
 
@@ -41,12 +37,8 @@ impl AppState {
         Ok(Self {
             settings_path: settings_path.clone(),
             settings: Mutex::new(load_settings(&settings_path)),
-            airplay: EngineController::new(
-                EngineKind::AirPlay,
-                resource_dir.clone(),
-                logger.clone(),
-            ),
-            android: EngineController::new(EngineKind::Android, resource_dir, logger.clone()),
+            airplay: EngineController::new(EngineKind::AirPlay, engine_dir.clone(), logger.clone()),
+            android: EngineController::new(EngineKind::Android, engine_dir, logger.clone()),
             android_refresh: Mutex::new(()),
             logger,
             devices: Mutex::new(Vec::new()),
@@ -104,7 +96,7 @@ impl AppState {
             .android_refresh
             .lock()
             .map_err(|_| "Android 裝置更新狀態無法讀取。".to_owned())?;
-        let Some(adb_path) = find_executable(&self.android.resource_dir, "adb", true) else {
+        let Some(adb_path) = find_executable(&self.android.engine_dir, "adb", true) else {
             let message = "找不到 ADB。請安裝 Android Platform Tools 或 scrcpy。".to_owned();
             self.logger.write(LogLevel::Error, &message);
             let mut devices = self
@@ -294,20 +286,20 @@ struct EngineInner {
 
 struct EngineController {
     kind: EngineKind,
-    resource_dir: PathBuf,
+    engine_dir: PathBuf,
     inner: Mutex<EngineInner>,
     logger: AppLogger,
 }
 
 impl EngineController {
-    fn new(kind: EngineKind, resource_dir: PathBuf, logger: AppLogger) -> Self {
+    fn new(kind: EngineKind, engine_dir: PathBuf, logger: AppLogger) -> Self {
         let message = match kind {
             EngineKind::AirPlay => "AirPlay 接收器尚未啟動。",
             EngineKind::Android => "Android 投影尚未啟動。",
         };
         Self {
             kind,
-            resource_dir,
+            engine_dir,
             inner: Mutex::new(EngineInner {
                 child: None,
                 snapshot: EngineSnapshot::stopped(message),
@@ -364,10 +356,26 @@ impl EngineController {
         let mut command = Command::new(&executable);
         command
             .args(args)
-            .env("PATH", resolved_path(&self.resource_dir))
-            .current_dir(executable.parent().unwrap_or(&self.resource_dir))
+            .env("PATH", resolved_path(&self.engine_dir))
+            .current_dir(executable.parent().unwrap_or(&self.engine_dir))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        let plugin_directory = self.engine_dir.join("lib/gstreamer-1.0");
+        command
+            .env("GST_PLUGIN_PATH_1_0", &plugin_directory)
+            .env("GST_PLUGIN_SYSTEM_PATH_1_0", &plugin_directory);
+        #[cfg(target_os = "macos")]
+        command.env("DYLD_LIBRARY_PATH", macos_library_path(&self.engine_dir));
+        #[cfg(target_os = "windows")]
+        command.env(
+            "GST_PLUGIN_SCANNER_1_0",
+            self.engine_dir.join("bin/gst-plugin-scanner.exe"),
+        );
+        #[cfg(not(target_os = "windows"))]
+        command.env(
+            "GST_PLUGIN_SCANNER_1_0",
+            self.engine_dir.join("bin/gst-plugin-scanner"),
+        );
         match command.spawn() {
             Ok(mut child) => {
                 let process_id = child.id();
@@ -523,7 +531,7 @@ impl EngineController {
             EngineKind::AirPlay => ("uxplay", false),
             EngineKind::Android => ("scrcpy", true),
         };
-        find_executable(&self.resource_dir, name, android)
+        find_executable(&self.engine_dir, name, android)
     }
 
     fn capture_output(&self, child: &mut Child) {
@@ -563,29 +571,19 @@ impl Drop for EngineController {
     }
 }
 
-pub(crate) fn find_executable(resource_dir: &Path, name: &str, android: bool) -> Option<PathBuf> {
-    let resource_dirs = if android {
+pub(crate) fn find_executable(engine_dir: &Path, name: &str, android: bool) -> Option<PathBuf> {
+    let engine_dirs = if android {
         vec![
-            resource_dir.join("engine/android"),
-            resource_dir.join("engine"),
+            engine_dir.join("android"),
+            engine_dir.join("android/platform-tools"),
+            engine_dir.join("bin"),
+            engine_dir.to_owned(),
         ]
     } else {
-        vec![resource_dir.join("engine"), resource_dir.to_owned()]
+        vec![engine_dir.join("bin"), engine_dir.to_owned()]
     };
     let names = executable_names(name);
-    for directory in resource_dirs {
-        for candidate_name in &names {
-            let candidate = directory.join(candidate_name);
-            if is_executable_file(&candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-    let mut search_directories = std::env::var_os("PATH")
-        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-        .unwrap_or_default();
-    search_directories.extend(system_search_paths());
-    for directory in search_directories {
+    for directory in engine_dirs {
         for candidate_name in &names {
             let candidate = directory.join(candidate_name);
             if is_executable_file(&candidate) {
@@ -596,111 +594,39 @@ pub(crate) fn find_executable(resource_dir: &Path, name: &str, android: bool) ->
     None
 }
 
-pub(crate) fn resolved_path(resource_dir: &Path) -> OsString {
-    let mut paths = vec![
-        resource_dir.join("engine/android"),
-        resource_dir.join("engine"),
-        resource_dir.to_owned(),
+pub(crate) fn resolved_path(engine_dir: &Path) -> OsString {
+    let paths = [
+        engine_dir.join("bin"),
+        engine_dir.join("android/platform-tools"),
+        engine_dir.join("android"),
+        engine_dir.to_owned(),
     ];
+    std::env::join_paths(paths).unwrap_or_default()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_library_path(engine_dir: &Path) -> OsString {
+    let mut paths = vec![engine_dir.join("lib")];
+    for prefix in [Path::new("/opt/homebrew"), Path::new("/usr/local")] {
+        paths.push(prefix.join("lib"));
+        if let Ok(formulas) = fs::read_dir(prefix.join("opt")) {
+            paths.extend(formulas.flatten().map(|formula| formula.path().join("lib")));
+        }
+    }
+    if let Some(inherited) = std::env::var_os("DYLD_LIBRARY_PATH") {
+        paths.extend(std::env::split_paths(&inherited));
+    }
+    std::env::join_paths(paths).unwrap_or_default()
+}
+
+pub(crate) fn installer_path(engine_dir: &Path) -> OsString {
+    let mut paths = std::env::split_paths(&resolved_path(engine_dir)).collect::<Vec<_>>();
     paths.extend(
         std::env::var_os("PATH")
             .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
             .unwrap_or_default(),
     );
-    paths.extend(system_search_paths());
-
-    let mut unique = Vec::with_capacity(paths.len());
-    for path in paths {
-        if !unique.iter().any(|existing| existing == &path) {
-            unique.push(path);
-        }
-    }
-    std::env::join_paths(unique).unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
-}
-
-fn system_search_paths() -> Vec<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        let mut paths = vec![
-            PathBuf::from("/opt/homebrew/bin"),
-            PathBuf::from("/Library/Frameworks/GStreamer.framework/Versions/1.0/bin"),
-            PathBuf::from("/usr/local/bin"),
-            PathBuf::from("/usr/bin"),
-            PathBuf::from("/bin"),
-        ];
-        if let Some(home) = std::env::var_os("HOME") {
-            paths.insert(1, PathBuf::from(home).join(".local/bin"));
-        }
-        paths
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let mut paths = vec![
-            PathBuf::from("/usr/local/bin"),
-            PathBuf::from("/usr/bin"),
-            PathBuf::from("/bin"),
-            PathBuf::from("/snap/bin"),
-        ];
-        if let Some(home) = std::env::var_os("HOME") {
-            paths.insert(0, PathBuf::from(home).join(".local/bin"));
-        }
-        paths
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let mut paths = Vec::new();
-        if let Some(root) = std::env::var_os("NEO_AIRPLAY_MSYS2_ROOT") {
-            append_msys_paths(&mut paths, PathBuf::from(root));
-        }
-        if let Some(system_drive) = std::env::var_os("SystemDrive") {
-            let drive = system_drive.to_string_lossy();
-            let drive = drive.trim_end_matches(['\\', '/']);
-            append_msys_paths(&mut paths, PathBuf::from(format!("{drive}\\msys64")));
-        }
-        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-            let local_app_data = PathBuf::from(local_app_data);
-            append_msys_paths(&mut paths, local_app_data.join("msys64"));
-            paths.push(local_app_data.join("Microsoft/WinGet/Links"));
-            add_winget_package_paths(&mut paths, &local_app_data);
-        }
-        if let Some(user_profile) = std::env::var_os("USERPROFILE") {
-            append_msys_paths(&mut paths, PathBuf::from(user_profile).join("msys64"));
-        }
-        paths
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn append_msys_paths(paths: &mut Vec<PathBuf>, root: PathBuf) {
-    paths.push(root.join("ucrt64/bin"));
-    paths.push(root.join("clangarm64/bin"));
-}
-
-#[cfg(target_os = "windows")]
-fn add_winget_package_paths(paths: &mut Vec<PathBuf>, local_app_data: &Path) {
-    let packages_dir = local_app_data.join("Microsoft/WinGet/Packages");
-    for package_id in ["Genymobile.scrcpy", "Google.PlatformTools"] {
-        let prefix = format!("{package_id}_");
-        let Ok(packages) = fs::read_dir(&packages_dir) else {
-            continue;
-        };
-        for package in packages.flatten() {
-            let package_path = package.path();
-            if !package.file_name().to_string_lossy().starts_with(&prefix) || !package_path.is_dir()
-            {
-                continue;
-            }
-            paths.push(package_path.clone());
-            if let Ok(contents) = fs::read_dir(package_path) {
-                paths.extend(
-                    contents
-                        .flatten()
-                        .map(|entry| entry.path())
-                        .filter(|path| path.is_dir()),
-                );
-            }
-        }
-    }
+    std::env::join_paths(paths).unwrap_or_else(|_| resolved_path(engine_dir))
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -950,9 +876,9 @@ fn push_recent(entries: &mut VecDeque<AppLogEntry>, entry: AppLogEntry) {
 #[cfg(test)]
 mod tests {
     use super::{
-        airplay_arguments, finish_pipe, is_executable_file, load_settings, parse_adb_devices,
-        read_pipe, renderer_argument, write_settings, AppLogger, AppState, EngineController,
-        EngineKind, MAX_CAPTURED_PROCESS_OUTPUT_BYTES,
+        airplay_arguments, find_executable, finish_pipe, is_executable_file, load_settings,
+        parse_adb_devices, read_pipe, renderer_argument, write_settings, AppLogger, AppState,
+        EngineController, EngineKind, MAX_CAPTURED_PROCESS_OUTPUT_BYTES,
     };
     use crate::models::{AndroidDeviceStatus, EngineSnapshot, EngineStatus, ReceiverSettings};
     use std::fs;
@@ -1069,13 +995,40 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let directory = test_directory("non-executable");
-        let engine_directory = directory.join("engine");
+        let engine_directory = directory.join("bin");
         fs::create_dir_all(&engine_directory).unwrap();
         let executable = engine_directory.join("uxplay");
         fs::write(&executable, b"not executable").unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o600)).unwrap();
 
         assert!(!is_executable_file(&executable));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_lookup_uses_only_the_engine_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = test_directory("engine-only-lookup");
+        let engine_bin = directory.join("bin");
+        let outside_bin = directory.join("outside");
+        fs::create_dir_all(&engine_bin).unwrap();
+        fs::create_dir_all(&outside_bin).unwrap();
+        let outside_executable = outside_bin.join("uxplay");
+        fs::write(&outside_executable, b"outside engine").unwrap();
+        fs::set_permissions(&outside_executable, fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(find_executable(&directory, "uxplay", false), None);
+
+        let engine_executable = engine_bin.join("uxplay");
+        fs::write(&engine_executable, b"engine tool").unwrap();
+        fs::set_permissions(&engine_executable, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            find_executable(&directory, "uxplay", false),
+            Some(engine_executable)
+        );
+
         fs::remove_dir_all(directory).unwrap();
     }
 

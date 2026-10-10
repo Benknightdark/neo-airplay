@@ -4,6 +4,7 @@ param(
     [switch]$Check,
     [switch]$Gui,
     [switch]$Elevated,
+    [string]$EngineDirectory = $env:NEO_AIRPLAY_ENGINE_DIR,
     [string]$MarkerFile,
     [string]$ResultFile,
     [string]$OriginalUserProfile,
@@ -19,8 +20,15 @@ $UxPlayVersion = '1.74'
 $UxPlayCommit = 'f524d8aa28028ad5572ae1b462d119e4cec1f9f4'
 $UxPlaySha256 = '6cd720c5e2debee120fb076df69e76d35d19d11d9f7e377c3a747d4b8d6b692a'
 $UxPlayUrl = "https://github.com/FDH2/UxPlay/archive/$UxPlayCommit.tar.gz"
+$ScrcpyVersion = '5.0.1'
+$ScrcpyWin64Sha256 = 'b12a2c4ee8be317422451fc7dcf8ee20a71b5ea7ef9ad73ddd825a25316227a5'
+$ScrcpyWin64Url = "https://github.com/Genymobile/scrcpy/releases/download/v$ScrcpyVersion/scrcpy-win64-v$ScrcpyVersion.zip"
 $BunVersion = '1.4.2'
 $NodeVersion = '22.23.3'
+$script:EngineDirectory = if ($EngineDirectory) { [IO.Path]::GetFullPath($EngineDirectory) } else { [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\engine')) }
+$script:EngineBin = Join-Path $script:EngineDirectory 'bin'
+$script:EngineAndroid = Join-Path $script:EngineDirectory 'android'
+$env:NEO_AIRPLAY_ENGINE_DIR = $script:EngineDirectory
 $script:SetupUserProfile = if ($OriginalUserProfile) { [IO.Path]::GetFullPath($OriginalUserProfile) } else { [IO.Path]::GetFullPath($env:USERPROFILE) }
 $script:SetupLocalAppData = if ($OriginalLocalAppData) { [IO.Path]::GetFullPath($OriginalLocalAppData) } else { [IO.Path]::GetFullPath($env:LOCALAPPDATA) }
 $script:SetupUserSid = if ($OriginalUserSid) { $OriginalUserSid } else { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
@@ -37,9 +45,7 @@ $MsysPackages = @(
     'mingw-w64-ucrt-x86_64-gst-plugins-base',
     'mingw-w64-ucrt-x86_64-gst-plugins-good',
     'mingw-w64-ucrt-x86_64-gst-plugins-bad',
-    'mingw-w64-ucrt-x86_64-gst-libav',
-    'mingw-w64-ucrt-x86_64-scrcpy',
-    'mingw-w64-ucrt-x86_64-android-tools'
+    'mingw-w64-ucrt-x86_64-gst-libav'
 )
 
 function Write-Info([string]$Message) {
@@ -66,6 +72,7 @@ function Invoke-ElevatedInstaller {
     $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'))
     if ($Development) { $arguments += '-Development' }
     if ($Gui) { $arguments += '-Gui' }
+    $arguments += @('-EngineDirectory', ('"' + $script:EngineDirectory + '"'))
     if ($MarkerFile) { $arguments += @('-MarkerFile', ('"' + $MarkerFile + '"')) }
     if ($ResultFile) { $arguments += @('-ResultFile', ('"' + $ResultFile + '"')) }
     $arguments += @('-OriginalUserProfile', ('"' + $script:SetupUserProfile + '"'))
@@ -257,51 +264,67 @@ function Invoke-BoundedProbe([string]$FileName, [string]$Arguments, [int]$Timeou
     }
 }
 
+function Get-EngineToolPath([string]$Name) {
+    $names = @($Name)
+    if (-not [IO.Path]::GetExtension($Name)) { $names += "$Name.exe" }
+    foreach ($directory in @($script:EngineBin, (Join-Path $script:EngineAndroid 'platform-tools'), $script:EngineAndroid, $script:EngineDirectory)) {
+        foreach ($candidateName in $names) {
+            $candidate = Join-Path $directory $candidateName
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+        }
+    }
+    return $null
+}
+
 function Test-Runtime {
     $missing = [System.Collections.Generic.List[string]]::new()
     $script:MsysRoot = Get-MsysRoot
-    if ($script:MsysRoot) {
-        Set-ProcessMsysEnvironment $script:MsysRoot
+    $tools = @{
+        uxplay = Get-EngineToolPath 'uxplay'
+        scrcpy = Get-EngineToolPath 'scrcpy'
+        adb = Get-EngineToolPath 'adb'
+        gst = Get-EngineToolPath 'gst-inspect-1.0'
     }
-    $null = Test-Command 'uxplay' $missing
-    $null = Test-Command 'scrcpy' $missing
-    $null = Test-Command 'adb' $missing
-    $null = Test-Command 'gst-inspect-1.0' $missing
+    if (-not $tools.uxplay) { [void]$missing.Add('uxplay 1.73.7 or newer') }
+    if (-not $tools.scrcpy) { [void]$missing.Add('scrcpy') }
+    if (-not $tools.adb) { [void]$missing.Add('adb') }
+    if (-not $tools.gst) { [void]$missing.Add('GStreamer (gst-inspect-1.0)') }
+
+    $env:Path = (($script:EngineBin, (Join-Path $script:EngineAndroid 'platform-tools'), $env:Path) -join ';')
+    $pluginDirectory = Join-Path $script:EngineDirectory 'lib\gstreamer-1.0'
+    $env:GST_PLUGIN_PATH_1_0 = $pluginDirectory
+    $env:GST_PLUGIN_SYSTEM_PATH_1_0 = $pluginDirectory
+    $scanner = Join-Path $script:EngineBin 'gst-plugin-scanner.exe'
+    $env:GST_PLUGIN_SCANNER_1_0 = $scanner
 
     $probeSpecs = @(
-        @{ Command = 'scrcpy'; Arguments = '--version'; Label = 'scrcpy' },
-        @{ Command = 'adb'; Arguments = 'version'; Label = 'adb' }
+        @{ Path = $tools.scrcpy; Arguments = '--version'; Label = 'scrcpy' },
+        @{ Path = $tools.adb; Arguments = 'version'; Label = 'adb' }
     )
     foreach ($probeSpec in $probeSpecs) {
-        $commandName = $probeSpec.Command
-        if ($missing.Contains($commandName)) { continue }
-        $command = Get-Command $commandName -ErrorAction Stop
-        $probe = Invoke-BoundedProbe $command.Source $probeSpec.Arguments
+        if (-not $probeSpec.Path) { continue }
+        $probe = Invoke-BoundedProbe $probeSpec.Path $probeSpec.Arguments
         if ($probe.TimedOut -or $probe.ExitCode -ne 0 -or -not $probe.Output.Trim()) {
             [void]$missing.Add("$($probeSpec.Label) (unusable or version probe timed out)")
         }
     }
 
-    if (-not $missing.Contains('uxplay')) {
-        $uxplayCommand = Get-Command 'uxplay' -ErrorAction Stop
-        $uxplayProbe = Invoke-BoundedProbe $uxplayCommand.Source '-v'
-        $versionMatch = [regex]::Match($uxplayProbe.Output, '[0-9]+\.[0-9]+(?:\.[0-9]+)?')
+    if ($tools.uxplay) {
+        $uxplayProbe = Invoke-BoundedProbe $tools.uxplay '-v'
+        $versionMatch = [regex]::Match($uxplayProbe.Output, '(?im)UxPlay version\s+([0-9]+(?:\.[0-9]+)+)')
         $minimumUxPlay = [Version]'1.73.7'
         $uxplayVersion = $null
-        if ($versionMatch.Success) {
-            $uxplayVersion = [Version]$versionMatch.Value
-        }
+        if ($versionMatch.Success) { $uxplayVersion = [Version]$versionMatch.Groups[1].Value }
         if ($uxplayProbe.TimedOut) {
             [void]$missing.Add('UxPlay version probe (timed out)')
         } elseif (-not $uxplayVersion -or $uxplayVersion -lt $minimumUxPlay) {
             [void]$missing.Add("UxPlay $minimumUxPlay or newer")
         }
     }
-    if (-not $missing.Contains('gst-inspect-1.0')) {
-        $gstInspect = (Get-Command 'gst-inspect-1.0' -ErrorAction Stop).Source
+    if ($tools.gst) {
         foreach ($element in @('decodebin', 'h264parse', 'videoconvert', 'autovideosink', 'autoaudiosink', 'avdec_aac')) {
             try {
-                $probe = Invoke-BoundedProbe $gstInspect $element 10000
+                $probe = Invoke-BoundedProbe $tools.gst $element 10000
                 if ($probe.TimedOut) {
                     [void]$missing.Add("GStreamer element $element (probe timed out)")
                 } elseif ($probe.ExitCode -ne 0) {
@@ -369,18 +392,49 @@ function Install-Msys2 {
     Set-ProcessMsysEnvironment $script:MsysRoot
     $bash = Join-Path $script:MsysRoot 'usr\bin\bash.exe'
     $env:NEO_SETUP_PACKAGES = $MsysPackages -join ' '
-    Write-Info 'Updating MSYS2 package databases and installing UCRT64 GStreamer, scrcpy, ADB, and UxPlay build dependencies.'
+    Write-Info 'Updating MSYS2 package databases and installing UCRT64 GStreamer and UxPlay build dependencies.'
     Invoke-Msys 'pacman -Syu --noconfirm'
     Invoke-Msys 'pacman -Syu --noconfirm'
     Invoke-Msys 'pacman -S --needed --noconfirm $NEO_SETUP_PACKAGES'
     Remove-Item Env:\NEO_SETUP_PACKAGES -ErrorAction SilentlyContinue
 }
 
+function Stage-MsysRuntime {
+    $ucrtBin = Join-Path $script:MsysRoot 'ucrt64\bin'
+    $pluginSource = Join-Path $script:MsysRoot 'ucrt64\lib\gstreamer-1.0'
+    $pluginTarget = Join-Path $script:EngineDirectory 'lib\gstreamer-1.0'
+    $shareSource = Join-Path $script:MsysRoot 'ucrt64\share\gstreamer-1.0'
+    $shareTarget = Join-Path $script:EngineDirectory 'share\gstreamer-1.0'
+    New-Item -ItemType Directory -Path $script:EngineBin -Force | Out-Null
+
+    foreach ($library in (Get-ChildItem -LiteralPath $ucrtBin -Filter '*.dll' -File)) {
+        $targetLibrary = Join-Path $script:EngineBin $library.Name
+        if (-not (Test-Path -LiteralPath $targetLibrary -PathType Leaf)) {
+            Copy-Item -LiteralPath $library.FullName -Destination $targetLibrary
+        }
+    }
+    foreach ($toolName in @('gst-inspect-1.0.exe', 'gst-plugin-scanner.exe')) {
+        $source = Join-Path $ucrtBin $toolName
+        if (Test-Path -LiteralPath $source -PathType Leaf) {
+            Copy-Item -LiteralPath $source -Destination (Join-Path $script:EngineBin $toolName) -Force
+        }
+    }
+    if (Test-Path -LiteralPath $pluginSource -PathType Container) {
+        New-Item -ItemType Directory -Path $pluginTarget -Force | Out-Null
+        Get-ChildItem -LiteralPath $pluginSource -Force | Copy-Item -Destination $pluginTarget -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $shareSource -PathType Container) {
+        New-Item -ItemType Directory -Path $shareTarget -Force | Out-Null
+        Get-ChildItem -LiteralPath $shareSource -Force | Copy-Item -Destination $shareTarget -Recurse -Force
+    }
+}
+
 function Install-UxPlay {
-    $existing = Get-Command uxplay -ErrorAction SilentlyContinue
+    $existing = Get-EngineToolPath 'uxplay'
     if ($existing) {
-        $output = (& $existing.Source -v 2>&1 | Out-String)
-        if ($output -match [regex]::Escape($UxPlayVersion)) { return }
+        $output = (& $existing -v 2>&1 | Out-String)
+        $versionMatch = [regex]::Match($output, '(?im)UxPlay version\s+([0-9]+(?:\.[0-9]+)+)')
+        if ($versionMatch.Success -and [Version]$versionMatch.Groups[1].Value -ge [Version]'1.73.7') { return }
     }
     $tempRoot = Join-Path $env:TEMP ([Guid]::NewGuid().ToString('N'))
     $archive = Join-Path $tempRoot 'uxplay.tar.gz'
@@ -396,11 +450,38 @@ function Install-UxPlay {
         $env:NEO_SETUP_ARCHIVE = (& (Join-Path $script:MsysRoot 'usr\bin\cygpath.exe') -u $archive | Out-String).Trim()
         $env:NEO_SETUP_SOURCE = (& (Join-Path $script:MsysRoot 'usr\bin\cygpath.exe') -u $source | Out-String).Trim()
         $env:NEO_SETUP_BUILD = (& (Join-Path $script:MsysRoot 'usr\bin\cygpath.exe') -u $build | Out-String).Trim()
-        Invoke-Msys 'tar -xzf "$NEO_SETUP_ARCHIVE" -C "$NEO_SETUP_SOURCE" --strip-components=1 && cmake -S "$NEO_SETUP_SOURCE" -B "$NEO_SETUP_BUILD" -G Ninja -DCMAKE_INSTALL_PREFIX=/ucrt64 && cmake --build "$NEO_SETUP_BUILD" --parallel'
+        $env:NEO_SETUP_ENGINE = (& (Join-Path $script:MsysRoot 'usr\bin\cygpath.exe') -u $script:EngineDirectory | Out-String).Trim()
+        Invoke-Msys 'tar -xzf "$NEO_SETUP_ARCHIVE" -C "$NEO_SETUP_SOURCE" --strip-components=1 && cmake -S "$NEO_SETUP_SOURCE" -B "$NEO_SETUP_BUILD" -G Ninja -DCMAKE_INSTALL_PREFIX="$NEO_SETUP_ENGINE" && cmake --build "$NEO_SETUP_BUILD" --parallel'
         Invoke-Msys 'cmake --install "$NEO_SETUP_BUILD"'
     }
     finally {
-        Remove-Item Env:\NEO_SETUP_ARCHIVE, Env:\NEO_SETUP_SOURCE, Env:\NEO_SETUP_BUILD -ErrorAction SilentlyContinue
+        Remove-Item Env:\NEO_SETUP_ARCHIVE, Env:\NEO_SETUP_SOURCE, Env:\NEO_SETUP_BUILD, Env:\NEO_SETUP_ENGINE -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+    }
+}
+
+function Install-Scrcpy {
+    $tempRoot = Join-Path $env:TEMP ([Guid]::NewGuid().ToString('N'))
+    $archive = Join-Path $tempRoot "scrcpy-win64-v$ScrcpyVersion.zip"
+    $extract = Join-Path $tempRoot 'extract'
+    New-Item -ItemType Directory -Path $extract -Force | Out-Null
+    try {
+        Write-Info "Downloading official scrcpy $ScrcpyVersion Windows distribution."
+        Invoke-WebRequest -Uri $ScrcpyWin64Url -OutFile $archive -UseBasicParsing
+        $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualHash -ne $ScrcpyWin64Sha256) { Stop-Setup 'The official Windows scrcpy archive SHA-256 verification failed.' }
+        Expand-Archive -LiteralPath $archive -DestinationPath $extract -Force
+        $bundle = Get-ChildItem -LiteralPath $extract -Directory | Select-Object -First 1
+        if (-not $bundle) { Stop-Setup 'The official Windows scrcpy archive did not contain its distribution directory.' }
+        foreach ($requiredFile in @('scrcpy.exe', 'scrcpy-server', 'adb.exe')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $bundle.FullName $requiredFile) -PathType Leaf)) {
+                Stop-Setup "The official Windows scrcpy archive is missing $requiredFile."
+            }
+        }
+        New-Item -ItemType Directory -Path $script:EngineBin -Force | Out-Null
+        Get-ChildItem -LiteralPath $bundle.FullName -File -Force | Copy-Item -Destination $script:EngineBin -Force
+    }
+    finally {
         if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
     }
 }
@@ -666,6 +747,8 @@ try {
             Install-Msys2
             Set-InstalledEnvironment $script:MsysRoot
             Install-UxPlay
+            Install-Scrcpy
+            Stage-MsysRuntime
         }
         if ($Development -and -not $developmentReady) { Install-DevelopmentTools }
         if ($script:MsysRoot) { Set-InstalledEnvironment $script:MsysRoot }

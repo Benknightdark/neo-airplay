@@ -4,11 +4,11 @@
 
 | 指令 | 用途 |
 | :--- | :--- |
-| `bash setup.sh` | 在 macOS／Linux 準備開發工具、投影依賴及前端套件。 |
-| `powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1` | 在 Windows 準備開發工具、投影依賴及前端套件。 |
-| `cd desktop && bun run --silent setup:runtime` | 只準備目前平台的投影工具；開發與 Tauri 打包 hooks 會自動呼叫。 |
-| `bash desktop/src-tauri/resources/setup/install.sh --check` | 只檢查 macOS／Linux 投影工具，缺少時回傳非零，不安裝軟體。 |
-| `powershell -NoProfile -ExecutionPolicy Bypass -File desktop/src-tauri/resources/setup/install.ps1 -Check` | 只檢查 Windows 投影工具，缺少時回傳非零，不安裝軟體。 |
+| `bash desktop/scripts/setup.sh` | 在 macOS／Linux 準備開發工具、投影依賴及前端套件。 |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop\scripts\setup.ps1` | 在 Windows 準備開發工具、投影依賴及前端套件。 |
+| `cd desktop && bun run --silent setup:runtime` | 手動準備目前平台的投影工具；正常 DEBUG/RELEASE 啟動會在背景自動檢查及準備。 |
+| `bash desktop/scripts/install.sh --check` | 只檢查 macOS／Linux 投影工具，缺少時回傳非零，不安裝軟體。 |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File desktop/scripts/install.ps1 -Check` | 只檢查 Windows 投影工具，缺少時回傳非零，不安裝軟體。 |
 | `cd desktop && bun install --frozen-lockfile --silent` | 依 `bun.lock` 安裝固定版本的前端套件。 |
 | `cd desktop && bun run tauri dev` | 啟動 Vite 與 Tauri 桌面開發環境。 |
 | `pwsh .neo_harness/verify.ps1` | 執行 TypeScript 型別檢查、前端單元測試、Rust 格式檢查、Rust 單元測試、Clippy 及 Vite 建置。 |

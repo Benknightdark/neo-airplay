@@ -1,13 +1,13 @@
 # 程序生命週期與復原
 
-本文件描述目前 Tauri/Rust 程式可觀察的行為。實際引擎是否能啟動，仍取決於目標 OS 已安裝的 UxPlay、GStreamer、ADB、scrcpy 與 DNS-SD 服務。
+本文件描述目前 Tauri/Rust 程式可觀察的行為。App 只從 Debug 的 `desktop/engine/` 或 Release 使用者資料目錄的 `engine/` 啟動工具；GStreamer 與 DNS-SD 服務也需具備該平台要求的執行相依項目。
 
 ## 啟動與狀態更新
 
 - App 啟動時載入設定並建立兩個獨立的引擎控制器；不會自動啟動 AirPlay 或 Android 投影。
-- App 同時在背景檢查投影工具，缺少時執行內嵌平台安裝腳本。介面顯示進度；失敗可查看安裝記錄並重試。E2E profile 或 `NEO_AIRPLAY_SKIP_SETUP=1` 停用此流程。
+- App 每次啟動都在背景檢查投影工具，缺少時執行內嵌平台安裝腳本；先前安裝失敗時，下次啟動會自動重試。介面顯示進度；失敗可查看安裝記錄並手動重試。E2E profile 或 `NEO_AIRPLAY_SKIP_SETUP=1` 停用此流程。
 - 第二次啟動會交由單一執行個體插件轉送至既有 App，顯示主視窗後結束新程序。
-- 啟動時嘗試恢復 GUI 程序的 `PATH`，讓引擎能從登入 shell 設定的目錄解析；若環境修復失敗，程式繼續使用既有 `PATH` 與常見系統 binary 目錄。
+- 引擎執行程序的 `PATH` 僅包含目前使用的 `engine/` 目錄及其 Android 子目錄；找不到該目錄中的工具時會回報缺少依賴，不從系統 `PATH` 回退。
 - Vue 總覽每 1.5 秒重新讀取程序狀態。ADB 裝置清單只在使用者按重新整理時更新。
 - 找不到引擎會回報 `DependencyMissing`；程序無法啟動、意外非零退出或狀態查詢失敗會回報 `Faulted`。成功退出回報 `Stopped`。
 - 重複啟動已執行的引擎會返回目前狀態。AirPlay 和 Android 各有自己的程序、鎖與狀態。
@@ -26,7 +26,7 @@
 
 - 設定寫入同目錄暫存 JSON 後重新命名至 `settings.json`，寫入及記憶體更新共用設定鎖；command 另以 transaction 鎖序列化登入啟動變更及儲存。若無法寫入，命令會回報錯誤，記憶體中的設定不會更新。
 - 記錄依本地日期寫入每日 JSONL 檔；診斷頁顯示當日最近 300 筆。檔案開啟或寫入失敗目前不會回報給 UI。
-- 若 App 顯示工具安裝失敗，依畫面列出的記錄檔排除網路、套件庫或授權問題後，按「重新檢查並安裝」。也可依 README 放置完整引擎資源後重新檢查。
+- 若 App 顯示工具安裝失敗，依畫面列出的記錄檔排除網路、套件庫或授權問題後，按「重新檢查並安裝」。Debug 的本機引擎檔案放在 `desktop/engine/`；Release 先將套件資源複製至使用者資料目錄的 `engine/`。
 - Linux 準備腳本會安裝並啟用 Avahi；macOS 使用系統 Bonjour，Windows 使用實驗版內建 mDNS。App 不建立防火牆規則，也不會自動配對 Android 裝置。
 - 若 Android 裝置未列出，先在終端執行 `adb devices -l`，確認裝置已授權且狀態為 `device`；App 只列出 ADB 已建立的連線。
 

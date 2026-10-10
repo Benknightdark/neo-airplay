@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.neoairplay.desktop",
   "build": {
-    "beforeDevCommand": "bun run setup:runtime && bun run dev",
+    "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bun run setup:runtime && bun run build",
+    "beforeBuildCommand": "bun run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -31,7 +31,7 @@
     "shortDescription": "跨平台 AirPlay 與 Android 投影接收器",
     "longDescription": "透過 UxPlay 接收 AirPlay，並透過 scrcpy 顯示 Android 裝置。",
     "resources": {
-      "resources/engine/": "engine/"
+      "../engine/": "engine/"
     },
     "macOS": {
       "signingIdentity": "-"

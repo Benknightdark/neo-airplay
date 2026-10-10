@@ -9,11 +9,14 @@ readonly BUN_VERSION="1.4.2"
 readonly NODE_VERSION="22.23.3"
 readonly SCRCPY_VERSION="5.0.1"
 readonly SCRCPY_SHA256="9f969d30cc574816077edecda65719c1c70b0aee1df1ba5fa00779ac07b8fd6e"
-readonly SCRCPY_URL="https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/scrcpy-linux-x86_64-v${SCRCPY_VERSION}.tar.gz"
+readonly SCRCPY_LINUX_URL="https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/scrcpy-linux-x86_64-v${SCRCPY_VERSION}.tar.gz"
+readonly SCRCPY_MACOS_ARM64_SHA256="33611e51977a8289e2e124b220f727895181ef2eb9060e0987a4dc2db9cf0d6b"
+readonly SCRCPY_MACOS_X86_64_SHA256="31a5467a9e907f162b093267cbbab1276b15c6e709c2ea8159566a8d165beb50"
 
 development=0
 check_only=0
 gui=0
+engine_dir="${NEO_AIRPLAY_ENGINE_DIR:-}"
 marker_file=""
 result_file=""
 
@@ -23,6 +26,9 @@ while (($#)); do
     --development) development=1 ;;
     --check) check_only=1 ;;
     --gui) gui=1 ;;
+    --engine-dir)
+      (($# >= 2)) || { printf 'Missing value for --engine-dir\n' >&2; exit 2; }
+      engine_dir="$2"; shift ;;
     --marker-file)
       (($# >= 2)) || { printf 'Missing value for --marker-file\n' >&2; exit 2; }
       marker_file="$2"; shift ;;
@@ -34,11 +40,19 @@ while (($#)); do
   shift
 done
 
+if [[ -z "$engine_dir" ]]; then
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  engine_dir="${script_dir}/../engine"
+fi
+engine_dir="$(cd "$engine_dir" 2>/dev/null && pwd || printf '%s' "$engine_dir")"
+engine_bin="${engine_dir}/bin"
+
 log() { printf '%s\n' "$*"; }
 fail() { printf 'Setup failed: %s\n' "$*" >&2; exit 1; }
 
 user_bin="${HOME}/.local/bin"
-export PATH="${user_bin}:${HOME}/.cargo/bin:${HOME}/.bun/bin:${PATH:-}"
+export NEO_AIRPLAY_ENGINE_DIR="$engine_dir"
+export PATH="${engine_bin}:${engine_dir}/android/platform-tools:${engine_dir}/android:${engine_dir}:${user_bin}:${HOME}/.cargo/bin:${HOME}/.bun/bin:${PATH:-}"
 
 write_result() {
   local status="$1" temporary
@@ -70,23 +84,52 @@ check_command() {
   return 0
 }
 
+runtime_executable() {
+  local command_name="$1"
+  local candidate="${engine_bin}/${command_name}"
+  [[ -x "$candidate" ]] && printf '%s\n' "$candidate"
+}
+
+setup_macos_library_path() {
+  local prefix library_path candidate
+  library_path="${engine_dir}/lib"
+  for prefix in /opt/homebrew /usr/local; do
+    [[ -d "${prefix}/lib" ]] && library_path="${library_path}:${prefix}/lib"
+    for candidate in "${prefix}"/opt/*/lib; do
+      [[ -d "$candidate" ]] && library_path="${library_path}:${candidate}"
+    done
+  done
+  export DYLD_LIBRARY_PATH="${library_path}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}"
+}
+
 check_gstreamer() {
   local element
-  if ! command -v gst-inspect-1.0 >/dev/null 2>&1; then
+  local gst_inspect
+  gst_inspect="$(runtime_executable gst-inspect-1.0 || true)"
+  if [[ -z "$gst_inspect" ]]; then
     missing+=("GStreamer (gst-inspect-1.0)")
     return 1
   fi
   [[ -n "$bounded_timeout" ]] || return 1
+  export GST_PLUGIN_PATH_1_0="${engine_dir}/lib/gstreamer-1.0"
+  export GST_PLUGIN_SYSTEM_PATH_1_0="${engine_dir}/lib/gstreamer-1.0"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    setup_macos_library_path
+  fi
+  if [[ -x "${engine_bin}/gst-plugin-scanner" ]]; then
+    export GST_PLUGIN_SCANNER_1_0="${engine_bin}/gst-plugin-scanner"
+  fi
   for element in decodebin h264parse videoconvert autovideosink autoaudiosink avdec_aac; do
-    if ! "$bounded_timeout" --kill-after=2s 10s gst-inspect-1.0 "$element" >/dev/null 2>&1; then
+    if ! "$bounded_timeout" --kill-after=2s 10s "$gst_inspect" "$element" >/dev/null 2>&1; then
       missing+=("GStreamer element ${element}")
     fi
   done
 }
 
 check_version_probe() {
-  local command_name="$1" argument="$2" label="$3" probe_output
-  if ! command -v "$command_name" >/dev/null 2>&1; then
+  local command_name="$1" argument="$2" label="$3" probe_output executable
+  executable="$(runtime_executable "$command_name" || true)"
+  if [[ -z "$executable" ]]; then
     missing+=("$command_name")
     return 1
   fi
@@ -94,7 +137,7 @@ check_version_probe() {
     missing+=("GNU timeout utility for bounded runtime probes")
     return 1
   fi
-  if ! probe_output="$("$bounded_timeout" --kill-after=2s 10s "$command_name" "$argument" 2>&1)" || [[ -z "$probe_output" ]]; then
+  if ! probe_output="$("$bounded_timeout" --kill-after=2s 10s "$executable" "$argument" 2>&1)" || [[ -z "$probe_output" ]]; then
     missing+=("$label (unusable or version probe timed out)")
     return 1
   fi
@@ -102,7 +145,7 @@ check_version_probe() {
 
 check_uxplay() {
   local executable version_output version_number
-  executable="$(command -v uxplay 2>/dev/null || true)"
+  executable="$(runtime_executable uxplay || true)"
   if [[ -z "$executable" ]]; then
     missing+=("uxplay ${UXPLAY_VERSION}")
     return 1
@@ -115,7 +158,7 @@ check_uxplay() {
     missing+=("uxplay version probe failed or timed out")
     return 1
   fi
-  version_number="$(printf '%s\n' "$version_output" | grep -Eo '[0-9]+(\.[0-9]+)+' | head -n 1 || true)"
+  version_number="$(printf '%s\n' "$version_output" | sed -nE 's/.*UxPlay version ([0-9]+(\.[0-9]+)+).*/\1/p' | head -n 1 || true)"
   if [[ -z "$version_number" ]] || ! awk -v actual="$version_number" -v minimum="$UXPLAY_VERSION" 'BEGIN { split(actual, a, "."); split(minimum, b, "."); for (i=1; i<=3; i++) { if ((a[i]+0) > (b[i]+0)) exit 0; if ((a[i]+0) < (b[i]+0)) exit 1 } exit 0 }'; then
     missing+=("uxplay ${UXPLAY_VERSION} or newer")
     return 1
@@ -125,9 +168,9 @@ check_uxplay() {
 check_runtime() {
   missing=()
   if [[ "$(uname -s)" == "Darwin" ]]; then
-    bounded_timeout="$(command -v gtimeout 2>/dev/null || true)"
+    bounded_timeout="$(runtime_executable gtimeout || true)"
   else
-    bounded_timeout="$(command -v timeout 2>/dev/null || true)"
+    bounded_timeout="$(runtime_executable timeout || true)"
   fi
   [[ -n "$bounded_timeout" ]] || missing+=("GNU timeout utility for bounded runtime probes")
   check_uxplay || true
@@ -254,7 +297,7 @@ if ((runtime_ready && (!development || development_ready))); then
   exit 0
 fi
 
-mkdir -p "$user_bin"
+mkdir -p "$engine_bin"
 
 run_privileged() {
   if ((gui)); then
@@ -271,9 +314,9 @@ run_privileged() {
 
 install_uxplay_source() {
   local archive work_dir source_dir actual_sha version_output version_number
-  if [[ -n "$(command -v uxplay 2>/dev/null || true)" ]]; then
-    version_output="$(uxplay -v 2>&1 || true)"
-    version_number="$(printf '%s\n' "$version_output" | grep -Eo '[0-9]+(\.[0-9]+)+' | head -n 1 || true)"
+  if [[ -x "${engine_bin}/uxplay" ]]; then
+    version_output="$("${engine_bin}/uxplay" -v 2>&1 || true)"
+    version_number="$(printf '%s\n' "$version_output" | sed -nE 's/.*UxPlay version ([0-9]+(\.[0-9]+)+).*/\1/p' | head -n 1 || true)"
     if [[ -n "$version_number" ]] && awk -v actual="$version_number" -v minimum="$UXPLAY_VERSION" 'BEGIN { split(actual, a, "."); split(minimum, b, "."); for (i=1; i<=3; i++) { if ((a[i]+0) > (b[i]+0)) exit 0; if ((a[i]+0) < (b[i]+0)) exit 1 } exit 0 }'; then
       return
     fi
@@ -289,11 +332,103 @@ install_uxplay_source() {
   [[ "$actual_sha" == "$UXPLAY_SHA256" ]] || fail "UxPlay source archive checksum did not match the pinned release."
   mkdir -p "${work_dir}/source"
   tar -xzf "$archive" -C "${work_dir}/source" --strip-components=1
-  cmake -S "${work_dir}/source" -B "${work_dir}/build" -DCMAKE_INSTALL_PREFIX="$HOME/.local"
+  cmake -S "${work_dir}/source" -B "${work_dir}/build" -DCMAKE_INSTALL_PREFIX="$engine_dir"
   cmake --build "${work_dir}/build" --parallel
   cmake --install "${work_dir}/build"
   rm -rf "$work_dir"
-  export PATH="${user_bin}:${PATH}"
+  export PATH="${engine_bin}:${PATH}"
+}
+
+stage_runtime_tool() {
+  local command_name="$1" source_path="${2:-}" target_path
+  target_path="${engine_bin}/${command_name}"
+  [[ -x "$target_path" ]] && return 0
+  if [[ -z "$source_path" ]]; then source_path="$(command -v "$command_name" 2>/dev/null || true)"; fi
+  [[ -n "$source_path" && -x "$source_path" ]] || fail "Required runtime tool is not available for staging: ${command_name}."
+  mkdir -p "$engine_bin"
+  cp -L "$source_path" "$target_path"
+  chmod 0755 "$target_path"
+}
+
+stage_runtime_tools() {
+  local scrcpy_server scrcpy_prefix
+  stage_runtime_tool adb
+  stage_runtime_tool scrcpy
+  stage_runtime_tool gst-inspect-1.0
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    stage_runtime_tool gtimeout "$(command -v gtimeout 2>/dev/null || true)"
+  else
+    stage_runtime_tool timeout "$(command -v timeout 2>/dev/null || true)"
+  fi
+  stage_gstreamer_plugins
+  if [[ ! -f "${engine_bin}/scrcpy-server" ]]; then
+    scrcpy_server="$(dirname "$(command -v scrcpy)")/scrcpy-server"
+    if [[ -f "$scrcpy_server" ]]; then cp -L "$scrcpy_server" "${engine_bin}/scrcpy-server"; fi
+    for scrcpy_server in /usr/share/scrcpy/scrcpy-server /usr/lib/scrcpy/scrcpy-server /usr/lib64/scrcpy/scrcpy-server; do
+      if [[ -f "$scrcpy_server" ]]; then cp -L "$scrcpy_server" "${engine_bin}/scrcpy-server"; break; fi
+    done
+    if [[ ! -f "${engine_bin}/scrcpy-server" ]] && command -v brew >/dev/null 2>&1; then
+      scrcpy_prefix="$(brew --prefix scrcpy 2>/dev/null || true)"
+      if [[ -n "$scrcpy_prefix" ]]; then
+        scrcpy_server="${scrcpy_prefix}/share/scrcpy/scrcpy-server"
+        if [[ -n "$scrcpy_server" ]]; then cp -L "$scrcpy_server" "${engine_bin}/scrcpy-server"; fi
+      fi
+    fi
+  fi
+  if [[ ! -f "${engine_bin}/scrcpy-server" ]]; then
+    fail "The scrcpy server binary could not be staged in ${engine_bin}."
+  fi
+}
+
+copy_tree_dereference_links() {
+  local source_root="$1" source_path relative_path target_path
+  while IFS= read -r -d '' source_path; do
+    relative_path="${source_path#"${source_root}/"}"
+    target_path="${engine_dir}/lib/${relative_path}"
+    if [[ -d "$source_path" ]]; then
+      rm -rf "$target_path"
+      mkdir -p "$(dirname "$target_path")"
+      cp -RL "$source_path" "$target_path"
+    elif [[ -f "$source_path" ]]; then
+      rm -f "$target_path"
+      cp -L "$source_path" "$target_path"
+    else
+      rm -f "$target_path"
+    fi
+  done < <(find "$source_root" -type l -print0)
+}
+
+stage_gstreamer_plugins() {
+  local plugins_source scanner_source plugins_target
+  plugins_target="${engine_dir}/lib/gstreamer-1.0"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    local gstreamer_prefix
+    gstreamer_prefix="$(brew --prefix gstreamer)"
+    plugins_source="${gstreamer_prefix}/lib/gstreamer-1.0"
+    scanner_source="${gstreamer_prefix}/libexec/gstreamer-1.0/gst-plugin-scanner"
+    mkdir -p "${engine_dir}/lib"
+    cp -Rf "${gstreamer_prefix}/lib/." "${engine_dir}/lib/"
+    copy_tree_dereference_links "${gstreamer_prefix}/lib"
+    find "${engine_dir}/lib" -type f -exec chmod u+w {} +
+  else
+    plugins_source="$(pkg-config --variable=pluginsdir gstreamer-1.0 2>/dev/null || true)"
+    if [[ -z "$plugins_source" || ! -d "$plugins_source" ]]; then
+      plugins_source="$(find /usr/lib /usr/lib64 -type d -path '*/gstreamer-1.0' -print -quit 2>/dev/null || true)"
+    fi
+    scanner_source="$(pkg-config --variable=pluginscannerdir gstreamer-1.0 2>/dev/null || true)"
+    scanner_source="${scanner_source%/}/gst-plugin-scanner"
+    if [[ ! -x "$scanner_source" ]]; then
+      scanner_source="$(find /usr/lib /usr/lib64 -type f -name gst-plugin-scanner -print -quit 2>/dev/null || true)"
+    fi
+  fi
+  [[ -d "$plugins_source" ]] || fail "GStreamer plugin directory is unavailable for staging."
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    mkdir -p "$plugins_target"
+    cp -a "${plugins_source}/." "$plugins_target/"
+  fi
+  [[ -x "$scanner_source" ]] || fail "GStreamer plugin scanner is unavailable for staging."
+  cp -L "$scanner_source" "${engine_bin}/gst-plugin-scanner"
+  chmod 0755 "${engine_bin}/gst-plugin-scanner"
 }
 
 ensure_homebrew() {
@@ -333,22 +468,62 @@ install_macos_runtime() {
   ensure_xcode_cli_tools
   ensure_homebrew
   export HOMEBREW_PREFIX="$(brew --prefix)"
-  log "Installing GStreamer, scrcpy, ADB, and UxPlay build dependencies with Homebrew."
-  brew install --quiet cmake coreutils libplist openssl@3 pkg-config gstreamer scrcpy
-  brew install --cask android-platform-tools
+  log "Installing GStreamer and UxPlay build dependencies with Homebrew."
+  brew install --quiet cmake coreutils libplist openssl@3 pkg-config gstreamer
   install_uxplay_source
+  install_scrcpy_macos
+  stage_runtime_tools
+}
+
+install_scrcpy_macos() {
+  local architecture asset expected_sha work_dir archive extract_dir bundle binary server adb actual_sha
+  architecture="$(uname -m)"
+  case "$architecture" in
+    arm64|aarch64)
+      asset="scrcpy-macos-aarch64-v${SCRCPY_VERSION}.tar.gz"
+      expected_sha="$SCRCPY_MACOS_ARM64_SHA256" ;;
+    x86_64|amd64)
+      asset="scrcpy-macos-x86_64-v${SCRCPY_VERSION}.tar.gz"
+      expected_sha="$SCRCPY_MACOS_X86_64_SHA256" ;;
+    *) fail "The official scrcpy release does not support macOS ${architecture}." ;;
+  esac
+  if [[ -x "${engine_bin}/scrcpy" && -x "${engine_bin}/adb" && -f "${engine_bin}/scrcpy-server" ]]; then return; fi
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-scrcpy.XXXXXX")"
+  archive="${work_dir}/${asset}"
+  extract_dir="${work_dir}/extract"
+  mkdir -p "$extract_dir"
+  curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/${asset}" --output "$archive"
+  if command -v shasum >/dev/null 2>&1; then
+    actual_sha="$(shasum -a 256 "$archive" | awk '{print $1}')"
+  else
+    actual_sha="$(sha256sum "$archive" | awk '{print $1}')"
+  fi
+  [[ "$actual_sha" == "$expected_sha" ]] || fail "The official macOS scrcpy archive SHA-256 verification failed."
+  tar -xzf "$archive" -C "$extract_dir"
+  bundle="$(find "$extract_dir" -type d -name "scrcpy-macos-*-v${SCRCPY_VERSION}" -print -quit)"
+  [[ -n "$bundle" ]] || fail "The official macOS scrcpy archive did not contain its distribution directory."
+  binary="${bundle}/scrcpy"
+  server="${bundle}/scrcpy-server"
+  adb="${bundle}/adb"
+  [[ -x "$binary" && -f "$server" && -x "$adb" ]] || fail "The official macOS scrcpy archive is missing required executables."
+  mkdir -p "$engine_bin"
+  cp -L "$binary" "${engine_bin}/scrcpy"
+  cp -L "$server" "${engine_bin}/scrcpy-server"
+  cp -L "$adb" "${engine_bin}/adb"
+  chmod 0755 "${engine_bin}/scrcpy" "${engine_bin}/scrcpy-server" "${engine_bin}/adb"
+  rm -rf "$work_dir"
 }
 
 install_scrcpy_linux() {
   local architecture work_dir archive actual_sha extract_dir binary server target_dir
-  if command -v scrcpy >/dev/null 2>&1 && [[ -n "$bounded_timeout" ]] && "$bounded_timeout" --kill-after=2s 10s scrcpy --version >/dev/null 2>&1; then return; fi
+  if [[ -x "${engine_bin}/scrcpy" ]] && [[ -n "$bounded_timeout" ]] && "$bounded_timeout" --kill-after=2s 10s "${engine_bin}/scrcpy" --version >/dev/null 2>&1; then return; fi
   architecture="$(uname -m)"
   if [[ "$architecture" == x86_64 || "$architecture" == amd64 ]]; then
     work_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-scrcpy.XXXXXX")"
     archive="${work_dir}/scrcpy.tar.gz"
     extract_dir="${work_dir}/extract"
     mkdir -p "$extract_dir"
-    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "$SCRCPY_URL" --output "$archive"
+    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "$SCRCPY_LINUX_URL" --output "$archive"
     if command -v sha256sum >/dev/null 2>&1; then
       actual_sha="$(sha256sum "$archive" | awk '{print $1}')"
     else
@@ -359,21 +534,19 @@ install_scrcpy_linux() {
     binary="$(find "$extract_dir" -type f -name scrcpy -perm -u+x -print -quit)"
     server="$(find "$extract_dir" -type f -name scrcpy-server -print -quit)"
     [[ -n "$binary" && -n "$server" ]] || fail "The official scrcpy release archive did not contain its client and server binaries."
-    target_dir="${HOME}/.local/lib/neo-airplay/scrcpy-${SCRCPY_VERSION}"
-    mkdir -p "$target_dir" "$user_bin"
-    cp -a "$(dirname "$binary")/." "$target_dir/"
-    chmod 0755 "${target_dir}/scrcpy"
-    chmod 0644 "${target_dir}/scrcpy-server"
-    ln -sf "${target_dir}/scrcpy" "${user_bin}/scrcpy"
-    ln -sf "${target_dir}/scrcpy-server" "${user_bin}/scrcpy-server"
+    target_dir="$engine_bin"
+    mkdir -p "$target_dir"
+    cp -L "$binary" "${target_dir}/scrcpy"
+    cp -L "$server" "${target_dir}/scrcpy-server"
+    local adb
+    adb="$(find "$extract_dir" -type f -name adb -perm -u+x -print -quit)"
+    [[ -n "$adb" ]] || fail "The official scrcpy release archive did not contain its ADB executable."
+    cp -L "$adb" "${target_dir}/adb"
+    chmod 0755 "${target_dir}/scrcpy" "${target_dir}/scrcpy-server" "${target_dir}/adb"
     rm -rf "$work_dir"
     return
   fi
-  if command -v apt-cache >/dev/null 2>&1 && apt-cache show scrcpy >/dev/null 2>&1; then
-    run_privileged apt-get install -y -qq scrcpy
-    return
-  fi
-  fail "The official static scrcpy release currently supports Linux x86_64 only, and no scrcpy package is available for ${architecture}."
+  command -v scrcpy >/dev/null 2>&1 || fail "The official static scrcpy release currently supports Linux x86_64 only, and no scrcpy package is available for ${architecture}."
 }
 
 install_bun_binary() {
@@ -466,25 +639,32 @@ install_development_package_manager_tools() {
 }
 
 linux_packages() {
-  local manager="$1"
+  local manager="$1" architecture
   local runtime_packages=() build_packages=() development_packages=()
+  architecture="$(uname -m)"
   case "$manager" in
     apt)
-      runtime_packages=(adb avahi-daemon ca-certificates dbus procps gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-libav gstreamer1.0-plugins-good gstreamer1.0-plugins-bad)
+      runtime_packages=(avahi-daemon ca-certificates dbus procps gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-libav gstreamer1.0-plugins-good gstreamer1.0-plugins-bad)
       build_packages=(build-essential cmake pkg-config curl unzip libssl-dev libplist-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libavahi-compat-libdnssd-dev)
       development_packages=(libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev librsvg2-dev patchelf file xz-utils)
       ;;
     dnf)
-      runtime_packages=(android-tools scrcpy avahi ca-certificates dbus-daemon procps-ng gstreamer1-tools gstreamer1-plugins-base gstreamer1-plugin-libav gstreamer1-plugins-good gstreamer1-plugins-bad-free)
+      runtime_packages=(avahi ca-certificates dbus-daemon procps-ng gstreamer1-tools gstreamer1-plugins-base gstreamer1-plugin-libav gstreamer1-plugins-good gstreamer1-plugins-bad-free)
       build_packages=(gcc gcc-c++ cmake pkgconf-pkg-config curl unzip openssl-devel libplist-devel gstreamer1-devel gstreamer1-plugins-base-devel avahi-compat-libdns_sd-devel)
       development_packages=(gtk3-devel webkit2gtk4.1-devel libappindicator-gtk3-devel libxdo-devel librsvg2-devel patchelf file xz)
       ;;
     pacman)
-      runtime_packages=(android-tools scrcpy avahi ca-certificates dbus procps gstreamer gst-plugins-base gst-libav gst-plugins-good gst-plugins-bad)
+      runtime_packages=(avahi ca-certificates dbus procps gstreamer gst-plugins-base gst-libav gst-plugins-good gst-plugins-bad)
       build_packages=(base-devel cmake pkgconf curl unzip openssl libplist gstreamer gst-plugins-base)
       development_packages=(gtk3 webkit2gtk-4.1 libappindicator-gtk3 xdotool librsvg patchelf file xz)
       ;;
   esac
+  if [[ "$architecture" != x86_64 && "$architecture" != amd64 ]]; then
+    case "$manager" in
+      apt) runtime_packages+=(adb scrcpy) ;;
+      dnf|pacman) runtime_packages+=(android-tools scrcpy) ;;
+    esac
+  fi
   if ((development)); then
     runtime_packages+=("${development_packages[@]}")
   fi
@@ -494,7 +674,7 @@ linux_packages() {
       run_privileged apt-get install -y -qq --no-install-recommends "${runtime_packages[@]}" "${build_packages[@]}"
       ;;
     dnf)
-      if ! dnf repoquery --quiet scrcpy >/dev/null 2>&1; then
+      if [[ "$architecture" != x86_64 && "$architecture" != amd64 ]] && ! dnf repoquery --quiet scrcpy >/dev/null 2>&1; then
         run_privileged dnf -q -y install dnf-plugins-core
         run_privileged dnf -q -y copr enable zeno/scrcpy
       fi
@@ -513,7 +693,7 @@ install_linux_runtime() {
   elif command -v pacman >/dev/null 2>&1; then manager=pacman
   else fail "Supported Linux package manager not found (apt, dnf, pacman)."; fi
   linux_packages "$manager"
-  if [[ "$manager" == apt ]]; then install_scrcpy_linux; fi
+  install_scrcpy_linux
   install_uxplay_source
   if command -v systemctl >/dev/null 2>&1; then
     if ! systemctl is-active --quiet avahi-daemon; then
@@ -522,9 +702,11 @@ install_linux_runtime() {
   elif command -v service >/dev/null 2>&1 && ! pgrep -x avahi-daemon >/dev/null 2>&1; then
     run_privileged service avahi-daemon start
   fi
+  stage_runtime_tools
 }
 
 install_development_tools() {
+  mkdir -p "$user_bin"
   case "$(uname -s)" in
     Darwin)
       ensure_homebrew

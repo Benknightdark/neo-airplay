@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-const installerPath = fileURLToPath(new URL("../src-tauri/resources/setup/install.sh", import.meta.url));
+const installerPath = fileURLToPath(new URL("./install.sh", import.meta.url));
 const runtimeEntryPath = fileURLToPath(new URL("./prepare-runtime.mjs", import.meta.url));
 const shellChecksUnsupported = process.platform === "win32";
 
@@ -32,6 +32,8 @@ function createScenario(options = {}) {
   const home = join(root, "home");
   const fakeBin = join(root, "fake-bin");
   const utilityBin = join(root, "utility-bin");
+  const engineDirectory = join(root, "engine");
+  const engineBin = join(engineDirectory, "bin");
   const temporaryFiles = join(root, "tmp");
   const packageManagerMarker = join(root, "package-manager-was-called");
   const brewMarker = join(root, "brew-was-called");
@@ -40,14 +42,15 @@ function createScenario(options = {}) {
   mkdirSync(fakeBin);
   mkdirSync(utilityBin);
   mkdirSync(temporaryFiles);
+  mkdirSync(engineBin, { recursive: true });
 
-  for (const utility of ["awk", "grep", "head", "mkdir", "mv", "rm"]) {
+  for (const utility of ["awk", "grep", "head", "mkdir", "mv", "rm", "sed"]) {
     symlinkSync(findHostCommand(utility), join(utilityBin, utility));
   }
 
   const fakeCommands = {
     uname: '#!/bin/sh\ncase "$1" in -m) printf "%s\\n" "${FAKE_ARCH:-x86_64}" ;; *) printf "%s\\n" "${FAKE_UNAME:-Linux}" ;; esac\n',
-    uxplay: '#!/bin/sh\nprintf "UxPlay %s\\n" "${FAKE_UXPLAY_VERSION:-1.73.7}"\n',
+    uxplay: '#!/bin/sh\nprintf "*=== GStreamer >= 1.22 on macOS ===*\\nUxPlay version %s; for help, use option \\"-h\\"\\n" "${FAKE_UXPLAY_VERSION:-1.73.7}"\n',
     "gst-inspect-1.0": '#!/bin/sh\nif [ "${1:-}" = "${MISSING_GST_ELEMENT:-}" ]; then exit 1; fi\nexit 0\n',
     timeout: '#!/bin/sh\nshift\nshift\nexec "$@"\n',
     gtimeout: '#!/bin/sh\nshift\nshift\nexec "$@"\n',
@@ -56,9 +59,14 @@ function createScenario(options = {}) {
     "avahi-daemon": "#!/bin/sh\nexit 0\n",
     pgrep: '#!/bin/sh\n[ "${AVAHI_ACTIVE:-1}" = "1" ]\n',
     "pkg-config": '#!/bin/sh\nif [ "${1:-}" = "--exists" ] && [ "${2:-}" = "${MISSING_PKG_MODULE:-}" ]; then exit 1; fi\nexit 0\n',
-    rustup: "#!/bin/sh\nexit 0\n",
+    rustup: '#!/bin/sh\nif [ "${1:-}" = "component" ]; then printf "rustfmt-x86_64-unknown-linux-gnu\\nclippy-x86_64-unknown-linux-gnu\\n"; fi\nexit 0\n',
     rustc: '#!/bin/sh\nprintf "rustc 1.88.0 (isolated setup test)\\n"\n',
     cargo: '#!/bin/sh\nprintf "cargo 1.88.0 (isolated setup test)\\n"\n',
+    cmake: "#!/bin/sh\nexit 0\n",
+    cc: "#!/bin/sh\nexit 0\n",
+    "c++": "#!/bin/sh\nexit 0\n",
+    patchelf: "#!/bin/sh\nexit 0\n",
+    xz: "#!/bin/sh\nexit 0\n",
     bun: '#!/bin/sh\nprintf "%s\\n" "${FAKE_BUN_VERSION:-1.4.2}"\n',
     node: '#!/bin/sh\nprintf "%s\\n" "${FAKE_NODE_VERSION:-v22.23.3}"\n',
     sudo: '#!/bin/sh\nexec "$@"\n',
@@ -68,9 +76,17 @@ function createScenario(options = {}) {
   };
 
   const missingCommands = new Set(options.missingCommands ?? []);
+  const engineCommands = new Set(["uxplay", "gst-inspect-1.0", "timeout", "gtimeout", "adb", "scrcpy"]);
   for (const [commandName, contents] of Object.entries(fakeCommands)) {
-    if (missingCommands.has(commandName)) continue;
-    const commandPath = join(fakeBin, commandName);
+    if (missingCommands.has(commandName)) {
+      if (engineCommands.has(commandName)) {
+        const systemOnlyPath = join(fakeBin, commandName);
+        writeFileSync(systemOnlyPath, contents);
+        chmodSync(systemOnlyPath, 0o755);
+      }
+      continue;
+    }
+    const commandPath = join(engineCommands.has(commandName) ? engineBin : fakeBin, commandName);
     writeFileSync(commandPath, contents);
     chmodSync(commandPath, 0o755);
   }
@@ -79,6 +95,7 @@ function createScenario(options = {}) {
     ...process.env,
     HOME: home,
     PATH: [fakeBin, utilityBin].join(delimiter),
+    NEO_AIRPLAY_ENGINE_DIR: engineDirectory,
     TMPDIR: temporaryFiles,
     FAKE_UNAME: options.uname ?? "Linux",
     FAKE_ARCH: "x86_64",
@@ -102,8 +119,9 @@ function createScenario(options = {}) {
     packageManagerMarker,
     brewMarker,
     cltInstallMarker,
+    engineDirectory,
     runInstaller(args) {
-      return spawnSync("/bin/bash", [installerPath, ...args], {
+      return spawnSync("/bin/bash", [installerPath, "--engine-dir", engineDirectory, ...args], {
         cwd: root,
         env: environment,
         encoding: "utf8",
@@ -136,12 +154,36 @@ test("install.sh --check accepts ready runtime tools without writing to HOME", {
   }
 });
 
-test("install.sh --check reports a missing command using the isolated PATH", { skip: shellChecksUnsupported }, () => {
+test("install.sh --check ignores a system PATH tool when the engine copy is missing", { skip: shellChecksUnsupported }, () => {
   const scenario = createScenario({ uname: "Linux", missingCommands: ["scrcpy"] });
   try {
     const result = scenario.runInstaller(["--check"]);
     assert.equal(result.status, 1, result.stderr || result.stdout);
     assert.match(result.stdout, /- scrcpy/);
+    assertReadOnly(scenario);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("install.sh --check accepts UxPlay 1.73.7 after a GStreamer version banner", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({ uname: "Linux", uxplayVersion: "1.73.7" });
+  try {
+    const result = scenario.runInstaller(["--check"]);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /Runtime dependencies are available\./);
+    assertReadOnly(scenario);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("install.sh --check rejects UxPlay below the required version despite its banner", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({ uname: "Linux", uxplayVersion: "1.73.6" });
+  try {
+    const result = scenario.runInstaller(["--check"]);
+    assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.match(result.stdout, /uxplay 1\.73\.7 or newer/);
     assertReadOnly(scenario);
   } finally {
     scenario.cleanup();
@@ -309,17 +351,15 @@ test("prepare-runtime skips its installer subprocess when setup is disabled", ()
   const root = mkdtempSync(join(tmpdir(), "neo-airplay-prepare-runtime-test-"));
   const runtimeRoot = join(root, "desktop");
   const runtimeScripts = join(runtimeRoot, "scripts");
-  const setupDirectory = join(runtimeRoot, "src-tauri", "resources", "setup");
   const prepareRuntimeCopy = join(runtimeScripts, "prepare-runtime.mjs");
   const marker = join(root, "installer-was-called");
   mkdirSync(runtimeScripts, { recursive: true });
-  mkdirSync(setupDirectory, { recursive: true });
   copyFileSync(runtimeEntryPath, prepareRuntimeCopy);
 
   if (process.platform === "win32") {
-    writeFileSync(join(setupDirectory, "install.ps1"), "Set-Content -LiteralPath $env:SETUP_TEST_MARKER -Value invoked\n");
+    writeFileSync(join(runtimeScripts, "install.ps1"), "Set-Content -LiteralPath $env:SETUP_TEST_MARKER -Value invoked\n");
   } else {
-    const fakeInstaller = join(setupDirectory, "install.sh");
+    const fakeInstaller = join(runtimeScripts, "install.sh");
     writeFileSync(fakeInstaller, '#!/bin/sh\nprintf invoked > "$SETUP_TEST_MARKER"\n');
     chmodSync(fakeInstaller, 0o755);
   }
