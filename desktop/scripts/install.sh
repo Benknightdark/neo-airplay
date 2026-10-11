@@ -110,9 +110,10 @@ setup_macos_library_path() {
 }
 
 check_gstreamer() {
-  local element
+  local element platform
   local elements=(decodebin h264parse videoconvert autoaudiosink avdec_aac)
   local gst_inspect
+  platform="$(uname -s)"
   gst_inspect="$(runtime_executable gst-inspect-1.0 || true)"
   if [[ -z "$gst_inspect" ]]; then
     missing+=("GStreamer (gst-inspect-1.0)")
@@ -121,14 +122,93 @@ check_gstreamer() {
   [[ -n "$bounded_timeout" ]] || return 1
   export GST_PLUGIN_PATH_1_0="${engine_dir}/lib/gstreamer-1.0"
   export GST_PLUGIN_SYSTEM_PATH_1_0="${engine_dir}/lib/gstreamer-1.0"
-  if [[ "$(uname -s)" == "Darwin" ]]; then
+  if [[ "$platform" == "Darwin" ]]; then
     setup_macos_library_path
   fi
   if [[ -x "${engine_bin}/gst-plugin-scanner" ]]; then
     export GST_PLUGIN_SCANNER_1_0="${engine_bin}/gst-plugin-scanner"
   fi
-  if [[ "$(uname -s)" == "Darwin" ]]; then
+  if [[ "$platform" == "Darwin" ]]; then
     elements+=(osxvideosink avdec_h264)
+
+    local registry_directory plugin_directory plugin_file plugin_source registry_output registry_error registry_status diagnostic
+    # Limit the fresh registry scan to the plugins that provide the required elements.
+    local plugin_files=(
+      libgstplayback.dylib
+      libgstvideoparsersbad.dylib
+      libgstvideoconvertscale.dylib
+      libgstautodetect.dylib
+      libgstlibav.dylib
+      libgstosxvideo.dylib
+    )
+    local previous_registry="${GST_REGISTRY-}" previous_registry_1_0="${GST_REGISTRY_1_0-}"
+    local had_registry="${GST_REGISTRY+x}" had_registry_1_0="${GST_REGISTRY_1_0+x}"
+    local previous_plugin_path="${GST_PLUGIN_PATH-}" previous_plugin_system_path="${GST_PLUGIN_SYSTEM_PATH-}"
+    local had_plugin_path="${GST_PLUGIN_PATH+x}" had_plugin_system_path="${GST_PLUGIN_SYSTEM_PATH+x}"
+    if ! registry_directory="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-gstreamer-check.XXXXXX")"; then
+      missing+=("GStreamer plugin scan (could not create a temporary registry)")
+      return 1
+    fi
+    plugin_directory="${registry_directory}/plugins"
+    if ! mkdir -p "$plugin_directory"; then
+      missing+=("GStreamer plugin scan (could not create an isolated plugin path)")
+      rm -rf "$registry_directory"
+      return 1
+    fi
+    for plugin_file in "${plugin_files[@]}"; do
+      plugin_source="${engine_dir}/lib/gstreamer-1.0/${plugin_file}"
+      if [[ ! -f "$plugin_source" ]]; then
+        missing+=("GStreamer plugin ${plugin_file}")
+      elif ! ln -s "$plugin_source" "${plugin_directory}/${plugin_file}"; then
+        missing+=("GStreamer plugin ${plugin_file} (could not prepare isolated scan)")
+      fi
+    done
+    registry_output="${registry_directory}/elements.txt"
+    registry_error="${registry_directory}/diagnostics.txt"
+    export GST_PLUGIN_PATH_1_0="$plugin_directory"
+    export GST_PLUGIN_SYSTEM_PATH_1_0="$plugin_directory"
+    export GST_PLUGIN_PATH="$plugin_directory"
+    export GST_PLUGIN_SYSTEM_PATH="$plugin_directory"
+    export GST_REGISTRY="${registry_directory}/registry.bin"
+    export GST_REGISTRY_1_0="$GST_REGISTRY"
+
+    if "$bounded_timeout" --kill-after=2s 30s "$gst_inspect" --print-plugin-auto-install-info > "$registry_output" 2> "$registry_error"; then
+      registry_status=0
+    else
+      registry_status=$?
+    fi
+
+    if ((registry_status == 0)); then
+      for element in "${elements[@]}"; do
+        if ! grep -Fxq "element-${element}" "$registry_output"; then
+          missing+=("GStreamer element ${element}")
+        fi
+      done
+    elif ((registry_status == 124 || registry_status == 137)); then
+      missing+=("GStreamer plugin scan timed out after 30 seconds")
+    else
+      missing+=("GStreamer plugin scan failed (exit ${registry_status})")
+    fi
+    if ((registry_status != 0)); then
+      diagnostic=""
+      element=""
+      while IFS= read -r element || [[ -n "$element" ]]; do
+        [[ -n "$element" ]] && diagnostic="${element:0:240}"
+      done < "$registry_error"
+      [[ -z "$diagnostic" ]] || log "GStreamer scan diagnostic: ${diagnostic}"
+    fi
+
+    if ! rm -rf "$registry_directory"; then
+      missing+=("GStreamer temporary registry cleanup failed")
+    fi
+    if [[ -n "$had_registry" ]]; then export GST_REGISTRY="$previous_registry"; else unset GST_REGISTRY; fi
+    if [[ -n "$had_registry_1_0" ]]; then export GST_REGISTRY_1_0="$previous_registry_1_0"; else unset GST_REGISTRY_1_0; fi
+    export GST_PLUGIN_PATH_1_0="${engine_dir}/lib/gstreamer-1.0"
+    export GST_PLUGIN_SYSTEM_PATH_1_0="${engine_dir}/lib/gstreamer-1.0"
+    if [[ -n "$had_plugin_path" ]]; then export GST_PLUGIN_PATH="$previous_plugin_path"; else unset GST_PLUGIN_PATH; fi
+    if [[ -n "$had_plugin_system_path" ]]; then export GST_PLUGIN_SYSTEM_PATH="$previous_plugin_system_path"; else unset GST_PLUGIN_SYSTEM_PATH; fi
+    if ((registry_status != 0)); then return 1; fi
+    return 0
   else
     elements+=(autovideosink)
   fi

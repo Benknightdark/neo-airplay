@@ -6,6 +6,7 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -30,6 +31,15 @@ function findHostCommand(commandName) {
   throw new Error(`Host utility not found: ${commandName}`);
 }
 
+function snapshotDirectory(directory) {
+  return readdirSync(directory, { withFileTypes: true })
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .map((entry) => {
+      const path = join(directory, entry.name);
+      return [entry.name, entry.isDirectory() ? snapshotDirectory(path) : readFileSync(path, "utf8")];
+    });
+}
+
 function createScenario(options = {}) {
   const root = mkdtempSync(join(tmpdir(), "neo-airplay-setup-check-"));
   const home = join(root, "home");
@@ -37,6 +47,7 @@ function createScenario(options = {}) {
   const utilityBin = join(root, "utility-bin");
   const engineDirectory = join(root, "engine");
   const engineBin = join(engineDirectory, "bin");
+  const engineGstreamerPlugins = join(engineDirectory, "lib", "gstreamer-1.0");
   const temporaryFiles = join(root, "tmp");
   const gstreamerPlugins = join(root, "gstreamer-plugins");
   const gstreamerScannerDirectory = join(root, "gstreamer-scanner");
@@ -44,26 +55,59 @@ function createScenario(options = {}) {
   const brewMarker = join(root, "brew-was-called");
   const cltInstallMarker = join(root, "clt-install-was-requested");
   const scrcpyDownloadMarker = join(root, "scrcpy-download-was-called");
+  const gstInspectMarker = join(root, "gst-inspect-calls");
   mkdirSync(home);
   mkdirSync(fakeBin);
   mkdirSync(utilityBin);
   mkdirSync(temporaryFiles);
   mkdirSync(engineBin, { recursive: true });
+  mkdirSync(engineGstreamerPlugins, { recursive: true });
   mkdirSync(gstreamerPlugins);
   mkdirSync(gstreamerScannerDirectory);
   writeFileSync(join(gstreamerScannerDirectory, "gst-plugin-scanner"), "#!/bin/sh\nexit 0\n");
   chmodSync(join(gstreamerScannerDirectory, "gst-plugin-scanner"), 0o755);
 
-  for (const utility of ["awk", "cat", "chmod", "cp", "dirname", "find", "grep", "head", "mkdir", "mktemp", "mv", "rm", "sed"]) {
+  for (const utility of ["awk", "cat", "chmod", "cp", "dirname", "find", "grep", "head", "ln", "mkdir", "mktemp", "mv", "rm", "sed"]) {
     symlinkSync(findHostCommand(utility), join(utilityBin, utility));
+  }
+  for (const pluginFile of ["libgstplayback.dylib", "libgstvideoparsersbad.dylib", "libgstvideoconvertscale.dylib", "libgstautodetect.dylib", "libgstlibav.dylib", "libgstosxvideo.dylib"]) {
+    writeFileSync(join(engineGstreamerPlugins, pluginFile), "fixture GStreamer plugin\n");
   }
 
   const fakeCommands = {
     uname: '#!/bin/sh\ncase "$1" in -m) printf "%s\\n" "${FAKE_ARCH:-x86_64}" ;; *) printf "%s\\n" "${FAKE_UNAME:-Linux}" ;; esac\n',
     uxplay: '#!/bin/sh\nprintf "*=== GStreamer >= 1.22 on macOS ===*\\nUxPlay version %s; for help, use option \\"-h\\"\\n" "${FAKE_UXPLAY_VERSION:-1.73.7}"\n',
-    "gst-inspect-1.0": '#!/bin/sh\nif [ "${1:-}" = "${MISSING_GST_ELEMENT:-}" ]; then exit 1; fi\nexit 0\n',
-    timeout: '#!/bin/sh\nshift\nshift\nexec "$@"\n',
-    gtimeout: '#!/bin/sh\nshift\nshift\nexec "$@"\n',
+    "gst-inspect-1.0": `#!/bin/sh
+printf '%s\\n' "$*" >> "$GST_INSPECT_MARKER"
+if [ "\${1:-}" = "--print-plugin-auto-install-info" ]; then
+  case "\${FAKE_GST_SCAN_MODE:-}" in
+    error) printf "fake GStreamer scan error\\n" >&2; exit 42 ;;
+    timeout) printf "fake GStreamer scan timeout\\n" >&2; exit 124 ;;
+  esac
+  for element in decodebin h264parse videoconvert autoaudiosink avdec_aac osxvideosink avdec_h264; do
+    if [ "$element" != "\${MISSING_GST_ELEMENT:-}" ]; then printf 'element-%s\\n' "$element"; fi
+  done
+  exit 0
+fi
+if [ "\${1:-}" = "\${MISSING_GST_ELEMENT:-}" ]; then exit 1; fi
+exit 0
+`,
+    timeout: `#!/bin/sh
+while [ "\${1#-}" != "$1" ]; do shift; done
+shift
+if [ "\${FAKE_GST_SCAN_MODE:-}" = "timeout" ] &&
+  [ "\${1##*/}" = "gst-inspect-1.0" ] &&
+  [ "\${2:-}" = "--print-plugin-auto-install-info" ]; then exit 124; fi
+exec "$@"
+`,
+    gtimeout: `#!/bin/sh
+while [ "\${1#-}" != "$1" ]; do shift; done
+shift
+if [ "\${FAKE_GST_SCAN_MODE:-}" = "timeout" ] &&
+  [ "\${1##*/}" = "gst-inspect-1.0" ] &&
+  [ "\${2:-}" = "--print-plugin-auto-install-info" ]; then exit 124; fi
+exec "$@"
+`,
     adb: '#!/bin/sh\ncase "${ADB_PROBE:-ok}" in fail) exit 1 ;; empty) exit 0 ;; *) printf "Android Debug Bridge version 1.0.41\\n" ;; esac\n',
     scrcpy: '#!/bin/sh\ncase "${SCRCPY_PROBE:-ok}" in fail) exit 1 ;; empty) exit 0 ;; *) printf "scrcpy 5.0.1\\n" ;; esac\n',
     "avahi-daemon": "#!/bin/sh\nexit 0\n",
@@ -106,6 +150,7 @@ function createScenario(options = {}) {
   if (!options.missingScrcpyServer) {
     writeFileSync(join(engineBin, "scrcpy-server"), options.emptyScrcpyServer ? "" : "fake scrcpy server\n");
   }
+  const engineSnapshot = snapshotDirectory(engineDirectory);
 
   const environment = {
     ...process.env,
@@ -123,6 +168,7 @@ function createScenario(options = {}) {
     SCRCPY_PROBE: options.scrcpyProbe ?? "ok",
     ADB_PROBE: options.adbProbe ?? "ok",
     MISSING_GST_ELEMENT: options.missingGstElement ?? "",
+    FAKE_GST_SCAN_MODE: options.gstScanMode ?? "ok",
     MISSING_PKG_MODULE: options.missingPkgModule ?? "",
     AVAHI_ACTIVE: options.avahiActive === false ? "0" : "1",
     CLT_AVAILABLE: options.cltAvailable === false ? "0" : "1",
@@ -131,6 +177,7 @@ function createScenario(options = {}) {
     BREW_MARKER: brewMarker,
     CLT_INSTALL_MARKER: cltInstallMarker,
     SCRCPY_DOWNLOAD_MARKER: scrcpyDownloadMarker,
+    GST_INSPECT_MARKER: gstInspectMarker,
     FAKE_SCRCPY_SHA256: "9f969d30cc574816077edecda65719c1c70b0aee1df1ba5fa00779ac07b8fd6e",
   };
 
@@ -141,7 +188,10 @@ function createScenario(options = {}) {
     brewMarker,
     cltInstallMarker,
     scrcpyDownloadMarker,
+    gstInspectMarker,
     engineDirectory,
+    engineSnapshot,
+    temporaryFiles,
     runInstaller(args, scriptPath = installerPath) {
       return spawnSync("/bin/bash", [scriptPath, "--engine-dir", engineDirectory, ...args], {
         cwd: root,
@@ -162,6 +212,8 @@ function assertReadOnly(scenario) {
   assert.equal(existsSync(scenario.packageManagerMarker), false, "check mode must not call package managers");
   assert.equal(existsSync(scenario.brewMarker), false, "check mode must not call Homebrew");
   assert.equal(existsSync(scenario.cltInstallMarker), false, "check mode must not request a CLT installation");
+  assert.deepEqual(snapshotDirectory(scenario.engineDirectory), scenario.engineSnapshot, "check mode must not modify the engine directory");
+  assert.deepEqual(readdirSync(scenario.temporaryFiles), [], "temporary GStreamer registry files must be cleaned up");
 }
 
 test("install.sh --check accepts ready runtime tools without writing to HOME", { skip: shellChecksUnsupported }, () => {
@@ -316,6 +368,19 @@ test("install.sh --check rejects an empty adb version probe", { skip: shellCheck
   }
 });
 
+test("install.sh --check scans macOS GStreamer elements once and cleans its temporary registry", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({ uname: "Darwin" });
+  try {
+    const result = scenario.runInstaller(["--check"]);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /Runtime dependencies are available\./);
+    assert.deepEqual(readFileSync(scenario.gstInspectMarker, "utf8").trim().split("\n"), ["--print-plugin-auto-install-info"]);
+    assertReadOnly(scenario);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
 test("install.sh --check reports a missing GStreamer element", { skip: shellChecksUnsupported }, () => {
   const scenario = createScenario({ uname: "Linux", missingGstElement: "avdec_aac" });
   try {
@@ -334,6 +399,36 @@ test("install.sh --check requires the macOS software H.264 decoder", { skip: she
     const result = scenario.runInstaller(["--check"]);
     assert.equal(result.status, 1, result.stderr || result.stdout);
     assert.match(result.stdout, /- GStreamer element avdec_h264/);
+    assert.deepEqual(
+      result.stdout.split(/\r?\n/).filter((line) => line.startsWith("  - ")),
+      ["  - GStreamer element avdec_h264"],
+      "only the unavailable element should be reported",
+    );
+    assertReadOnly(scenario);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("install.sh --check reports a macOS GStreamer scan error with its diagnostic", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({ uname: "Darwin", gstScanMode: "error" });
+  try {
+    const result = scenario.runInstaller(["--check"]);
+    assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.match(result.stdout, /GStreamer plugin scan failed \(exit 42\)/);
+    assert.match(result.stdout, /GStreamer scan diagnostic: fake GStreamer scan error/);
+    assertReadOnly(scenario);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("install.sh --check reports a timed out macOS GStreamer scan", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({ uname: "Darwin", gstScanMode: "timeout" });
+  try {
+    const result = scenario.runInstaller(["--check"]);
+    assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.match(result.stdout, /GStreamer plugin scan timed out after 30 seconds/);
     assertReadOnly(scenario);
   } finally {
     scenario.cleanup();
@@ -346,6 +441,18 @@ test("install.sh --check requires the native macOS video sink", { skip: shellChe
     const result = scenario.runInstaller(["--check"]);
     assert.equal(result.status, 1, result.stderr || result.stdout);
     assert.match(result.stdout, /- GStreamer element osxvideosink/);
+    assertReadOnly(scenario);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("install.sh --check still requires autovideosink on Linux", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({ uname: "Linux", missingGstElement: "autovideosink" });
+  try {
+    const result = scenario.runInstaller(["--check"]);
+    assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.match(result.stdout, /- GStreamer element autovideosink/);
     assertReadOnly(scenario);
   } finally {
     scenario.cleanup();
