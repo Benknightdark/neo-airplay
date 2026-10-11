@@ -29,6 +29,7 @@
 - 設定寫入同目錄暫存 JSON 後重新命名至 `settings.json`，寫入及記憶體更新共用設定鎖；command 另以 transaction 鎖序列化登入啟動變更及儲存。若無法寫入，命令會回報錯誤，記憶體中的設定不會更新。
 - 記錄依本地日期寫入每日 JSONL 檔；診斷頁顯示當日最近 300 筆。檔案開啟或寫入失敗目前不會回報給 UI。
 - 若 App 顯示工具安裝失敗，依畫面列出的記錄檔排除網路、套件庫或授權問題後，按「重新檢查並安裝」。Debug 的本機引擎檔案放在 `desktop/engine/`；Release 先將套件資源複製至使用者資料目錄的 `engine/`。
+- Runtime 檢查要求 Engine 內同時有可執行的 `scrcpy`、ADB 及非空的 `scrcpy-server`；缺少 server 時會重新準備 scrcpy 套件，並將完整工具組寫入 Engine。
 - Linux 準備腳本會安裝並啟用 Avahi；macOS 使用系統 Bonjour，Windows 使用實驗版內建 mDNS。App 不建立防火牆規則，也不會自動配對 Android 裝置。
 - 若 Android 裝置未列出，先在終端執行 `adb devices -l`，確認裝置已授權且狀態為 `device`；App 只列出 ADB 已建立的連線。
 

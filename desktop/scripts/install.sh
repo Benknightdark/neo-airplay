@@ -6,7 +6,8 @@ readonly UXPLAY_COMMIT="df67c212a433cf6dda3676dd40c097900d24e645"
 readonly UXPLAY_SHA256="168de53ed688f87c4022d79357ce91f9608ad5c53236bff95134d19b88efeb3f"
 readonly UXPLAY_URL="https://github.com/FDH2/UxPlay/archive/${UXPLAY_COMMIT}.tar.gz"
 readonly BUN_VERSION="1.4.2"
-readonly NODE_VERSION="$(< "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.node-version")"
+readonly NODE_VERSION_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.node-version"
+NODE_VERSION=""
 readonly SCRCPY_VERSION="5.0.1"
 readonly SCRCPY_SHA256="9f969d30cc574816077edecda65719c1c70b0aee1df1ba5fa00779ac07b8fd6e"
 readonly SCRCPY_LINUX_URL="https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/scrcpy-linux-x86_64-v${SCRCPY_VERSION}.tar.gz"
@@ -49,6 +50,12 @@ engine_bin="${engine_dir}/bin"
 
 log() { printf '%s\n' "$*"; }
 fail() { printf 'Setup failed: %s\n' "$*" >&2; exit 1; }
+
+load_node_version() {
+  [[ -r "$NODE_VERSION_FILE" ]] || fail "Node.js version file is unavailable: ${NODE_VERSION_FILE}"
+  NODE_VERSION="$(< "$NODE_VERSION_FILE")"
+  [[ -n "$NODE_VERSION" ]] || fail "Node.js version file is empty: ${NODE_VERSION_FILE}"
+}
 
 user_bin="${HOME}/.local/bin"
 export NEO_AIRPLAY_ENGINE_DIR="$engine_dir"
@@ -181,6 +188,7 @@ check_runtime() {
   [[ -n "$bounded_timeout" ]] || missing+=("GNU timeout utility for bounded runtime probes")
   check_uxplay || true
   check_version_probe scrcpy --version scrcpy || true
+  [[ -s "${engine_bin}/scrcpy-server" ]] || missing+=("scrcpy server (scrcpy-server)")
   check_version_probe adb version adb || true
   check_gstreamer || true
   if [[ "$(uname -s)" == "Linux" ]]; then
@@ -200,6 +208,7 @@ check_runtime() {
 check_development() {
   local node_version bun_version rust_version
   local dev_missing=()
+  load_node_version
   if ! command -v rustup >/dev/null 2>&1 || ! rustc +stable --version >/dev/null 2>&1 || ! cargo +stable --version >/dev/null 2>&1; then
     dev_missing+=("Rust stable (rustup, rustc, cargo)")
   else
@@ -367,21 +376,21 @@ stage_runtime_tools() {
     stage_runtime_tool timeout "$(command -v timeout 2>/dev/null || true)"
   fi
   stage_gstreamer_plugins
-  if [[ ! -f "${engine_bin}/scrcpy-server" ]]; then
+  if [[ ! -s "${engine_bin}/scrcpy-server" ]]; then
     scrcpy_server="$(dirname "$(command -v scrcpy)")/scrcpy-server"
-    if [[ -f "$scrcpy_server" ]]; then cp -L "$scrcpy_server" "${engine_bin}/scrcpy-server"; fi
+    if [[ -s "$scrcpy_server" ]]; then cp -L "$scrcpy_server" "${engine_bin}/scrcpy-server"; fi
     for scrcpy_server in /usr/share/scrcpy/scrcpy-server /usr/lib/scrcpy/scrcpy-server /usr/lib64/scrcpy/scrcpy-server; do
-      if [[ -f "$scrcpy_server" ]]; then cp -L "$scrcpy_server" "${engine_bin}/scrcpy-server"; break; fi
+      if [[ -s "$scrcpy_server" ]]; then cp -L "$scrcpy_server" "${engine_bin}/scrcpy-server"; break; fi
     done
-    if [[ ! -f "${engine_bin}/scrcpy-server" ]] && command -v brew >/dev/null 2>&1; then
+    if [[ ! -s "${engine_bin}/scrcpy-server" ]] && command -v brew >/dev/null 2>&1; then
       scrcpy_prefix="$(brew --prefix scrcpy 2>/dev/null || true)"
       if [[ -n "$scrcpy_prefix" ]]; then
         scrcpy_server="${scrcpy_prefix}/share/scrcpy/scrcpy-server"
-        if [[ -n "$scrcpy_server" ]]; then cp -L "$scrcpy_server" "${engine_bin}/scrcpy-server"; fi
+        if [[ -s "$scrcpy_server" ]]; then cp -L "$scrcpy_server" "${engine_bin}/scrcpy-server"; fi
       fi
     fi
   fi
-  if [[ ! -f "${engine_bin}/scrcpy-server" ]]; then
+  if [[ ! -s "${engine_bin}/scrcpy-server" ]]; then
     fail "The scrcpy server binary could not be staged in ${engine_bin}."
   fi
 }
@@ -476,9 +485,22 @@ install_macos_runtime() {
   export HOMEBREW_PREFIX="$(brew --prefix)"
   log "Installing GStreamer and UxPlay build dependencies with Homebrew."
   brew install --quiet cmake coreutils libplist openssl@3 pkg-config gstreamer
+  stage_runtime_tool gtimeout "$(command -v gtimeout 2>/dev/null || true)"
+  bounded_timeout="$(runtime_executable gtimeout || true)"
   install_uxplay_source
   install_scrcpy_macos
   stage_runtime_tools
+}
+
+scrcpy_bundle_ready() {
+  local scrcpy_output adb_output
+  [[ -x "${engine_bin}/scrcpy" && -x "${engine_bin}/adb" && -s "${engine_bin}/scrcpy-server" && -n "$bounded_timeout" ]] || return 1
+  if ! scrcpy_output="$("$bounded_timeout" --kill-after=2s 10s "${engine_bin}/scrcpy" --version 2>&1)" || [[ -z "$scrcpy_output" ]]; then
+    return 1
+  fi
+  if ! adb_output="$("$bounded_timeout" --kill-after=2s 10s "${engine_bin}/adb" version 2>&1)" || [[ -z "$adb_output" ]]; then
+    return 1
+  fi
 }
 
 install_scrcpy_macos() {
@@ -493,7 +515,7 @@ install_scrcpy_macos() {
       expected_sha="$SCRCPY_MACOS_X86_64_SHA256" ;;
     *) fail "The official scrcpy release does not support macOS ${architecture}." ;;
   esac
-  if [[ -x "${engine_bin}/scrcpy" && -x "${engine_bin}/adb" && -f "${engine_bin}/scrcpy-server" ]]; then return; fi
+  if scrcpy_bundle_ready; then return; fi
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-scrcpy.XXXXXX")"
   archive="${work_dir}/${asset}"
   extract_dir="${work_dir}/extract"
@@ -522,7 +544,7 @@ install_scrcpy_macos() {
 
 install_scrcpy_linux() {
   local architecture work_dir archive actual_sha extract_dir binary server target_dir
-  if [[ -x "${engine_bin}/scrcpy" ]] && [[ -n "$bounded_timeout" ]] && "$bounded_timeout" --kill-after=2s 10s "${engine_bin}/scrcpy" --version >/dev/null 2>&1; then return; fi
+  if scrcpy_bundle_ready; then return; fi
   architecture="$(uname -m)"
   if [[ "$architecture" == x86_64 || "$architecture" == amd64 ]]; then
     work_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-scrcpy.XXXXXX")"
@@ -594,6 +616,7 @@ install_bun_binary() {
 
 install_node_binary() {
   local system architecture asset expected_sha work_dir archive extracted node_root node_dir actual_sha
+  load_node_version
   if [[ "$(node --version 2>/dev/null || true)" == "v${NODE_VERSION}" ]]; then return; fi
   system="$(uname -s)"
   architecture="$(uname -m)"
@@ -699,6 +722,8 @@ install_linux_runtime() {
   elif command -v pacman >/dev/null 2>&1; then manager=pacman
   else fail "Supported Linux package manager not found (apt, dnf, pacman)."; fi
   linux_packages "$manager"
+  stage_runtime_tool timeout "$(command -v timeout 2>/dev/null || true)"
+  bounded_timeout="$(runtime_executable timeout || true)"
   install_scrcpy_linux
   install_uxplay_source
   if command -v systemctl >/dev/null 2>&1; then

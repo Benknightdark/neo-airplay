@@ -18,6 +18,7 @@ import test from "node:test";
 import { getSetupCommand, runTauri, withDevelopmentPath } from "./run-tauri.mjs";
 
 const installerPath = fileURLToPath(new URL("./install.sh", import.meta.url));
+const powershellInstallerPath = fileURLToPath(new URL("./install.ps1", import.meta.url));
 const runtimeEntryPath = fileURLToPath(new URL("./prepare-runtime.mjs", import.meta.url));
 const shellChecksUnsupported = process.platform === "win32";
 
@@ -37,16 +38,23 @@ function createScenario(options = {}) {
   const engineDirectory = join(root, "engine");
   const engineBin = join(engineDirectory, "bin");
   const temporaryFiles = join(root, "tmp");
+  const gstreamerPlugins = join(root, "gstreamer-plugins");
+  const gstreamerScannerDirectory = join(root, "gstreamer-scanner");
   const packageManagerMarker = join(root, "package-manager-was-called");
   const brewMarker = join(root, "brew-was-called");
   const cltInstallMarker = join(root, "clt-install-was-requested");
+  const scrcpyDownloadMarker = join(root, "scrcpy-download-was-called");
   mkdirSync(home);
   mkdirSync(fakeBin);
   mkdirSync(utilityBin);
   mkdirSync(temporaryFiles);
   mkdirSync(engineBin, { recursive: true });
+  mkdirSync(gstreamerPlugins);
+  mkdirSync(gstreamerScannerDirectory);
+  writeFileSync(join(gstreamerScannerDirectory, "gst-plugin-scanner"), "#!/bin/sh\nexit 0\n");
+  chmodSync(join(gstreamerScannerDirectory, "gst-plugin-scanner"), 0o755);
 
-  for (const utility of ["awk", "cat", "chmod", "dirname", "grep", "head", "mkdir", "mktemp", "mv", "rm", "sed"]) {
+  for (const utility of ["awk", "cat", "chmod", "cp", "dirname", "find", "grep", "head", "mkdir", "mktemp", "mv", "rm", "sed"]) {
     symlinkSync(findHostCommand(utility), join(utilityBin, utility));
   }
 
@@ -60,7 +68,7 @@ function createScenario(options = {}) {
     scrcpy: '#!/bin/sh\ncase "${SCRCPY_PROBE:-ok}" in fail) exit 1 ;; empty) exit 0 ;; *) printf "scrcpy 5.0.1\\n" ;; esac\n',
     "avahi-daemon": "#!/bin/sh\nexit 0\n",
     pgrep: '#!/bin/sh\n[ "${AVAHI_ACTIVE:-1}" = "1" ]\n',
-    "pkg-config": '#!/bin/sh\nif [ "${1:-}" = "--exists" ] && [ "${2:-}" = "${MISSING_PKG_MODULE:-}" ]; then exit 1; fi\nexit 0\n',
+    "pkg-config": '#!/bin/sh\ncase "${1:-}" in --exists) [ "${2:-}" != "${MISSING_PKG_MODULE:-}" ] ;; --variable=pluginsdir) printf "%s\\n" "$GSTREAMER_PLUGINS" ;; --variable=pluginscannerdir) printf "%s\\n" "$GSTREAMER_SCANNER_DIRECTORY" ;; *) exit 0 ;; esac\n',
     rustup: '#!/bin/sh\nif [ "${1:-}" = "component" ]; then printf "rustfmt-x86_64-unknown-linux-gnu\\nclippy-x86_64-unknown-linux-gnu\\n"; fi\nexit 0\n',
     rustc: '#!/bin/sh\nprintf "rustc 1.88.0 (isolated setup test)\\n"\n',
     cargo: '#!/bin/sh\nprintf "cargo 1.88.0 (isolated setup test)\\n"\n',
@@ -73,6 +81,9 @@ function createScenario(options = {}) {
     node: '#!/bin/sh\nprintf "%s\\n" "${FAKE_NODE_VERSION:-v22.23.3}"\n',
     sudo: '#!/bin/sh\nexec "$@"\n',
     "apt-get": `#!/bin/sh\nprintf '%s\\n' "$*" >> "$PACKAGE_MANAGER_MARKER"\nexit "\${FAKE_PACKAGE_MANAGER_STATUS:-97}"\n`,
+    curl: '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "--output" ]; then shift; : > "$1"; fi\n  shift\ndone\nprintf download >> "$SCRCPY_DOWNLOAD_MARKER"\n',
+    sha256sum: '#!/bin/sh\nprintf "%s  %s\\n" "$FAKE_SCRCPY_SHA256" "$1"\n',
+    tar: '#!/bin/sh\n[ "${1:-}" = "-xzf" ] || exit 1\nshift\nshift\n[ "${1:-}" = "-C" ] || exit 1\ndestination="$2"\nbundle="$destination/scrcpy-linux-x86_64-v5.0.1"\nmkdir -p "$bundle"\nprintf "#!/bin/sh\\nprintf \\\"scrcpy 5.0.1\\\\n\\\"\\n" > "$bundle/scrcpy"\nprintf "fake scrcpy server\\n" > "$bundle/scrcpy-server"\nprintf "#!/bin/sh\\nprintf \\\"Android Debug Bridge version 1.0.41\\\\n\\\"\\n" > "$bundle/adb"\nchmod 0755 "$bundle/scrcpy" "$bundle/adb"\n',
     brew: `#!/bin/sh\nprintf '%s\\n' "$*" >> "$BREW_MARKER"\nexit 97\n`,
     "xcode-select": '#!/bin/sh\nif [ "${1:-}" = "--install" ]; then printf requested > "$CLT_INSTALL_MARKER"; exit 0; fi\n[ "${CLT_AVAILABLE:-1}" = "1" ]\n',
   };
@@ -92,6 +103,9 @@ function createScenario(options = {}) {
     writeFileSync(commandPath, contents);
     chmodSync(commandPath, 0o755);
   }
+  if (!options.missingScrcpyServer) {
+    writeFileSync(join(engineBin, "scrcpy-server"), options.emptyScrcpyServer ? "" : "fake scrcpy server\n");
+  }
 
   const environment = {
     ...process.env,
@@ -99,6 +113,8 @@ function createScenario(options = {}) {
     PATH: [fakeBin, utilityBin].join(delimiter),
     NEO_AIRPLAY_ENGINE_DIR: engineDirectory,
     TMPDIR: temporaryFiles,
+    GSTREAMER_PLUGINS: gstreamerPlugins,
+    GSTREAMER_SCANNER_DIRECTORY: gstreamerScannerDirectory,
     FAKE_UNAME: options.uname ?? "Linux",
     FAKE_ARCH: "x86_64",
     FAKE_UXPLAY_VERSION: options.uxplayVersion ?? "1.73.7",
@@ -114,6 +130,8 @@ function createScenario(options = {}) {
     PACKAGE_MANAGER_MARKER: packageManagerMarker,
     BREW_MARKER: brewMarker,
     CLT_INSTALL_MARKER: cltInstallMarker,
+    SCRCPY_DOWNLOAD_MARKER: scrcpyDownloadMarker,
+    FAKE_SCRCPY_SHA256: "9f969d30cc574816077edecda65719c1c70b0aee1df1ba5fa00779ac07b8fd6e",
   };
 
   return {
@@ -122,9 +140,10 @@ function createScenario(options = {}) {
     packageManagerMarker,
     brewMarker,
     cltInstallMarker,
+    scrcpyDownloadMarker,
     engineDirectory,
-    runInstaller(args) {
-      return spawnSync("/bin/bash", [installerPath, "--engine-dir", engineDirectory, ...args], {
+    runInstaller(args, scriptPath = installerPath) {
+      return spawnSync("/bin/bash", [scriptPath, "--engine-dir", engineDirectory, ...args], {
         cwd: root,
         env: environment,
         encoding: "utf8",
@@ -166,6 +185,86 @@ test("install.sh --check ignores a system PATH tool when the engine copy is miss
     assertReadOnly(scenario);
   } finally {
     scenario.cleanup();
+  }
+});
+
+test("install.sh --check reports a missing scrcpy server binary", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({ uname: "Linux", missingScrcpyServer: true });
+  try {
+    const result = scenario.runInstaller(["--check"]);
+    assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.match(result.stdout, /- scrcpy server \(scrcpy-server\)/);
+    assertReadOnly(scenario);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("install.sh --check rejects an empty scrcpy server file", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({ uname: "Linux", emptyScrcpyServer: true });
+  try {
+    const result = scenario.runInstaller(["--check"]);
+    assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.match(result.stdout, /- scrcpy server \(scrcpy-server\)/);
+    assertReadOnly(scenario);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("install.sh repairs a missing scrcpy server in the engine directory and then skips redownloading", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({ uname: "Linux", missingScrcpyServer: true, packageManagerStatus: 0 });
+  try {
+    const firstRun = scenario.runInstaller([]);
+    assert.equal(firstRun.status, 0, firstRun.stderr || firstRun.stdout);
+    assert.equal(readFileSync(join(scenario.engineDirectory, "bin", "scrcpy-server"), "utf8"), "fake scrcpy server\n");
+    assert.equal(readFileSync(scenario.scrcpyDownloadMarker, "utf8"), "download");
+
+    const secondRun = scenario.runInstaller([]);
+    assert.equal(secondRun.status, 0, secondRun.stderr || secondRun.stdout);
+    assert.equal(readFileSync(scenario.scrcpyDownloadMarker, "utf8"), "download", "complete engine must not download scrcpy again");
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("staged runtime install.sh does not require the development .node-version file", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({ uname: "Linux" });
+  const stagedSetup = join(scenario.root, "App Support", "setup");
+  const stagedInstaller = join(stagedSetup, "install.sh");
+  mkdirSync(stagedSetup, { recursive: true });
+  copyFileSync(installerPath, stagedInstaller);
+  try {
+    const result = scenario.runInstaller(["--check"], stagedInstaller);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /Runtime dependencies are available\./);
+    assert.doesNotMatch(result.stderr, /\.node-version/);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("staged Windows runtime installer checks scrcpy-server without requiring .node-version", { skip: process.platform !== "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "neo-airplay-powershell-runtime-check-"));
+  const stagedSetup = join(root, "App Support", "setup");
+  const stagedInstaller = join(stagedSetup, "install.ps1");
+  const engineDirectory = join(root, "engine");
+  mkdirSync(stagedSetup, { recursive: true });
+  mkdirSync(engineDirectory);
+  copyFileSync(powershellInstallerPath, stagedInstaller);
+  try {
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", stagedInstaller, "-Check", "-EngineDirectory", engineDirectory], {
+      cwd: root,
+      encoding: "utf8",
+      timeout: 30_000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    assert.equal(result.status, 1, output);
+    assert.match(output, /scrcpy server \(scrcpy-server\)/);
+    assert.doesNotMatch(output, /\.node-version/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

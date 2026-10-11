@@ -12,7 +12,7 @@ Neo AirPlay 是 Windows、macOS 與 Linux 桌面接收器，使用 Tauri 2、Rus
 
 ## 執行需求
 
-桌面程式每次正常啟動（DEBUG 或 RELEASE）都會在背景檢查 UxPlay、GStreamer、ADB、scrcpy，以及 Linux 的 Avahi 服務；缺少或未啟動時會自動執行準備流程，先前失敗的流程也會在下次啟動時自動重試。開發／建置入口也會先執行 setup 檢查；依賴已齊全時跳過安裝，缺少時才補齊。安裝需要網路，系統套件可能要求管理員授權；macOS 會開啟 Terminal，Linux 使用終端 sudo 或桌面的 polkit 授權，Windows 使用 UAC。介面會顯示 App 執行期間的引擎準備狀態、記錄位置與重試按鈕。
+桌面程式每次正常啟動（DEBUG 或 RELEASE）都會在背景檢查 UxPlay、GStreamer、ADB、scrcpy、scrcpy-server，以及 Linux 的 Avahi 服務；缺少或未啟動時會自動執行準備流程，先前失敗的流程也會在下次啟動時自動重試。開發／建置入口也會先執行 setup 檢查；依賴已齊全時跳過安裝，缺少時才補齊。安裝需要網路，系統套件可能要求管理員授權；macOS 會開啟 Terminal，Linux 使用終端 sudo 或桌面的 polkit 授權，Windows 使用 UAC。介面會顯示 App 執行期間的引擎準備狀態、記錄位置與重試按鈕。
 
 | 平台 | 自動準備方式 |
 | :--- | :--- |

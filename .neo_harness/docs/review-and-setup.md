@@ -18,6 +18,8 @@
 | App 會從系統 PATH、Homebrew 或 MSYS2 直接執行依賴 | 執行檔只從 `engine/` 找；Debug 使用 `desktop/engine/`，Release 使用者資料目錄的 `engine/`。Tauri 從 `desktop/engine/` 打包，Git 只追蹤 `.GITKEEP`。 |
 | 新 checkout 必須先手動 setup 才能 Debug／Release／打包 | 新增 `launch.sh`／`launch.ps1`，並由 `run-tauri.mjs` 包裝直接 Tauri CLI；兩者先呼叫平台 setup，Engine 完整時略過工具安裝。 |
 | Engine 已完整但缺少開發工具時仍會重跑 runtime staging | `install.sh` 依 runtime 檢查結果決定是否執行 runtime 安裝；只缺開發相依時只補開發環境。 |
+| Engine 有 scrcpy 執行檔但缺少 server 時不會觸發安裝 | `install.sh` 與 `install.ps1` 現在要求 `engine/bin/scrcpy-server` 存在且非空；缺少時重裝官方 scrcpy 工具組並補入 Engine。Windows 的 scrcpy 套件已完整時會略過下載。 |
+| Release 暫存安裝器要求開發用 `.node-version` | `install.sh`、`install.ps1` 只在 Development 流程讀取 Node 版本檔；純 runtime 的打包安裝流程不再依賴來源樹。 |
 | 打包時安裝器無法接收終端輸入 | `scripts/build-app.ts` 繼承 stdin／stdout／stderr。 |
 
 ## 驗證結果
@@ -31,6 +33,9 @@
 - `cd desktop && bun run --silent bundle` 通過，產生 macOS `.app`（230.10 MiB）及 DMG（82.93 MiB）；引擎資源來自 `desktop/engine/`，封裝內容沒有符號連結。
 - `cd desktop && bun run --silent smoke:bundle` 通過，打包後應用程式成功啟動。
 - `cd desktop && bun run --silent test:setup` 通過，包含 setup 呼叫順序、錯誤中止、CI skip，以及 Engine 就緒時不重跑 Linux runtime 套件安裝的案例。
+- 新增 `scrcpy-server` 缺少／空檔檢查、Linux 模擬安裝修復與後續略過下載的回歸案例；staged Bash runtime installer 在沒有 `.node-version` 的目錄中檢查通過。Windows staged PowerShell 案例已加入，但本次 macOS 執行未跑該平台案例。
+- 本次修正後 `/tmp/neo-airplay-pwsh/pwsh -NoProfile -File .neo_harness/verify.ps1` 通過；`bash -n`、Node.js 腳本語法檢查、PowerShell 三個腳本解析與 `git diff --check` 通過。
+- 本機 `bash desktop/scripts/install.sh --check` 通過；`git ls-files desktop/engine` 只列出 `desktop/engine/.GITKEEP`。
 - `cd desktop && bun run --silent tauri --version` 通過；實際經由新 Tauri 包裝完成 setup 檢查並啟動 Tauri CLI。
 - Git 忽略 `desktop/engine/` 內依賴檔案，只顯示 `.GITKEEP`。
 

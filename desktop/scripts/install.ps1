@@ -24,7 +24,7 @@ $ScrcpyVersion = '5.0.1'
 $ScrcpyWin64Sha256 = 'b12a2c4ee8be317422451fc7dcf8ee20a71b5ea7ef9ad73ddd825a25316227a5'
 $ScrcpyWin64Url = "https://github.com/Genymobile/scrcpy/releases/download/v$ScrcpyVersion/scrcpy-win64-v$ScrcpyVersion.zip"
 $BunVersion = '1.4.2'
-$NodeVersion = (Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\.node-version') -Raw).Trim()
+$NodeVersion = $null
 $script:EngineDirectory = if ($EngineDirectory) { [IO.Path]::GetFullPath($EngineDirectory) } else { [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\engine')) }
 $script:EngineBin = Join-Path $script:EngineDirectory 'bin'
 $script:EngineAndroid = Join-Path $script:EngineDirectory 'android'
@@ -54,6 +54,13 @@ function Write-Info([string]$Message) {
 
 function Stop-Setup([string]$Message) {
     throw "Setup failed: $Message"
+}
+
+if ($Development) {
+    $nodeVersionPath = Join-Path $PSScriptRoot '..\.node-version'
+    if (-not (Test-Path -LiteralPath $nodeVersionPath -PathType Leaf)) { Stop-Setup "Node.js version file is unavailable: $nodeVersionPath" }
+    $NodeVersion = (Get-Content -LiteralPath $nodeVersionPath -Raw).Trim()
+    if (-not $NodeVersion) { Stop-Setup "Node.js version file is empty: $nodeVersionPath" }
 }
 
 function Test-Administrator {
@@ -153,9 +160,11 @@ function Set-ProcessMsysEnvironment([string]$MsysRoot) {
     $env:MSYS2_PATH_TYPE = 'inherit'
     $env:CHERE_INVOKING = '1'
     $env:NEO_AIRPLAY_MSYS2_ROOT = $MsysRoot
-    $nodePath = Join-Path $script:SetupLocalAppData "NeoAirPlay\node-v$NodeVersion"
     $priority = @()
-    if (Test-Path -LiteralPath $nodePath -PathType Container) { $priority += $nodePath }
+    if ($NodeVersion) {
+        $nodePath = Join-Path $script:SetupLocalAppData "NeoAirPlay\node-v$NodeVersion"
+        if (Test-Path -LiteralPath $nodePath -PathType Container) { $priority += $nodePath }
+    }
     $priority += (Join-Path $script:SetupUserProfile '.cargo\bin')
     $priority += (Join-Path $script:SetupUserProfile '.bun\bin')
     $priority += $ucrtBin
@@ -287,6 +296,10 @@ function Test-Runtime {
     }
     if (-not $tools.uxplay) { [void]$missing.Add('uxplay 1.73.7 or newer') }
     if (-not $tools.scrcpy) { [void]$missing.Add('scrcpy') }
+    $scrcpyServer = Join-Path $script:EngineBin 'scrcpy-server'
+    if (-not (Test-Path -LiteralPath $scrcpyServer -PathType Leaf) -or (Get-Item -LiteralPath $scrcpyServer -ErrorAction SilentlyContinue).Length -le 0) {
+        [void]$missing.Add('scrcpy server (scrcpy-server)')
+    }
     if (-not $tools.adb) { [void]$missing.Add('adb') }
     if (-not $tools.gst) { [void]$missing.Add('GStreamer (gst-inspect-1.0)') }
 
@@ -461,6 +474,18 @@ function Install-UxPlay {
 }
 
 function Install-Scrcpy {
+    $scrcpyPath = Join-Path $script:EngineBin 'scrcpy.exe'
+    $scrcpyServer = Join-Path $script:EngineBin 'scrcpy-server'
+    $adbPath = Join-Path $script:EngineBin 'adb.exe'
+    if ((Test-Path -LiteralPath $scrcpyPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $adbPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $scrcpyServer -PathType Leaf) -and
+        (Get-Item -LiteralPath $scrcpyServer -ErrorAction SilentlyContinue).Length -gt 0) {
+        $scrcpyProbe = Invoke-BoundedProbe $scrcpyPath '--version'
+        $adbProbe = Invoke-BoundedProbe $adbPath 'version'
+        if (-not $scrcpyProbe.TimedOut -and $scrcpyProbe.ExitCode -eq 0 -and $scrcpyProbe.Output.Trim() -and
+            -not $adbProbe.TimedOut -and $adbProbe.ExitCode -eq 0 -and $adbProbe.Output.Trim()) { return }
+    }
     $tempRoot = Join-Path $env:TEMP ([Guid]::NewGuid().ToString('N'))
     $archive = Join-Path $tempRoot "scrcpy-win64-v$ScrcpyVersion.zip"
     $extract = Join-Path $tempRoot 'extract'
@@ -667,9 +692,11 @@ function Test-WebView2Runtime {
 function Refresh-ProcessPath {
     $machinePath = [Environment]::GetEnvironmentVariable('Path', 'Machine')
     $userPath = Get-OriginalUserEnvironmentValue 'Path'
-    $nodePath = Join-Path $script:SetupLocalAppData "NeoAirPlay\node-v$NodeVersion"
     $priority = @()
-    if (Test-Path -LiteralPath $nodePath -PathType Container) { $priority += $nodePath }
+    if ($NodeVersion) {
+        $nodePath = Join-Path $script:SetupLocalAppData "NeoAirPlay\node-v$NodeVersion"
+        if (Test-Path -LiteralPath $nodePath -PathType Container) { $priority += $nodePath }
+    }
     $priority += (Join-Path $script:SetupUserProfile '.cargo\bin')
     $priority += (Join-Path $script:SetupUserProfile '.bun\bin')
     $msysRoot = Get-MsysRoot
