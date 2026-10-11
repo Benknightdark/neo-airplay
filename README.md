@@ -12,7 +12,7 @@ Neo AirPlay 是 Windows、macOS 與 Linux 桌面接收器，使用 Tauri 2、Rus
 
 ## 執行需求
 
-桌面程式每次正常啟動（DEBUG 或 RELEASE）都會在背景檢查 UxPlay、GStreamer、ADB、scrcpy，以及 Linux 的 Avahi 服務；缺少或未啟動時會自動執行準備流程，先前失敗的流程也會在下次啟動時自動重試。安裝需要網路，系統套件可能要求管理員授權；macOS 會開啟 Terminal，Linux 使用終端 sudo 或桌面的 polkit 授權，Windows 使用 UAC。介面會顯示安裝狀態、記錄位置與重試按鈕。
+桌面程式每次正常啟動（DEBUG 或 RELEASE）都會在背景檢查 UxPlay、GStreamer、ADB、scrcpy，以及 Linux 的 Avahi 服務；缺少或未啟動時會自動執行準備流程，先前失敗的流程也會在下次啟動時自動重試。開發／建置入口也會先執行 setup 檢查；依賴已齊全時跳過安裝，缺少時才補齊。安裝需要網路，系統套件可能要求管理員授權；macOS 會開啟 Terminal，Linux 使用終端 sudo 或桌面的 polkit 授權，Windows 使用 UAC。介面會顯示 App 執行期間的引擎準備狀態、記錄位置與重試按鈕。
 
 | 平台 | 自動準備方式 |
 | :--- | :--- |
@@ -30,24 +30,30 @@ Tauri 的開發環境需求依平台而異，請依 [Tauri 官方先決條件](h
 
 ## 開發與驗證
 
-第一次取得專案時，在根目錄準備開發工具及投影依賴。macOS／Linux：
+第一次取得專案後，可直接從根目錄選擇 Debug、Release 或打包。啟動入口會先執行平台 setup，檢查開發工具與 `desktop/engine/` 的投影依賴，再執行所選操作。Engine 與系統工具已齊全時會略過下載和安裝；缺少項目才會安裝。前端套件仍會依鎖檔補齊。首次安裝可能需要網路、終端互動或系統授權。
+
+macOS／Linux：
 
 ```sh
-bash desktop/scripts/setup.sh
+bash desktop/scripts/launch.sh dev
+bash desktop/scripts/launch.sh release
+bash desktop/scripts/launch.sh bundle
 ```
 
 Windows PowerShell：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop\scripts\setup.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop\scripts\launch.ps1 dev
+powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop\scripts\launch.ps1 release
+powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop\scripts\launch.ps1 bundle
 ```
 
-這些入口會準備 Rust stable、Bun 1.4.2、Node.js 22.23.3、平台建置工具及前端套件。完成後開啟新終端，讓已安裝工具的環境設定生效；作業系統安裝程式要求授權或重新啟動時，需完成系統提示。已有開發工具時，可直接在專案根目錄執行：
+啟動入口會呼叫 `setup.sh`／`setup.ps1`，準備 Rust stable、Bun 1.4.2、Node.js 22.23.3、平台建置工具、投影依賴及前端套件。獨立準備環境時，仍可在根目錄直接執行 `bash desktop/scripts/setup.sh`，或在 Windows 執行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop\scripts\setup.ps1`；完成後開啟新終端載入 PATH 設定。已有開發工具時，也可在 `desktop/` 直接執行以下命令；Tauri CLI 會自動呼叫對應的 setup，Engine 已就緒時跳過其安裝：
 
 ```sh
-cd desktop
-bun install --frozen-lockfile
-bun run tauri dev
+cd desktop && bun run tauri dev
+cd desktop && bun run release
+cd desktop && bun run bundle
 ```
 
 執行單元測試、Rust 格式檢查、Clippy 與前端建置：
@@ -67,7 +73,7 @@ E2E 需要可啟動桌面視窗的工作階段；Linux 無桌面工作階段時�
 
 ## 建置安裝套件
 
-在目標作業系統上執行：
+在目標作業系統上執行。打包前會自動呼叫 setup 檢查並準備依賴；第一次取得專案且 Bun 尚未安裝時，可使用前一節的 `launch.sh bundle`／`launch.ps1 bundle` 入口：
 
 ```sh
 cd desktop

@@ -6,7 +6,7 @@ readonly UXPLAY_COMMIT="df67c212a433cf6dda3676dd40c097900d24e645"
 readonly UXPLAY_SHA256="168de53ed688f87c4022d79357ce91f9608ad5c53236bff95134d19b88efeb3f"
 readonly UXPLAY_URL="https://github.com/FDH2/UxPlay/archive/${UXPLAY_COMMIT}.tar.gz"
 readonly BUN_VERSION="1.4.2"
-readonly NODE_VERSION="22.23.3"
+readonly NODE_VERSION="$(< "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.node-version")"
 readonly SCRCPY_VERSION="5.0.1"
 readonly SCRCPY_SHA256="9f969d30cc574816077edecda65719c1c70b0aee1df1ba5fa00779ac07b8fd6e"
 readonly SCRCPY_LINUX_URL="https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/scrcpy-linux-x86_64-v${SCRCPY_VERSION}.tar.gz"
@@ -104,6 +104,7 @@ setup_macos_library_path() {
 
 check_gstreamer() {
   local element
+  local elements=(decodebin h264parse videoconvert autoaudiosink avdec_aac)
   local gst_inspect
   gst_inspect="$(runtime_executable gst-inspect-1.0 || true)"
   if [[ -z "$gst_inspect" ]]; then
@@ -119,7 +120,12 @@ check_gstreamer() {
   if [[ -x "${engine_bin}/gst-plugin-scanner" ]]; then
     export GST_PLUGIN_SCANNER_1_0="${engine_bin}/gst-plugin-scanner"
   fi
-  for element in decodebin h264parse videoconvert autovideosink autoaudiosink avdec_aac; do
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    elements+=(osxvideosink avdec_h264)
+  else
+    elements+=(autovideosink)
+  fi
+  for element in "${elements[@]}"; do
     if ! "$bounded_timeout" --kill-after=2s 10s "$gst_inspect" "$element" >/dev/null 2>&1; then
       missing+=("GStreamer element ${element}")
     fi
@@ -630,11 +636,11 @@ install_development_package_manager_tools() {
   local manager="$1"
   case "$manager" in
     apt)
-      run_privileged apt-get install -y -qq --no-install-recommends libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev librsvg2-dev patchelf file unzip ;;
+      run_privileged apt-get install -y -qq --no-install-recommends build-essential cmake pkg-config patchelf xz-utils file unzip libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev librsvg2-dev ;;
     dnf)
-      run_privileged dnf -q -y install gtk3-devel webkit2gtk4.1-devel libappindicator-gtk3-devel libxdo-devel librsvg2-devel patchelf file unzip ;;
+      run_privileged dnf -q -y install gcc gcc-c++ cmake pkgconf-pkg-config patchelf xz file unzip gtk3-devel webkit2gtk4.1-devel libappindicator-gtk3-devel libxdo-devel librsvg2-devel ;;
     pacman)
-      run_privileged pacman -Syu --noconfirm --noprogressbar --needed gtk3 webkit2gtk-4.1 libappindicator-gtk3 xdotool librsvg patchelf file unzip ;;
+      run_privileged pacman -Syu --noconfirm --noprogressbar --needed base-devel cmake pkgconf patchelf xz file unzip gtk3 webkit2gtk-4.1 libappindicator-gtk3 xdotool librsvg ;;
   esac
 }
 
@@ -709,6 +715,7 @@ install_development_tools() {
   mkdir -p "$user_bin"
   case "$(uname -s)" in
     Darwin)
+      ensure_xcode_cli_tools
       ensure_homebrew
       eval "$(brew shellenv)"
       brew install --quiet rustup-init
@@ -766,18 +773,29 @@ install_linux_dev_tools() {
   rm -rf "$temp_dir"
 }
 
-case "$(uname -s)" in
-  Darwin)
-    install_macos_runtime
-    ;;
-  Linux)
-    install_linux_runtime
-    ;;
-  *) fail "This installer supports macOS and Linux. Use install.ps1 on Windows." ;;
-esac
+if ((!runtime_ready)); then
+  case "$(uname -s)" in
+    Darwin)
+      install_macos_runtime
+      ;;
+    Linux)
+      install_linux_runtime
+      ;;
+    *) fail "This installer supports macOS and Linux. Use install.ps1 on Windows." ;;
+  esac
+fi
 
 if ((development)); then
-  install_development_tools
+  if ((!development_ready)); then
+    if [[ "$(uname -s)" == "Linux" && "$runtime_ready" == "1" ]]; then
+      if command -v apt-get >/dev/null 2>&1; then manager=apt
+      elif command -v dnf >/dev/null 2>&1; then manager=dnf
+      elif command -v pacman >/dev/null 2>&1; then manager=pacman
+      else fail "Supported Linux package manager not found (apt, dnf, pacman)."; fi
+      install_development_package_manager_tools "$manager"
+    fi
+    install_development_tools
+  fi
 fi
 
 check_runtime

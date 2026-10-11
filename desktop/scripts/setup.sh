@@ -6,4 +6,4 @@ project_dir="$(cd "$script_dir/../.." && pwd)"
 export PATH="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.cargo/bin:/opt/homebrew/opt/node@22/bin:/usr/local/opt/node@22/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 cd "$project_dir/desktop"
 bun install --frozen-lockfile --silent
-printf '%s\n' '開發環境已準備完成。請開啟新終端，再執行 cd desktop && bun run tauri dev。'
+printf '%s\n' '開發環境已準備完成。'

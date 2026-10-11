@@ -11,6 +11,7 @@
 - `desktop/src-tauri/src/state.rs` 保存 JSON 設定、每日 JSONL 記錄、列舉 Android 裝置及管理 UxPlay/scrcpy 子程序。
 - `desktop/src-tauri/src/dependencies.rs` 在背景檢查並準備投影工具；`DependencyPanel.vue` 透過獨立 IPC 命令顯示狀態及重試。
 - `desktop/scripts/install.sh` 與 `install.ps1` 保存共用平台安裝腳本。`setup:runtime` 與 Rust 背景檢查共用這些腳本；Rust 以 `include_str!` 將對應腳本編入正式執行檔。
+- `desktop/scripts/run-tauri.mjs` 在直接呼叫 Tauri CLI 前執行平台 setup；`launch.sh`／`launch.ps1` 可在首次 checkout、Bun 尚未安裝時先準備環境並執行 Debug、Release 或 bundle。
 - `desktop/src-tauri/capabilities/default.json` 只開放 Tauri 核心預設 IPC 權限。WDIO 權限只存在 E2E 組態與 `wdio` Rust feature。
 - `desktop/engine/` 是本機引擎目錄，只有 `.GITKEEP` 納入版控；Tauri 從這裡打包工具。Debug 使用此目錄，Release 將套件內的 `engine/` 種入使用者資料目錄後再執行。
 

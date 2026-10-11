@@ -6,11 +6,16 @@
 | :--- | :--- |
 | `bash desktop/scripts/setup.sh` | 在 macOS／Linux 準備開發工具、投影依賴及前端套件。 |
 | `powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop\scripts\setup.ps1` | 在 Windows 準備開發工具、投影依賴及前端套件。 |
+| `bash desktop/scripts/launch.sh dev` | 從新 checkout 自動準備開發環境與引擎，然後啟動 Debug。 |
+| `bash desktop/scripts/launch.sh release` | 自動準備環境並建置 Release 執行檔，不產生安裝套件。 |
+| `bash desktop/scripts/launch.sh bundle` | 自動準備環境並建置目前平台的安裝套件。 |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop\scripts\launch.ps1 dev` | Windows 新 checkout 的自動準備與 Debug 入口；`release` 與 `bundle` 選項同名。 |
 | `cd desktop && bun run --silent setup:runtime` | 手動準備目前平台的投影工具；正常 DEBUG/RELEASE 啟動會在背景自動檢查及準備。 |
 | `bash desktop/scripts/install.sh --check` | 只檢查 macOS／Linux 投影工具，缺少時回傳非零，不安裝軟體。 |
 | `powershell -NoProfile -ExecutionPolicy Bypass -File desktop/scripts/install.ps1 -Check` | 只檢查 Windows 投影工具，缺少時回傳非零，不安裝軟體。 |
 | `cd desktop && bun install --frozen-lockfile --silent` | 依 `bun.lock` 安裝固定版本的前端套件。 |
 | `cd desktop && bun run tauri dev` | 啟動 Vite 與 Tauri 桌面開發環境。 |
+| `cd desktop && bun run release` | 自動檢查／準備環境，建置 Release 執行檔但不打包安裝程式。 |
 | `pwsh .neo_harness/verify.ps1` | 執行 TypeScript 型別檢查、前端單元測試、Rust 格式檢查、Rust 單元測試、Clippy 及 Vite 建置。 |
 | `cd desktop && bun run --silent typecheck` | 執行 Vue/TypeScript 型別檢查。 |
 | `cd desktop && bun run --silent test:unit` | 執行 Vitest 前端單元測試。 |
@@ -28,6 +33,6 @@
 
 CI 在 Linux 使用 `dbus-run-session -- xvfb-run --auto-servernum bun run --silent test:e2e:ci` 與 `dbus-run-session -- xvfb-run --auto-servernum bun run --silent smoke:bundle` 建立 D-Bus session 和虛擬顯示器。原生安裝套件輸出於 `desktop/src-tauri/target/release/bundle/`；實際檔案格式依建置作業系統而定。
 
-CI 全域設定 `NEO_AIRPLAY_SKIP_SETUP=1`；E2E build 與 smoke script 也明確設定，避免驗證時安裝系統工具。安裝腳本與其平台限制見根目錄 README。只有實際執行過的檢查結果會記錄於 [Review 記錄](review-and-setup.md)。
+Tauri CLI 由 `desktop/scripts/run-tauri.mjs` 包裝，執行 Debug、Release 或 build 時會先呼叫平台 setup；首次取得專案可透過 `launch.sh`／`launch.ps1` 在 Bun 未安裝前啟動。安裝腳本會先檢查依賴，全部就緒時略過安裝。CI 全域設定 `NEO_AIRPLAY_SKIP_SETUP=1`；E2E build 與 smoke script 也明確設定，避免驗證時安裝系統工具。安裝腳本與其平台限制見根目錄 README。只有實際執行過的檢查結果會記錄於 [Review 記錄](review-and-setup.md)。
 
 GitHub workflow：`.github/workflows/ci.yml` 在 `develop`、`main` push 及 `main` Pull Request 執行各平台驗證、E2E 與套件建置；產物上傳為保留 14 天的 Actions artifact。

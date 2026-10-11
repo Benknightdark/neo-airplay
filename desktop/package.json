@@ -8,11 +8,12 @@
   },
   "scripts": {
     "setup:runtime": "bun run scripts/prepare-runtime.mjs",
+    "release": "bun run tauri build --no-bundle",
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
     "typecheck": "vue-tsc --noEmit",
     "build": "bun run typecheck && vite build",
     "preview": "vite preview",
-    "tauri": "tauri",
+    "tauri": "bun run scripts/run-tauri.mjs",
     "test:unit": "node ./node_modules/vitest/vitest.mjs run --reporter=dot",
     "test:setup": "node --test --test-reporter=dot scripts/test-setup.mjs",
     "rust:fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml -- --check",

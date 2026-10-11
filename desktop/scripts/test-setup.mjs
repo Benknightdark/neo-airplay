@@ -6,6 +6,7 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -14,6 +15,7 @@ import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { getSetupCommand, runTauri, withDevelopmentPath } from "./run-tauri.mjs";
 
 const installerPath = fileURLToPath(new URL("./install.sh", import.meta.url));
 const runtimeEntryPath = fileURLToPath(new URL("./prepare-runtime.mjs", import.meta.url));
@@ -44,7 +46,7 @@ function createScenario(options = {}) {
   mkdirSync(temporaryFiles);
   mkdirSync(engineBin, { recursive: true });
 
-  for (const utility of ["awk", "grep", "head", "mkdir", "mv", "rm", "sed"]) {
+  for (const utility of ["awk", "cat", "chmod", "dirname", "grep", "head", "mkdir", "mktemp", "mv", "rm", "sed"]) {
     symlinkSync(findHostCommand(utility), join(utilityBin, utility));
   }
 
@@ -70,7 +72,7 @@ function createScenario(options = {}) {
     bun: '#!/bin/sh\nprintf "%s\\n" "${FAKE_BUN_VERSION:-1.4.2}"\n',
     node: '#!/bin/sh\nprintf "%s\\n" "${FAKE_NODE_VERSION:-v22.23.3}"\n',
     sudo: '#!/bin/sh\nexec "$@"\n',
-    "apt-get": `#!/bin/sh\nprintf '%s\\n' "$*" >> "$PACKAGE_MANAGER_MARKER"\nexit 97\n`,
+    "apt-get": `#!/bin/sh\nprintf '%s\\n' "$*" >> "$PACKAGE_MANAGER_MARKER"\nexit "\${FAKE_PACKAGE_MANAGER_STATUS:-97}"\n`,
     brew: `#!/bin/sh\nprintf '%s\\n' "$*" >> "$BREW_MARKER"\nexit 97\n`,
     "xcode-select": '#!/bin/sh\nif [ "${1:-}" = "--install" ]; then printf requested > "$CLT_INSTALL_MARKER"; exit 0; fi\n[ "${CLT_AVAILABLE:-1}" = "1" ]\n',
   };
@@ -108,6 +110,7 @@ function createScenario(options = {}) {
     MISSING_PKG_MODULE: options.missingPkgModule ?? "",
     AVAHI_ACTIVE: options.avahiActive === false ? "0" : "1",
     CLT_AVAILABLE: options.cltAvailable === false ? "0" : "1",
+    FAKE_PACKAGE_MANAGER_STATUS: String(options.packageManagerStatus ?? 97),
     PACKAGE_MANAGER_MARKER: packageManagerMarker,
     BREW_MARKER: brewMarker,
     CLT_INSTALL_MARKER: cltInstallMarker,
@@ -226,6 +229,30 @@ test("install.sh --check reports a missing GStreamer element", { skip: shellChec
   }
 });
 
+test("install.sh --check requires the macOS software H.264 decoder", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({ uname: "Darwin", missingGstElement: "avdec_h264" });
+  try {
+    const result = scenario.runInstaller(["--check"]);
+    assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.match(result.stdout, /- GStreamer element avdec_h264/);
+    assertReadOnly(scenario);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("install.sh --check requires the native macOS video sink", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({ uname: "Darwin", missingGstElement: "osxvideosink" });
+  try {
+    const result = scenario.runInstaller(["--check"]);
+    assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.match(result.stdout, /- GStreamer element osxvideosink/);
+    assertReadOnly(scenario);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
 test("install.sh --check requires an active Avahi service on Linux", { skip: shellChecksUnsupported }, () => {
   const scenario = createScenario({ uname: "Linux", avahiActive: false });
   try {
@@ -247,6 +274,24 @@ test("install.sh --check --development validates Rust stable, Bun 1.4.2, Node 22
     assert.match(result.stdout, /Bun 1\.4\.2/);
     assert.match(result.stdout, /Node v22\.23\.3/);
     assertReadOnly(scenario);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("install.sh does not reinstall runtime packages when only Linux development libraries are missing", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({
+    uname: "Linux",
+    missingPkgModule: "webkit2gtk-4.1",
+    packageManagerStatus: 0,
+  });
+  try {
+    const result = scenario.runInstaller(["--development"]);
+    assert.equal(result.status, 1, result.stderr || result.stdout || "the mock package manager does not actually provide the missing module");
+    const packageManagerCalls = readFileSync(scenario.packageManagerMarker, "utf8").trim().split("\n");
+    assert.equal(packageManagerCalls.length, 1);
+    assert.match(packageManagerCalls[0], /^install /, "only development libraries should be requested");
+    assert.doesNotMatch(packageManagerCalls[0], /avahi-daemon|gstreamer1/, "runtime engine packages should not be reinstalled");
   } finally {
     scenario.cleanup();
   }
@@ -376,5 +421,84 @@ test("prepare-runtime skips its installer subprocess when setup is disabled", ()
     assert.equal(existsSync(marker), false, "disabled setup must not spawn its installer entry");
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Tauri runner prepares development tools before invoking the CLI", () => {
+  const calls = [];
+  const result = runTauri(["dev", "--verbose"], {
+    platform: "darwin",
+    environment: { HOME: "/test/home", PATH: "/usr/bin" },
+    scriptsDirectory: "/project/desktop/scripts",
+    desktopDirectory: "/project/desktop",
+    spawn: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { status: 0 };
+    },
+  });
+
+  assert.equal(result, 0);
+  assert.deepEqual(calls.map(({ command }) => command), ["/bin/bash", "node"]);
+  assert.deepEqual(calls[0].args, ["/project/desktop/scripts/setup.sh"]);
+  assert.deepEqual(calls[1].args, ["/project/desktop/node_modules/@tauri-apps/cli/tauri.js", "dev", "--verbose"]);
+  assert.equal(calls[1].options.env.NEO_AIRPLAY_SETUP_COMPLETE, "1");
+  assert.match(calls[1].options.env.PATH, /\/test\/home\/\.cargo\/bin/);
+});
+
+test("Tauri runner uses the PowerShell setup entry on Windows", () => {
+  const [command, args] = getSetupCommand("win32", "C:\\project\\desktop\\scripts");
+  assert.equal(command, "powershell.exe");
+  assert.deepEqual(args, [
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    "C:\\project\\desktop\\scripts\\setup.ps1",
+  ]);
+  const environment = withDevelopmentPath({
+    LOCALAPPDATA: "C:\\Users\\Tester\\AppData\\Local",
+    PATH: "C:\\Windows\\System32",
+    USERPROFILE: "C:\\Users\\Tester",
+  }, "win32", "C:\\project\\desktop");
+  assert.match(environment.PATH, /NeoAirPlay\\node-v22\.23\.3/);
+});
+
+test("Tauri runner stops when setup fails", () => {
+  const calls = [];
+  const result = runTauri(["build"], {
+    platform: "linux",
+    environment: { HOME: "/test/home", PATH: "/usr/bin" },
+    scriptsDirectory: "/project/desktop/scripts",
+    desktopDirectory: "/project/desktop",
+    spawn: (command, args) => {
+      calls.push({ command, args });
+      return { status: 12 };
+    },
+  });
+
+  assert.equal(result, 12);
+  assert.equal(calls.length, 1, "Tauri must not run after setup fails");
+});
+
+test("Tauri runner respects CI setup skip and an already-completed bootstrap", () => {
+  for (const environment of [
+    { HOME: "/test/home", PATH: "/usr/bin", NEO_AIRPLAY_SKIP_SETUP: "1" },
+    { HOME: "/test/home", PATH: "/usr/bin", NEO_AIRPLAY_SETUP_COMPLETE: "1" },
+  ]) {
+    const calls = [];
+    const result = runTauri(["build"], {
+      platform: "linux",
+      environment,
+      scriptsDirectory: "/project/desktop/scripts",
+      desktopDirectory: "/project/desktop",
+      spawn: (command, args) => {
+        calls.push({ command, args });
+        return { status: 0 };
+      },
+    });
+
+    assert.equal(result, 0);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].command, "node");
   }
 });

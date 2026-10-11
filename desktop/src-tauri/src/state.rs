@@ -830,6 +830,8 @@ fn airplay_arguments(settings: &ReceiverSettings) -> Vec<String> {
     if settings.fullscreen {
         args.push("-fs".to_owned());
     }
+    #[cfg(target_os = "macos")]
+    args.extend(["-avdec".to_owned(), "-vsync".to_owned(), "no".to_owned()]);
     if let Some(renderer) = renderer_argument(&settings.renderer) {
         args.extend(["-vs".to_owned(), renderer.to_owned()]);
     }
@@ -844,6 +846,7 @@ fn renderer_argument(renderer: &str) -> Option<&'static str> {
         "glimagesink" => Some("glimagesink"),
         "ximagesink" => Some("ximagesink"),
         "waylandsink" => Some("waylandsink"),
+        "Auto" if cfg!(target_os = "macos") => Some("osxvideosink"),
         _ => None,
     }
 }
@@ -916,15 +919,29 @@ mod tests {
             fullscreen: true,
             start_on_login: false,
         };
-        assert_eq!(
-            airplay_arguments(&settings),
-            ["-n", "Living Room; safe", "-nh", "-fs"]
-        );
+        let mut expected = vec![
+            "-n".to_owned(),
+            "Living Room; safe".to_owned(),
+            "-nh".to_owned(),
+            "-fs".to_owned(),
+        ];
+        #[cfg(target_os = "macos")]
+        expected.extend([
+            "-avdec".to_owned(),
+            "-vsync".to_owned(),
+            "no".to_owned(),
+            "-vs".to_owned(),
+            "osxvideosink".to_owned(),
+        ]);
+        assert_eq!(airplay_arguments(&settings), expected);
     }
 
     #[test]
     fn renderer_names_are_allowlisted() {
         assert_eq!(renderer_argument("D3D11"), Some("d3d11videosink"));
+        #[cfg(target_os = "macos")]
+        assert_eq!(renderer_argument("Auto"), Some("osxvideosink"));
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(renderer_argument("Auto"), None);
         assert_eq!(renderer_argument("arbitrary"), None);
     }

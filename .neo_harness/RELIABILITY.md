@@ -6,8 +6,10 @@
 
 - App 啟動時載入設定並建立兩個獨立的引擎控制器；不會自動啟動 AirPlay 或 Android 投影。
 - App 每次啟動都在背景檢查投影工具，缺少時執行內嵌平台安裝腳本；先前安裝失敗時，下次啟動會自動重試。介面顯示進度；失敗可查看安裝記錄並手動重試。E2E profile 或 `NEO_AIRPLAY_SKIP_SETUP=1` 停用此流程。
+- 開發與建置入口會先執行 `setup.sh`／`setup.ps1`，檢查開發工具與投影依賴；全部就緒時略過安裝，缺少時依平台腳本補齊。新 checkout 可使用 `launch.sh`／`launch.ps1`，先 setup 再啟動 Debug、Release 或打包；直接呼叫 Tauri CLI 也會自動執行 setup。CI 可用 `NEO_AIRPLAY_SKIP_SETUP=1` 停用。
 - 第二次啟動會交由單一執行個體插件轉送至既有 App，顯示主視窗後結束新程序。
 - 引擎執行程序的 `PATH` 僅包含目前使用的 `engine/` 目錄及其 Android 子目錄；找不到該目錄中的工具時會回報缺少依賴，不從系統 `PATH` 回退。
+- macOS 啟動 UxPlay 時使用原生 `osxvideosink`、libav 軟體 H.264 解碼及 `-vsync no`；「Auto」輸出選項會採用原生 sink。其他平台維持 UxPlay 自動選擇。
 - Vue 總覽每 1.5 秒重新讀取程序狀態。ADB 裝置清單只在使用者按重新整理時更新。
 - 找不到引擎會回報 `DependencyMissing`；程序無法啟動、意外非零退出或狀態查詢失敗會回報 `Faulted`。成功退出回報 `Stopped`。
 - 重複啟動已執行的引擎會返回目前狀態。AirPlay 和 Android 各有自己的程序、鎖與狀態。
