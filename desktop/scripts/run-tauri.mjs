@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { delimiter, dirname, join, resolve, win32 } from "node:path";
+import { dirname, join, posix, resolve, win32 } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
@@ -9,7 +9,7 @@ const defaultDesktopDirectory = resolve(scriptDirectory, "..");
 const nodeVersion = readFileSync(join(defaultDesktopDirectory, ".node-version"), "utf8").trim();
 
 export function getSetupCommand(platform, scriptsDirectory) {
-  const joinPath = platform === "win32" ? win32.join : join;
+  const joinPath = platform === "win32" ? win32.join : posix.join;
   const setupScript = joinPath(scriptsDirectory, platform === "win32" ? "setup.ps1" : "setup.sh");
   return platform === "win32"
     ? ["powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", setupScript]]
@@ -17,9 +17,9 @@ export function getSetupCommand(platform, scriptsDirectory) {
 }
 
 export function withDevelopmentPath(environment, platform, desktopDirectory, homeDirectory) {
-  const joinPath = platform === "win32" ? win32.join : join;
+  const joinPath = platform === "win32" ? win32.join : posix.join;
   const pathKey = Object.keys(environment).find((key) => key.toLowerCase() === "path") ?? "PATH";
-  const pathDelimiter = platform === "win32" ? ";" : delimiter;
+  const pathDelimiter = platform === "win32" ? win32.delimiter : posix.delimiter;
   const home = homeDirectory ?? environment.HOME ?? environment.USERPROFILE ?? homedir();
   const desktop = desktopDirectory;
   const additions = platform === "win32"
@@ -82,7 +82,7 @@ export function runTauri(args, {
 
   childEnvironment = withDevelopmentPath(childEnvironment, platform, desktopDirectory, homeDirectory);
   childEnvironment.NEO_AIRPLAY_SETUP_COMPLETE = "1";
-  const joinPath = platform === "win32" ? win32.join : join;
+  const joinPath = platform === "win32" ? win32.join : posix.join;
   const cliEntry = joinPath(desktopDirectory, "node_modules", "@tauri-apps", "cli", "tauri.js");
   const result = spawn("node", [cliEntry, ...args], {
     cwd: desktopDirectory,

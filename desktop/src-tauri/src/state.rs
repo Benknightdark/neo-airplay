@@ -879,10 +879,12 @@ fn push_recent(entries: &mut VecDeque<AppLogEntry>, entry: AppLogEntry) {
 #[cfg(test)]
 mod tests {
     use super::{
-        airplay_arguments, find_executable, finish_pipe, is_executable_file, load_settings,
-        parse_adb_devices, read_pipe, renderer_argument, write_settings, AppLogger, AppState,
-        EngineController, EngineKind, MAX_CAPTURED_PROCESS_OUTPUT_BYTES,
+        airplay_arguments, finish_pipe, load_settings, parse_adb_devices, read_pipe,
+        renderer_argument, write_settings, AppLogger, AppState, EngineController, EngineKind,
+        MAX_CAPTURED_PROCESS_OUTPUT_BYTES,
     };
+    #[cfg(unix)]
+    use super::{find_executable, is_executable_file};
     use crate::models::{AndroidDeviceStatus, EngineSnapshot, EngineStatus, ReceiverSettings};
     use std::fs;
     use std::io::Cursor;
@@ -919,6 +921,7 @@ mod tests {
             fullscreen: true,
             start_on_login: false,
         };
+        #[allow(unused_mut)]
         let mut expected = vec![
             "-n".to_owned(),
             "Living Room; safe".to_owned(),

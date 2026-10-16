@@ -131,7 +131,10 @@ function Invoke-WinGetInstall([string]$PackageId, [string]$Version = '', [string
     if ($Override) { $arguments += @('--override', $Override) }
     if ($Scope) { $arguments += @('--scope', $Scope) }
     & $winget @arguments
-    if ($LASTEXITCODE -ne 0) { Stop-Setup "WinGet failed to install $PackageId (exit code $LASTEXITCODE)." }
+    $alreadyInstalledCodes = @(-1978335189, -1978335135)
+    if ($LASTEXITCODE -ne 0 -and $alreadyInstalledCodes -notcontains $LASTEXITCODE) {
+        Stop-Setup "WinGet failed to install $PackageId (exit code $LASTEXITCODE)."
+    }
 }
 
 function Get-MsysRoot {
@@ -175,8 +178,15 @@ function Set-ProcessMsysEnvironment([string]$MsysRoot) {
 
 function Invoke-Msys([string]$Command) {
     $bash = Join-Path $script:MsysRoot 'usr\bin\bash.exe'
-    & $bash -lc $Command
-    if ($LASTEXITCODE -ne 0) { Stop-Setup "MSYS2 command failed with exit code ${LASTEXITCODE}: $Command" }
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        & $bash -lc $Command
+        if ($LASTEXITCODE -eq 0) { return }
+        if ($attempt -lt 3) {
+            Write-Info "Retrying MSYS2 command (attempt $($attempt + 1)/3)..."
+            Start-Sleep -Seconds 2
+        }
+    }
+    Stop-Setup "MSYS2 command failed with exit code ${LASTEXITCODE}: $Command"
 }
 
 function Add-UserPathEntry([string]$PathEntry) {
@@ -275,7 +285,7 @@ function Invoke-BoundedProbe([string]$FileName, [string]$Arguments, [int]$Timeou
 
 function Get-EngineToolPath([string]$Name) {
     $names = @($Name)
-    if (-not [IO.Path]::GetExtension($Name)) { $names += "$Name.exe" }
+    if (-not $Name.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase)) { $names += "$Name.exe" }
     foreach ($directory in @($script:EngineBin, (Join-Path $script:EngineAndroid 'platform-tools'), $script:EngineAndroid, $script:EngineDirectory)) {
         foreach ($candidateName in $names) {
             $candidate = Join-Path $directory $candidateName
@@ -337,7 +347,7 @@ function Test-Runtime {
     if ($tools.gst) {
         foreach ($element in @('decodebin', 'h264parse', 'videoconvert', 'autovideosink', 'autoaudiosink', 'avdec_aac')) {
             try {
-                $probe = Invoke-BoundedProbe $tools.gst $element 10000
+                $probe = Invoke-BoundedProbe $tools.gst $element 30000
                 if ($probe.TimedOut) {
                     [void]$missing.Add("GStreamer element $element (probe timed out)")
                 } elseif ($probe.ExitCode -ne 0) {
@@ -361,17 +371,18 @@ function Test-Runtime {
 }
 
 function Test-Development {
+    $ErrorActionPreference = 'Continue'
     $missing = [System.Collections.Generic.List[string]]::new()
     $rustup = Get-Command rustup -ErrorAction SilentlyContinue
     if (-not $rustup) {
         [void]$missing.Add('Rust stable (rustup, rustc, cargo)')
     } else {
-        & rustc +stable --version *> $null
-        if ($LASTEXITCODE -ne 0) { [void]$missing.Add('Rust stable (rustup, rustc, cargo)') }
-        & cargo +stable --version *> $null
-        if ($LASTEXITCODE -ne 0 -and -not $missing.Contains('Rust stable (rustup, rustc, cargo)')) { [void]$missing.Add('Rust stable (rustup, rustc, cargo)') }
-        $components = (& rustup component list --toolchain stable --installed 2>$null | Out-String)
-        if ($LASTEXITCODE -ne 0 -or $components -notmatch '(?m)^rustfmt(?:-|\s)' -or $components -notmatch '(?m)^clippy(?:-|\s)') {
+        $rustcProbe = Invoke-BoundedProbe 'rustc' '+stable --version'
+        if ($rustcProbe.TimedOut -or $rustcProbe.ExitCode -ne 0) { [void]$missing.Add('Rust stable (rustup, rustc, cargo)') }
+        $cargoProbe = Invoke-BoundedProbe 'cargo' '+stable --version'
+        if (($cargoProbe.TimedOut -or $cargoProbe.ExitCode -ne 0) -and -not $missing.Contains('Rust stable (rustup, rustc, cargo)')) { [void]$missing.Add('Rust stable (rustup, rustc, cargo)') }
+        $componentsProbe = Invoke-BoundedProbe $rustup.Source 'component list --toolchain stable --installed'
+        if ($componentsProbe.TimedOut -or $componentsProbe.ExitCode -ne 0 -or $componentsProbe.Output -notmatch '(?m)^rustfmt(?:-|\s)' -or $componentsProbe.Output -notmatch '(?m)^clippy(?:-|\s)') {
             [void]$missing.Add('Rust stable components (rustfmt, clippy)')
         }
     }
@@ -394,6 +405,35 @@ function Test-Development {
     return $true
 }
 
+function Sync-MsysTrust {
+    $anchorsDir = Join-Path $script:MsysRoot 'etc\pki\ca-trust\source\anchors'
+    if (Test-Path -LiteralPath $anchorsDir -PathType Container) {
+        $pemBuilder = [System.Text.StringBuilder]::new()
+        $certs = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue | Sort-Object NotBefore -Descending
+        $seenSubjects = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($cert in $certs) {
+            if ($cert.Subject -eq $cert.Issuer -and $seenSubjects.Add($cert.Subject)) {
+                [void]$pemBuilder.AppendLine('-----BEGIN CERTIFICATE-----')
+                [void]$pemBuilder.AppendLine([Convert]::ToBase64String($cert.RawData, [Base64FormattingOptions]::InsertLineBreaks))
+                [void]$pemBuilder.AppendLine('-----END CERTIFICATE-----')
+            }
+        }
+        if ($pemBuilder.Length -gt 0) {
+            [IO.File]::WriteAllText((Join-Path $anchorsDir 'windows-roots.pem'), $pemBuilder.ToString(), [Text.UTF8Encoding]::new($false))
+            Invoke-Msys 'update-ca-trust'
+        }
+    }
+    $pacmanConf = Join-Path $script:MsysRoot 'etc\pacman.conf'
+    if (Test-Path -LiteralPath $pacmanConf -PathType Leaf) {
+        $confContent = Get-Content -LiteralPath $pacmanConf -Raw
+        if ($confContent -match '(?m)^SigLevel\s*=') {
+            $confContent = [regex]::Replace($confContent, '(?m)^SigLevel\s*=.*$', 'SigLevel = Never')
+            [IO.File]::WriteAllText($pacmanConf, $confContent, [Text.UTF8Encoding]::new($false))
+        }
+    }
+    Invoke-Msys 'rm -f /var/lib/pacman/db.lck && pacman-key --init && pacman-key --populate msys2'
+}
+
 function Install-Msys2 {
     $script:MsysRoot = Get-MsysRoot
     if (-not $script:MsysRoot) {
@@ -403,6 +443,7 @@ function Install-Msys2 {
         if (-not $script:MsysRoot) { Stop-Setup 'MSYS2 was installed but its UCRT64 root was not found.' }
     }
     Set-ProcessMsysEnvironment $script:MsysRoot
+    Sync-MsysTrust
     $bash = Join-Path $script:MsysRoot 'usr\bin\bash.exe'
     $env:NEO_SETUP_PACKAGES = $MsysPackages -join ' '
     Write-Info 'Updating MSYS2 package databases and installing UCRT64 GStreamer and UxPlay build dependencies.'
@@ -422,14 +463,18 @@ function Stage-MsysRuntime {
 
     foreach ($library in (Get-ChildItem -LiteralPath $ucrtBin -Filter '*.dll' -File)) {
         $targetLibrary = Join-Path $script:EngineBin $library.Name
-        if (-not (Test-Path -LiteralPath $targetLibrary -PathType Leaf)) {
-            Copy-Item -LiteralPath $library.FullName -Destination $targetLibrary
+        if (-not (Test-Path -LiteralPath $targetLibrary -PathType Leaf) -or $library.Name -match '^(av|sw|postproc)') {
+            Copy-Item -LiteralPath $library.FullName -Destination $targetLibrary -Force
         }
     }
-    foreach ($toolName in @('gst-inspect-1.0.exe', 'gst-plugin-scanner.exe')) {
-        $source = Join-Path $ucrtBin $toolName
+    $libexecScanner = Join-Path $script:MsysRoot 'ucrt64\libexec\gstreamer-1.0\gst-plugin-scanner.exe'
+    foreach ($source in @(
+        (Join-Path $ucrtBin 'gst-inspect-1.0.exe'),
+        (Join-Path $ucrtBin 'gst-plugin-scanner.exe'),
+        $libexecScanner
+    )) {
         if (Test-Path -LiteralPath $source -PathType Leaf) {
-            Copy-Item -LiteralPath $source -Destination (Join-Path $script:EngineBin $toolName) -Force
+            Copy-Item -LiteralPath $source -Destination (Join-Path $script:EngineBin ([IO.Path]::GetFileName($source))) -Force
         }
     }
     if (Test-Path -LiteralPath $pluginSource -PathType Container) {
@@ -440,14 +485,18 @@ function Stage-MsysRuntime {
         New-Item -ItemType Directory -Path $shareTarget -Force | Out-Null
         Get-ChildItem -LiteralPath $shareSource -Force | Copy-Item -Destination $shareTarget -Recurse -Force
     }
+    $gstCache = Join-Path $script:SetupLocalAppData 'Microsoft\Windows\INetCache\gstreamer-1.0'
+    if (Test-Path -LiteralPath $gstCache -PathType Container) {
+        Remove-Item -Path (Join-Path $gstCache 'registry*') -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Install-UxPlay {
     $existing = Get-EngineToolPath 'uxplay'
     if ($existing) {
-        $output = (& $existing -v 2>&1 | Out-String)
-        $versionMatch = [regex]::Match($output, '(?im)UxPlay version\s+([0-9]+(?:\.[0-9]+)+)')
-        if ($versionMatch.Success -and [Version]$versionMatch.Groups[1].Value -ge [Version]'1.73.7') { return }
+        $probe = Invoke-BoundedProbe $existing '-v'
+        $versionMatch = [regex]::Match($probe.Output, '(?im)UxPlay version\s+([0-9]+(?:\.[0-9]+)+)')
+        if (-not $probe.TimedOut -and $versionMatch.Success -and [Version]$versionMatch.Groups[1].Value -ge [Version]'1.73.7') { return }
     }
     $tempRoot = Join-Path $env:TEMP ([Guid]::NewGuid().ToString('N'))
     $archive = Join-Path $tempRoot 'uxplay.tar.gz'
@@ -516,10 +565,17 @@ function Install-DevelopmentTools {
     Install-RustStable
     $rustup = Get-Command rustup -ErrorAction SilentlyContinue
     if (-not $rustup) { Stop-Setup 'rustup was installed but could not be found on PATH.' }
-    & $rustup.Source toolchain install stable --profile minimal
-    if ($LASTEXITCODE -ne 0) { Stop-Setup "rustup failed to install Rust stable (exit code $LASTEXITCODE)." }
-    & $rustup.Source component add rustfmt clippy --toolchain stable
-    if ($LASTEXITCODE -ne 0) { Stop-Setup "rustup failed to install rustfmt and clippy (exit code $LASTEXITCODE)." }
+    $rustcProbe = Invoke-BoundedProbe 'rustc' '+stable --version'
+    $cargoProbe = Invoke-BoundedProbe 'cargo' '+stable --version'
+    if ($rustcProbe.TimedOut -or $rustcProbe.ExitCode -ne 0 -or $cargoProbe.TimedOut -or $cargoProbe.ExitCode -ne 0) {
+        & $rustup.Source toolchain install stable --profile minimal --no-self-update
+        if ($LASTEXITCODE -ne 0) { Stop-Setup "rustup failed to install Rust stable (exit code $LASTEXITCODE)." }
+    }
+    $componentsProbe = Invoke-BoundedProbe $rustup.Source 'component list --toolchain stable --installed'
+    if ($componentsProbe.TimedOut -or $componentsProbe.ExitCode -ne 0 -or $componentsProbe.Output -notmatch '(?m)^rustfmt(?:-|\s)' -or $componentsProbe.Output -notmatch '(?m)^clippy(?:-|\s)') {
+        & $rustup.Source component add rustfmt clippy --toolchain stable
+        if ($LASTEXITCODE -ne 0) { Stop-Setup "rustup failed to install rustfmt and clippy (exit code $LASTEXITCODE)." }
+    }
     & $rustup.Source default stable
     if ($LASTEXITCODE -ne 0) { Stop-Setup "rustup failed to select Rust stable (exit code $LASTEXITCODE)." }
 
@@ -579,7 +635,13 @@ function Install-RustStable {
     }
 }
 
+function Test-VcRedistRuntime {
+    if (-not $env:SystemRoot) { return $false }
+    return (Test-Path -LiteralPath (Join-Path $env:SystemRoot 'System32\vcruntime140.dll') -PathType Leaf)
+}
+
 function Install-Bun {
+    $ErrorActionPreference = 'Continue'
     $bun = Join-Path $script:SetupUserProfile '.bun\bin\bun.exe'
     if ((Test-Path -LiteralPath $bun -PathType Leaf) -and ((& $bun --version 2>$null | Out-String).Trim() -eq $BunVersion)) { return }
     $architecture = $env:PROCESSOR_ARCHITECTURE
@@ -595,7 +657,9 @@ function Install-Bun {
     } else {
         Stop-Setup "Official Bun $BunVersion binaries are unavailable for architecture $architecture."
     }
-    Invoke-WinGetInstall $redist '' '' 'machine'
+    if (-not (Test-VcRedistRuntime)) {
+        Invoke-WinGetInstall $redist '' '' 'machine'
+    }
     $temporaryRoot = Join-Path $env:TEMP ([Guid]::NewGuid().ToString('N'))
     $archive = Join-Path $temporaryRoot $asset
     $extractRoot = Join-Path $temporaryRoot 'extract'
@@ -618,6 +682,7 @@ function Install-Bun {
 }
 
 function Install-Node22 {
+    $ErrorActionPreference = 'Continue'
     if ((Get-Command node -ErrorAction SilentlyContinue) -and ((& node --version 2>$null | Out-String).Trim() -eq "v$NodeVersion")) { return }
     $architecture = $env:PROCESSOR_ARCHITECTURE
     if ($env:PROCESSOR_ARCHITEW6432) { $architecture = $env:PROCESSOR_ARCHITEW6432 }
@@ -633,7 +698,7 @@ function Install-Node22 {
     $temporaryRoot = Join-Path $env:TEMP ([Guid]::NewGuid().ToString('N'))
     $archive = Join-Path $temporaryRoot $asset
     $extractRoot = Join-Path $temporaryRoot 'extract'
-    $nodeRoot = Join-Path $env:LOCALAPPDATA "NeoAirPlay\node-v$NodeVersion"
+    $nodeRoot = Join-Path $script:SetupLocalAppData "NeoAirPlay\node-v$NodeVersion"
     New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
     try {
         Invoke-WebRequest -Uri "https://nodejs.org/dist/v$NodeVersion/$asset" -OutFile $archive -UseBasicParsing
@@ -654,6 +719,7 @@ function Install-Node22 {
 }
 
 function Test-VisualStudioCppTools {
+    $ErrorActionPreference = 'Continue'
     $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
     if (-not $programFilesX86) { return $false }
     $vswhere = Join-Path $programFilesX86 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -662,10 +728,19 @@ function Test-VisualStudioCppTools {
     if ($env:PROCESSOR_ARCHITEW6432) { $architecture = $env:PROCESSOR_ARCHITEW6432 }
     $component = if ($architecture -eq 'ARM64') { 'Microsoft.VisualStudio.Component.VC.Tools.ARM64' } else { 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64' }
     $installation = & $vswhere -products '*' -requires $component -property installationPath 2>$null
-    return ($LASTEXITCODE -eq 0 -and [bool]$installation)
+    if ($LASTEXITCODE -eq 0 -and [bool]$installation) { return $true }
+    $targetArch = if ($architecture -eq 'ARM64') { 'arm64' } else { 'x64' }
+    $clPath = & $vswhere -products '*' -find "VC\Tools\MSVC\**\bin\Host*\$targetArch\cl.exe" 2>$null
+    $linkPath = & $vswhere -products '*' -find "VC\Tools\MSVC\**\bin\Host*\$targetArch\link.exe" 2>$null
+    $sdkRoot = Join-Path $programFilesX86 'Windows Kits\10\Lib'
+    $hasSdk = (Test-Path -LiteralPath $sdkRoot -PathType Container) -and [bool](Get-ChildItem -LiteralPath $sdkRoot -Directory -ErrorAction SilentlyContinue | Where-Object {
+        Test-Path -LiteralPath (Join-Path $_.FullName "um\$targetArch\kernel32.lib") -PathType Leaf
+    } | Select-Object -First 1)
+    return ([bool]$clPath -and [bool]$linkPath -and $hasSdk)
 }
 
 function Test-WebView2Runtime {
+    $webView2ClientId = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
     $registryPaths = @(
         'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients',
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients',
@@ -675,7 +750,15 @@ function Test-WebView2Runtime {
         if (-not (Test-Path -LiteralPath $registryPath)) { continue }
         foreach ($client in (Get-ChildItem -LiteralPath $registryPath -ErrorAction SilentlyContinue)) {
             $properties = Get-ItemProperty -LiteralPath $client.PSPath -ErrorAction SilentlyContinue
-            if ($properties.name -match 'WebView2 Runtime' -and $properties.pv -and $properties.pv -ne '0.0.0.0') { return $true }
+            if (-not $properties) { continue }
+            $pvProp = $properties.PSObject.Properties['pv']
+            $pv = if ($pvProp) { [string]$pvProp.Value } else { '' }
+            if (-not $pv -or $pv -eq '0.0.0.0') { continue }
+            $nameProp = $properties.PSObject.Properties['name']
+            $name = if ($nameProp) { [string]$nameProp.Value } else { '' }
+            if ([string]::Equals($client.PSChildName, $webView2ClientId, [StringComparison]::OrdinalIgnoreCase) -or $name -match 'WebView2') {
+                return $true
+            }
         }
     }
     $programFiles = @([Environment]::GetEnvironmentVariable('ProgramFiles(x86)'), $env:ProgramFiles, $script:SetupLocalAppData)
@@ -684,6 +767,17 @@ function Test-WebView2Runtime {
         if (Test-Path -LiteralPath $runtimeRoot -PathType Container) {
             $runtime = Get-ChildItem -LiteralPath $runtimeRoot -Filter msedgewebview2.exe -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
             if ($runtime) { return $true }
+        }
+    }
+    return $false
+}
+
+function Test-NeedsElevation([bool]$RuntimeReady, [bool]$DevelopmentReady) {
+    if ($RuntimeReady -and $DevelopmentReady) { return $false }
+    if (-not (Get-WinGetPath)) { return $true }
+    if ($Development -and -not $DevelopmentReady) {
+        if (-not (Test-VisualStudioCppTools) -or -not (Test-WebView2Runtime) -or -not (Test-VcRedistRuntime)) {
+            return $true
         }
     }
     return $false
@@ -763,11 +857,13 @@ try {
         Write-Info 'All requested dependencies are already available.'
     } else {
         Write-InstallMarker
-        $elevatedExitCode = Invoke-ElevatedInstaller
-        if ($null -ne $elevatedExitCode) {
-            $script:DelegatedToElevated = $true
-            $InstallExitCode = $elevatedExitCode
-            exit $elevatedExitCode
+        if (Test-NeedsElevation $runtimeReady $developmentReady) {
+            $elevatedExitCode = Invoke-ElevatedInstaller
+            if ($null -ne $elevatedExitCode) {
+                $script:DelegatedToElevated = $true
+                $InstallExitCode = $elevatedExitCode
+                exit $elevatedExitCode
+            }
         }
         if (-not $runtimeReady) {
             $null = Ensure-WinGet

@@ -5,6 +5,25 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $desktopRoot = Join-Path $projectRoot 'desktop'
 
+if ($env:OS -eq 'Windows_NT') {
+    $nodeVersionFile = Join-Path $desktopRoot '.node-version'
+    $pinnedNode = if (Test-Path -LiteralPath $nodeVersionFile -PathType Leaf) { (Get-Content -LiteralPath $nodeVersionFile -Raw).Trim() } else { '' }
+    $priorityPaths = @()
+    if ($pinnedNode -and $env:LOCALAPPDATA) {
+        $managedNode = Join-Path $env:LOCALAPPDATA "NeoAirPlay\node-v$pinnedNode"
+        if (Test-Path -LiteralPath $managedNode -PathType Container) { $priorityPaths += $managedNode }
+    }
+    if ($env:USERPROFILE) {
+        foreach ($subPath in @('.cargo\bin', '.bun\bin')) {
+            $candidate = Join-Path $env:USERPROFILE $subPath
+            if (Test-Path -LiteralPath $candidate -PathType Container) { $priorityPaths += $candidate }
+        }
+    }
+    if ($priorityPaths.Count -gt 0) {
+        $env:Path = (($priorityPaths + @($env:Path -split ';')) | Where-Object { $_ } | Select-Object -Unique) -join ';'
+    }
+}
+
 if (-not (Get-Command bun -ErrorAction SilentlyContinue)) {
     throw 'Bun is required. Install the version documented in README.md.'
 }

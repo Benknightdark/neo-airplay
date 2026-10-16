@@ -320,6 +320,25 @@ test("staged Windows runtime installer checks scrcpy-server without requiring .n
   }
 });
 
+test("Windows install.ps1 -Check -Development completes without StrictMode property errors", { skip: process.platform !== "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "neo-airplay-powershell-dev-check-"));
+  const engineDirectory = join(root, "engine");
+  mkdirSync(engineDirectory);
+  try {
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", powershellInstallerPath, "-Check", "-Development", "-EngineDirectory", engineDirectory], {
+      cwd: root,
+      encoding: "utf8",
+      timeout: 30_000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
+    const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+    assert.equal(result.status, 1, output);
+    assert.doesNotMatch(output, /PropertyNotFoundStrict/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("install.sh --check accepts UxPlay 1.73.7 after a GStreamer version banner", { skip: shellChecksUnsupported }, () => {
   const scenario = createScenario({ uname: "Linux", uxplayVersion: "1.73.7" });
   try {

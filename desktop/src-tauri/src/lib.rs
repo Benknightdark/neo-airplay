@@ -289,7 +289,11 @@ fn e2e_profile_directory() -> Option<std::path::PathBuf> {
         let mut args = std::env::args_os().skip(1);
         while let Some(arg) = args.next() {
             if arg == "--e2e-profile" {
-                return args.next().map(std::path::PathBuf::from);
+                if let Some(profile) = args.next() {
+                    let path = std::path::PathBuf::from(profile);
+                    std::env::set_var("NEO_AIRPLAY_E2E_PROFILE", &path);
+                    return Some(path);
+                }
             }
         }
     }

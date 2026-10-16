@@ -30,6 +30,7 @@ export const config = {
     "tauri:options": {
       application: appBinaryPath,
       args: ["--e2e-profile", profilePath],
+      env: { NEO_AIRPLAY_E2E_PROFILE: profilePath },
     },
   }],
   services: [["@wdio/tauri-service", {
