@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - develop
+      - main
   pull_request:
     branches:
       - main
@@ -11,20 +12,88 @@ on:
 permissions:
   contents: read
 
+env:
+  NEO_AIRPLAY_SKIP_SETUP: "1"
+
 jobs:
   verify:
-    name: verify
-    runs-on: windows-latest
-    timeout-minutes: 30
+    name: verify (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - windows-latest
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up .NET 10
-        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          dotnet-version: 10.0.x
+          bun-version: 1.4.2
 
-      - name: Build and run Unit tests
-        shell: pwsh
-        run: .\.neo_harness\verify.ps1
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: desktop/.node-version
+          package-manager-cache: false
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
+        with:
+          toolchain: stable
+          profile: minimal
+          components: rustfmt, clippy
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qq --no-install-recommends \
+            build-essential curl file libayatana-appindicator3-dev libfuse2t64 \
+            dbus-daemon libgtk-3-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev \
+            librsvg2-dev rpm xvfb
+
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: bun install --frozen-lockfile --silent
+
+      - name: Run unit checks and build checks
+        working-directory: desktop
+        run: bun run --silent verify
+
+      - name: Run desktop E2E tests
+        if: runner.os != 'Linux'
+        working-directory: desktop
+        run: bun run --silent test:e2e:ci
+
+      - name: Run desktop E2E tests with a virtual display
+        if: runner.os == 'Linux'
+        working-directory: desktop
+        run: dbus-run-session -- xvfb-run --auto-servernum bun run --silent test:e2e:ci
+
+      - name: Build installable packages
+        working-directory: desktop
+        run: bun run --silent bundle
+
+      - name: Smoke test packaged application
+        if: runner.os != 'Linux'
+        working-directory: desktop
+        run: bun run --silent smoke:bundle
+
+      - name: Smoke test packaged application with a virtual display
+        if: runner.os == 'Linux'
+        working-directory: desktop
+        run: dbus-run-session -- xvfb-run --auto-servernum bun run --silent smoke:bundle
+
+      - name: Upload installable packages
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: neo-airplay-${{ matrix.os }}
+          path: desktop/src-tauri/target/release/bundle/
+          if-no-files-found: error
+          retention-days: 14

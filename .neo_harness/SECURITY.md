@@ -1,40 +1,33 @@
 # 安全與信任邊界
 
-本文件只記錄目前原始碼與 README 已明確描述的邊界；它不是安全稽核或法律意見。主要依據為根目錄 README.md 與下列程式檔。
+本文件依目前程式與 [README.md](../README.md) 記錄可確認的安全邊界；不是安全稽核或授權意見。
 
-## 權限與系統服務
+## 應用程式權限
 
-- README 說明 Install-BonjourService.ps1 與 Restore-BonjourService.ps1 需要系統管理員權限。
-- 安裝流程可從 64 位元或 32 位元 Program Files 讀取 Bonjour `mDNSResponder.exe`，並只從 64 位元 Program Files 或 Windows System32 讀取 x64 `dnssd.dll`。兩者都檢查 PE 架構、Bonjour 產品資訊與相同 FileVersion，再 staging 到 `%ProgramFiles%\NeoAirPlay\Bonjour`；不接受 SysWOW64/x86 DLL，也不讀取 App 可寫入路徑。既有服務會備份原始 ImagePath 與執行狀態；服務原先不存在時備份會標示未安裝，安裝透過 Bonjour 執行檔的 `-install` 建立服務。若舊備份無效，只有在目前服務路徑可信任或服務不存在時才依現況更新備份；目前服務路徑不可信時停止安裝。安裝腳本重設共用目錄 ACL、將擁有者設為 Administrators，並移除標準使用者的寫入權限。
-- 一般啟動若服務停止、路徑不符或缺少服務項目，App 會說明操作後透過 UAC 啟動 elevated helper；拒絕或取消時不執行服務腳本。若服務在 Windows 中被停用，App 不會改變該設定。
-- 還原腳本依備份的服務存在狀態，將既有服務路徑還原，或移除 Neo AirPlay 建立的服務；Bonjour 執行檔不會加入公開套件。
-- Harness 驗證入口不會執行這些服務管理腳本。
+- 前端透過 Tauri IPC 呼叫已註冊命令。正式 capability 只包含 `core:default`；E2E 使用的 WDIO capability 位於測試覆寫設定，不會加入正式組態。
+- Content Security Policy 限制頁面資源為本機來源及 Tauri IPC。前端沒有載入外部腳本或遠端內容。
+- App 本身以一般使用者權限執行；依賴安裝腳本可透過 sudo、polkit、UAC 或平台安裝程式要求系統套件安裝授權。App 不建立防火牆規則。
+- Tauri autostart plugin 只註冊登入啟動項目；設定為停用時會移除該註冊。
 
-## 網路與外部程序
+## 外部程序與網路
 
-- Framework 服務會啟動隨附的接收程序，並將標準輸出及錯誤導入本機記錄。修改程序參數或執行環境時，同時檢查 `src/NeoAirPlay.Framework/Services/UxPlayProcessEngine.cs` 與 `BonjourServiceInspector.cs`。
-- Android 服務使用 `ProcessStartInfo.ArgumentList` 呼叫隨附的 ADB 與 scrcpy，將選定裝置序號當成獨立引數，不透過 Shell 組合命令。ADB/scrcpy 輸出會寫入本機診斷記錄；啟動記錄包含裝置序號。
-- Android 投影要求使用者在手機開啟 USB 偵錯並授權此電腦。無線裝置須先由使用者完成 Android 無線偵錯配對；App 只列舉 ADB 已連線裝置，不建立配對或連線。
-- README 指出電腦與 Apple 裝置需在可互通的區域網路，且 Windows 防火牆可能需要允許 engine/uxplay.exe 通過私人網路。多播探索受網路隔離影響。
-- 目前文件沒有列出防火牆連接埠或自動防火牆設定；不要從此文件推定連接埠或新增規則。
+- Rust 使用 `std::process::Command` 的引數陣列啟動 UxPlay、ADB 與 scrcpy，不經由 shell 組合命令。
+- App 啟動時使用 `fix-path-env` 恢復程序 `PATH`；macOS 與 Linux 會啟動使用者設定的登入 shell 讀取環境，因此 shell 啟動設定屬於信任邊界。
+- Android 投影只可使用剛由 ADB 列舉且狀態為 `device` 的裝置序號。App 不執行 ADB 配對或 TCP/IP 連線命令。
+- 引擎執行檔只會從 Debug 的 `desktop/engine/` 或 Release 使用者資料目錄的 `engine/` 尋找，不會從系統 `PATH`、MSYS2 或 WinGet 目錄回退。這些目錄是程式碼執行信任邊界；使用者應只安裝或放置可信任來源的 UxPlay、ADB、scrcpy 及相依檔案。
+- UxPlay 提供區域網路 AirPlay 接收服務。Linux 準備腳本會安裝並啟用 Avahi。macOS 使用系統 Bonjour；Windows 固定採用 UxPlay 官方 1.74 實驗來源的內建 mDNS。OS 防火牆與區域網路可達性仍需由使用者允許。
+- App 會將 UxPlay、scrcpy 與 ADB 的輸出寫入本機診斷記錄。Android 投影啟動資訊可能含裝置型號與序號；分享記錄前應先檢查內容。
 
-## 使用者資料與記錄
+## 使用者資料與 E2E
 
-- README 與 `src/NeoAirPlay.Framework/Services/JsonSettingsStore.cs` 記載設定存於使用者 AppData；`FileAppLogger.cs` 將記錄寫入使用者 LocalAppData。接收程序輸出也會進入應用程式記錄。
-- 檢視或分享診斷記錄前，先確認內容適合分享。專案未提供記錄去識別或分享前清理工具。
+- 設定及每日記錄存放在 Tauri path resolver 提供的使用者應用程式設定與記錄目錄。設定以 JSON 儲存，記錄以 JSONL 附加寫入。
+- WDIO 測試以 `--e2e-profile` 將設定與記錄導向作業系統暫存目錄。此參數只在 Rust `wdio` feature 編譯時啟用；測試能力只由 `tauri.e2e.conf.json` 及 WDIO build script 啟用。
+- 自動化測試不操作實際投影引擎，不會連接 Android 裝置，也不會更改登入啟動設定。
 
-## 發佈限制
+## 第三方元件與發佈
 
-- README 記載 Bonjour 執行元件取自本機安裝，並指出其授權條款限制對外再散布；README 明確要求不要把這些執行檔放入公開下載包。
-- scrcpy/ADB 執行環境從 Genymobile 官方 v4.1 Windows x64 發行包 staging，腳本核對固定 SHA-256，並保留官方封存檔內的 `LICENSE.txt`。scrcpy 專案 README 標示 Apache-2.0；發佈前仍須一併盤點該 Windows 封存包中各個第三方二進位檔的授權與通知。
-- App 下載版本固定的引擎 ZIP，先核對 App 內設定的外層 SHA-256，再檢查逐檔雜湊、必要檔案清單、路徑穿越與符號連結；公開 ZIP 排除 Bonjour。套件由 `scripts/Pack-EngineRuntime.ps1` 產生並附加到對應 GitHub Release。
-- 任何發佈內容變更都應重新核對 README 所列授權文件與目前檔案來源。此處只轉述專案文件，沒有獨立驗證授權條款。
-
-## 自動化與未知事項
-
-- Harness 的單元測試使用程序與 Bonjour 替身；App UI E2E 以 `--e2e-profile` 把設定、記錄和 GStreamer 快取導向測試暫存目錄，並使用獨立 Mutex。測試不會啟動接收器或修改 Windows 啟動登錄值。Bonjour ACL 與服務路徑仍需在目標 Windows 機器人工驗收。
-- `ci.yml` 僅有 `contents: read` 權限。建立 develop → main PR 的工作流程在 `workflow_run` 上執行，不 checkout 未信任的 develop 程式碼；GitHub App 私鑰只交給 token action，PR 驗證工作不會取得它。
-- Release 需要自架 Windows runner 才能讀取可信任的 Bonjour 安裝。Release job 僅由 main push 啟動，先執行驗證及建置，之後才建立短期 GitHub App token；App 的 `Contents` 與 `Pull requests` 權限應只授予必要 repository。`main` 需要允許 App 繞過直接推送限制，因 Release 會寫回版本與引擎 metadata。
-- 自架 runner 會執行 main 上的專案建置、測試及 PowerShell 腳本。能寫入 develop 的人因此能提供會在 runner 執行的程式碼；只應授權可信任維護者寫入 develop，限制 runner 的 repository 存取，並用隔離且不保存其他憑證或個人資料的主機。GitHub 設定無法由 repository workflow 自行保證。
-- 目前沒有找到安全掃描、權限檢查或網路設定的自動化驗證。
-- 本文件未確認防火牆連接埠、威脅模型或記錄內容中的敏感資料種類；相關決策需以實際需求與程式行為確認。
+- 預設套件不含 UxPlay、GStreamer、ADB、scrcpy、Bonjour 或 Avahi 二進位檔。使用者安裝時需依上游授權與通知要求保留第三方文件。
+- 本機引擎檔案放在 `desktop/engine/`，打包時會作為 Tauri `engine/` 資源。加入任何外部執行檔前，需確認散布授權、來源與必要的授權文件；此目錄除 `.GITKEEP` 外都由 Git 忽略。
+- 自動準備會下載並執行官方套件管理器或工具安裝腳本。UxPlay 來源固定於腳本記錄的 commit 並核對 SHA-256；作業系統套件信任其套件庫的簽章與驗證機制。Rust 不接受由前端傳入的安裝指令或 URL。
+- GitHub Actions 權限為 `contents: read`，只建置、測試並上傳限期 Actions artifact，不建立 tag、推送版本檔或公開 Release。
+- 專案未設定依賴弱點掃描、Windows 發行者憑證、Apple Developer ID 或執行檔來源驗證。macOS 僅使用 ad-hoc 簽章且未 notarize；這些發佈控制不能視為已完成。

@@ -1,46 +1,42 @@
 # 程序生命週期與復原
 
-本文件依據 `src/NeoAirPlay.Framework/Services/UxPlayProcessEngine.cs`、`BonjourServiceInspector.cs`、`src/NeoAirPlay.App/App.xaml.cs` 與 README.md 描述目前可觀察的行為。
+本文件描述目前 Tauri/Rust 程式可觀察的行為。App 只從 Debug 的 `desktop/engine/` 或 Release 使用者資料目錄的 `engine/` 啟動工具；GStreamer 與 DNS-SD 服務也需具備該平台要求的執行相依項目。
 
-## 啟動條件與失敗狀態
+## 啟動與狀態更新
 
-- 引擎啟動前檢查 `engine/uxplay.exe`、受保護的系統共用 Bonjour 執行元件，以及 GStreamer `runtime/bin` 與 `runtime/lib/gstreamer-1.0` 目錄。
-- 缺少必要元件時狀態設為 `DependencyMissing`，並寫入錯誤記錄；程序啟動失敗時狀態設為 `Faulted`。
-- 引擎使用非同步生命週期鎖避免啟停操作重疊。若程序已在執行，重複啟動要求會直接返回。
-- App 顯示主視窗後背景檢查 AirPlay 與 Android 引擎檔案；缺少時下載固定版本套件並驗證後安裝。下載或安裝失敗會顯示在總覽及記錄，不會關閉 App，且下次啟動會再檢查。
-- 引擎準備期間停用啟動 AirPlay、刷新 Android 裝置及啟動 Android 投影命令。E2E profile 會略過引擎準備。
-- 一般 App 啟動時，Bonjour 檢查先於引擎套件準備，因此引擎下載失敗不會略過服務處理。服務停止、路徑不符或項目不存在時，App 分別從可信任 Program Files / Program Files (x86) 尋找 Bonjour responder，以及從 64 位元 Program Files / Windows System32 尋找相同版本的 x64 DNS-SD DLL；通過檢查後顯示簡短原因並要求 UAC，成功後重新檢查服務狀態。
-- 找不到 responder 時，App 提供 Bonjour 安裝資訊；若找到 responder 但缺少同版本 x64 DLL，會明確指出缺少的 DNS-SD 元件。UAC 取消、服務停用或安裝失敗時，AirPlay 不啟動，Android 仍可用。E2E profile 不執行 Windows 服務操作；`--start` 會等 Bonjour 與引擎都就緒才啟動 AirPlay。
+- App 啟動時載入設定並建立兩個獨立的引擎控制器；不會自動啟動 AirPlay 或 Android 投影。
+- App 每次啟動都在背景檢查投影工具，缺少時執行內嵌平台安裝腳本；先前安裝失敗時，下次啟動會自動重試。介面顯示進度；失敗可查看安裝記錄並手動重試。E2E profile 或 `NEO_AIRPLAY_SKIP_SETUP=1` 停用此流程。
+- 開發與建置入口會先執行 `setup.sh`／`setup.ps1`，檢查開發工具與投影依賴；全部就緒時略過安裝，缺少時依平台腳本補齊。新 checkout 可使用 `launch.sh`／`launch.ps1`，先 setup 再啟動 Debug、Release 或打包；直接呼叫 Tauri CLI 也會自動執行 setup。CI 可用 `NEO_AIRPLAY_SKIP_SETUP=1` 停用。
+- 第二次啟動會交由單一執行個體插件轉送至既有 App，顯示主視窗後結束新程序。
+- 引擎執行程序的 `PATH` 僅包含目前使用的 `engine/` 目錄及其 Android 子目錄；找不到該目錄中的工具時會回報缺少依賴，不從系統 `PATH` 回退。
+- macOS 啟動 UxPlay 時使用原生 `osxvideosink`、libav 軟體 H.264 解碼及 `-vsync no`；「Auto」輸出選項會採用原生 sink。其他平台維持 UxPlay 自動選擇。
+- Vue 總覽每 1.5 秒重新讀取程序狀態。ADB 裝置清單只在使用者按重新整理時更新。
+- 找不到引擎會回報 `DependencyMissing`；程序無法啟動、意外非零退出或狀態查詢失敗會回報 `Faulted`。成功退出回報 `Stopped`。
+- 重複啟動已執行的引擎會返回目前狀態。AirPlay 和 Android 各有自己的程序、鎖與狀態。
+- UxPlay/scrcpy stdout 和 stderr 由背景讀取器持續排空並寫入診斷記錄，避免外部程序因輸出管道填滿而停住。
+- Android ADB 列舉逾時上限為 15 秒；逾時會終止 ADB client。輸出可含多筆裝置，所以 stdout 和 stderr 會在輪詢程序期間分別讀取。
+- ADB 刷新失敗時清除過期裝置清單。若 scrcpy 程序仍在執行，Android 狀態會保持 Running，確保停止操作仍可用；成功列舉且沒有執行中的程序時，舊的 Faulted 或 DependencyMissing 狀態會重設為 Stopped。
 
-## 停止與意外結束
+## 停止與非預期結束
 
-- 停止時先嘗試關閉程序主視窗；若無法正常關閉，會結束程序樹。
-- 正常關閉最多等待五秒；逾時後結束程序樹並等待程序結束。
-- 程序意外結束時，結束碼 0 回報 `Stopped`，非 0 回報 `Faulted`，並記錄結果。程式碼中沒有自動重新啟動流程。
-- 應用程式結束時會呼叫引擎 Dispose，嘗試停止接收程序。
+- 使用者按停止時，App 終止並等待對應的直接子程序。若程序已先行退出，停止流程會採用已取得的退出狀態。
+- 關閉主視窗會隱藏視窗並保留 App。系統匣「結束 Neo AirPlay」會結束 App；`EngineController` drop 時嘗試終止並等待其仍持有的引擎程序。
+- 程序意外結束時，下次狀態輪詢會反映退出狀態及代碼並寫入記錄。程式沒有自動重新啟動引擎的流程。
+- App 被作業系統強制結束時，不保證子程序樹能完整終止；目前程式只直接管理 UxPlay/scrcpy 子程序。
 
-## Android 投影
+## 設定、記錄與復原
 
-- `ScrcpyAndroidMirrorEngine` 先確認 `engine/android` 的 ADB、scrcpy、server、必要 DLL 與授權文件，再呼叫 `adb devices -l`；ADB 查詢最長等待 15 秒，失敗時回報錯誤，不會自動連線或配對。
-- 裝置狀態 `device` 可選擇投影；`unauthorized` 顯示需在手機接受 USB 偵錯授權；`offline` 提示重新連接或檢查無線偵錯連線。
-- scrcpy 以獨立程序開啟投影視窗。使用者關閉視窗時，程序退出狀態會反映到 Android 區塊；App 關閉時也會停止 scrcpy。
-- 停止流程先關閉視窗，最多等待五秒，再結束程序樹。非零結束碼會記錄為錯誤。Android 與 UxPlay 的生命週期鎖和 UI 狀態彼此分開。
-- Android 11 以上支援 scrcpy 音訊轉送；更舊 Android 版本的畫面仍可投影，但不支援這條音訊轉送路徑。
-- scripts/scrcpy-runtime-files.txt 是唯一的 scrcpy 必要檔案清單；staging 腳本讀取此清單，Framework 將同一份清單嵌入組件供啟動檢查使用。
-- 投影執行中若 ADB 刷新失敗或執行元件檢查失敗，狀態仍維持 Running，讓停止控制保持可用；刷新恢復後會繼續顯示投影中。
-
-## 診斷與人工復原
-
-- 接收器引擎狀態、啟動失敗原因與子程序輸出可由應用程式診斷頁及記錄檔查看。完整記錄位置為 `%LocalAppData%\NeoAirPlay\Logs\`；介面保留最近 300 筆。
-- 若狀態顯示缺少元件，先依 README.md 檢查建置與 Bonjour staging 步驟，不要在 Harness 驗證中自動執行建置環境或系統服務安裝腳本。
-- README 記錄 Bonjour Service 安裝與還原命令；服務建立或路徑切換需要系統管理員權限，操作前後應確認服務狀態與路徑。有效備份可還原原路徑，或在服務原先不存在時移除新建服務；舊備份無效時只在目前服務路徑可信任或服務不存在的情況下依現況更新，否則停止安裝。
+- 設定寫入同目錄暫存 JSON 後重新命名至 `settings.json`，寫入及記憶體更新共用設定鎖；command 另以 transaction 鎖序列化登入啟動變更及儲存。若無法寫入，命令會回報錯誤，記憶體中的設定不會更新。
+- 記錄依本地日期寫入每日 JSONL 檔；診斷頁顯示當日最近 300 筆。檔案開啟或寫入失敗目前不會回報給 UI。
+- 若 App 顯示工具安裝失敗，依畫面列出的記錄檔排除網路、套件庫或授權問題後，按「重新檢查並安裝」。Debug 的本機引擎檔案放在 `desktop/engine/`；Release 先將套件資源複製至使用者資料目錄的 `engine/`。
+- Runtime 檢查要求 Engine 內同時有可執行的 `scrcpy`、ADB 及非空的 `scrcpy-server`；缺少 server 時會重新準備 scrcpy 套件，並將完整工具組寫入 Engine。
+- Linux 準備腳本會安裝並啟用 Avahi；macOS 使用系統 Bonjour，Windows 使用實驗版內建 mDNS。App 不建立防火牆規則，也不會自動配對 Android 裝置。
+- 若 Android 裝置未列出，先在終端執行 `adb devices -l`，確認裝置已授權且狀態為 `device`；App 只列出 ADB 已建立的連線。
 
 ## 驗證界線
 
-- `.neo_harness/verify.ps1` 建置 `NeoAirPlay.slnx` 並執行標記為 `Unit` 的 Framework 與 App 單元測試；不會啟動外部 UxPlay 程序或執行 Bonjour 服務管理腳本。
-- `.github/workflows/ci.yml` 在 develop push 與 main PR 執行同一驗證入口；develop 驗證成功後，`promote-develop.yml` 建立／更新到 main 的 PR 並設定 auto-merge。main push 由 `release.yml` 重跑驗證，再建立版本化 Release。
-- Release workflow 以觸發該 run 的 main commit 建置。版本取目前 App 版本及既有穩定 Release tags 中較大的值後升 patch；若另一個工作流程先建立了相同 tag，發佈腳本會停止而不覆寫別次建置，應重跑失敗的 Release workflow 以取得下一版。
-- `NeoAirPlay.App.Test` 的 E2E 測試需可互動的 Windows 桌面工作階段，使用 UI Automation 驗證實際 WPF 視窗及導覽。測試不連接 AirPlay 裝置、不啟動接收器，並以暫存 profile 隔離使用者資料。
-- `Category=HardwareE2E` 另外啟動真實 UxPlay 與 scrcpy，包含 Framework 引擎並行測試及透過 WPF 總覽控制 USB Android 的測試；驗證 scrcpy 視窗出現，以及停止 Android 後 AirPlay 程序仍在運行。這不會自動選擇 iPhone/iPad 的 AirPlay 來源，也不量測實際音訊輸出。
-- 單元與 UI E2E 測試不驗證區域網路探索、影音播放或外部 Bonjour Service 在目標環境中的實際行為；這些仍需在目標 Windows 與區域網路中確認。
-- CI 不執行 UI E2E；若需確認 WPF 實際導覽，仍需在互動式桌面執行：`dotnet test tests/NeoAirPlay.App.Test/NeoAirPlay.App.Test.csproj --filter "Category=E2E"`。
+- `.neo_harness/verify.ps1` 執行前端型別與單元測試、Rust 格式與單元測試、Clippy 及前端建置。
+- `bun run test:e2e:ci` 啟動實際桌面程式，驗證第二次啟動、總覽/設定/診斷頁導覽、設定儲存，以及兩個假引擎程序的並行啟停；測試使用隔離 profile，不啟動真實引擎。Linux headless 執行時需使用 `dbus-run-session -- xvfb-run --auto-servernum bun run --silent test:e2e:ci`。
+- CI 在 Windows、macOS、Linux runner 建置並執行桌面 E2E，再建置各平台原生安裝套件並啟動正式執行檔 8 秒。尚未執行的外部 workflow 不代表通過。
+- `bun run smoke:bundle` 使用暫存使用者資料目錄啟動目前平台的正式 bundle 執行檔；Linux headless 執行時使用 `dbus-run-session -- xvfb-run --auto-servernum bun run --silent smoke:bundle`。此檢查不取代安裝後測試或實際 UI E2E。
+- 單元與 UI E2E 不驗證真實 Apple/Android 裝置、mDNS 探索、影像、音訊、GPU renderer 或安裝後 OS 啟動項目；需在各目標平台人工驗收。

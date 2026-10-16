@@ -1,4 +1,1 @@
 /.github/ @Benknightdark
-/scripts/Set-AppVersion.ps1 @Benknightdark
-/scripts/Build-ReleasePackage.ps1 @Benknightdark
-/scripts/Publish-GitHubRelease.ps1 @Benknightdark
