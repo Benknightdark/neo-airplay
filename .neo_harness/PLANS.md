@@ -8,8 +8,9 @@
 
 ## 位置與命名
 
-- 進行中的計畫放在 docs/exec-plans/active/。
-- 完成的計畫放在 docs/exec-plans/completed/。
+- 進行中的計畫放在 `.neo_harness/docs/exec-plans/active/`。
+- 完成的計畫放在 `.neo_harness/docs/exec-plans/completed/`。
+- 兩個計畫目錄都必須包含 `.GITKEEP`；空目錄以此檔案追蹤，不新增 `README.md`。
 - 新計畫使用建立當下本地時間的 14 位數時間戳及底線前綴：YYYYMMDDHHmmss_<計畫名稱>.md。
 - 計畫移至 completed 時保留原時間戳與檔名。既有未加時間戳的計畫不批次改名。
 
@@ -20,5 +21,3 @@
 ## 生命週期
 
 開始工作時建立計畫並列出可執行步驟。執行期間同步更新進度、發現與決策。每個重要步驟記錄驗證方式及結果；失敗時記錄原因與修正。完成後補上結果與剩餘缺口，再將檔案移至 completed，保留原始名稱。
-
-目前的計畫目錄狀態見 [active 計畫](docs/exec-plans/active/README.md) 與 [completed 計畫](docs/exec-plans/completed/README.md)。

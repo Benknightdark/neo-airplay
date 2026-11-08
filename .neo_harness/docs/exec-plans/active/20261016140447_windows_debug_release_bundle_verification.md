@@ -25,7 +25,7 @@
 - [ ] 驗證 Debug 建置與桌面 E2E（`cd desktop && bun run --silent test:e2e:ci` 及 `launch.ps1 dev`）。
 - [ ] 驗證 Release 建置（`launch.ps1 release`）。
 - [ ] 驗證安裝套件打包（`launch.ps1 bundle`）與正式版啟動檢查（`smoke:bundle`）。
-- [ ] 更新 `.neo_harness/docs/review-and-setup.md` 並將本計畫移至 `completed/`。
+- [ ] 更新本計畫的驗證結果與剩餘缺口，並將本計畫移至 `completed/`。
 
 ## 發現
 
