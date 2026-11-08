@@ -28,8 +28,9 @@
 | 前端單元測試 | 驗證狀態標籤、時間格式、總覽操作、設定表單與錯誤狀態。 | `desktop/src/lib/status.test.ts`、`desktop/src/components/DashboardPage.test.ts`、`desktop/src/components/SettingsPage.test.ts`、`desktop/src/composables/useAppState.test.ts` |
 | Rust 單元測試 | 驗證設定正規化、ADB 輸出解析、UxPlay 參數、renderer allowlist 與引擎程序生命週期。 | `desktop/src-tauri/src/models.rs`、`desktop/src-tauri/src/state.rs` |
 | 桌面 E2E | 以 WebdriverIO 啟動實際 Tauri 程式，檢查第二次啟動、頁面導覽、設定儲存及兩個假引擎程序的並行啟停。 | `desktop/e2e/main.spec.ts`、`desktop/e2e/fake-engine.rs`、`desktop/wdio.conf.ts` |
-| 正式應用程式啟動檢查 | 啟動目前平台的正式 bundle 執行檔 8 秒，並使用隔離的暫存使用者資料目錄。 | `desktop/scripts/smoke-bundle.mjs`、`.github/workflows/ci.yml` |
-| CI 與安裝套件 | 於原生 Windows、macOS、Linux runner 執行檢查和 E2E，產生並上傳平台安裝套件。 | `.github/workflows/ci.yml`、`desktop/src-tauri/tauri.conf.json` |
+| 正式應用程式啟動檢查 | `smoke:bundle` 可啟動目前平台正式 bundle 執行檔 8 秒，使用隔離的暫存使用者資料目錄；CI/CD 工作流程不執行此檢查。 | `desktop/scripts/smoke-bundle.mjs` |
+| CI | `develop` 有新提交時，於原生 Windows、macOS、Linux runner 執行驗證及桌面 E2E；三平台成功後建立或沿用 `develop` 到 `main` 的 PR。 | `.github/workflows/ci.yml` |
+| CD 與安裝套件 | PR 合併到 `main` 後，於三平台原生 runner 建置安裝檔；全部成功後建立以應用程式版本命名的 GitHub Release。 | `.github/workflows/cd.yml`、`desktop/src-tauri/tauri.conf.json` |
 
 ## 程序與執行元件
 
@@ -48,6 +49,6 @@
 
 - `.neo_harness/verify.ps1` 呼叫 `bun run verify`，執行 Vue/TypeScript 型別檢查、前端單元測試、Rust 格式檢查、Rust 單元測試、Clippy 與 Vite 建置。
 - `bun run test:e2e:ci` 額外建置 `wdio` 測試版本與假引擎，並啟動桌面 E2E。測試會驗證第二次啟動退出並由既有執行個體處理；假執行檔只放在隔離的 E2E profile。Linux CI 以 D-Bus session 和 Xvfb 啟動測試。
-- GitHub Actions 對 `ubuntu-24.04`、`windows-latest`、`macos-latest` 執行 verify、桌面 E2E 與原生安裝套件建置。各平台實際結果須以 workflow run 為準。
-- 安裝套件建置後會啟動該平台正式執行檔 8 秒；此 smoke check 確認程式能啟動，不驗證頁面操作或投影引擎串流。
+- CI 在 `develop` 更新時對 `ubuntu-24.04`、`windows-latest`、`macos-latest` 執行 verify 與桌面 E2E，三平台成功後建立或沿用 `develop` 到 `main` 的 PR。CD 只在 PR 合併到 `main` 後建置安裝套件，三平台套件皆成功才建立 GitHub Release。
+- Release 版本取自 `desktop/package.json`、`desktop/src-tauri/tauri.conf.json`、`desktop/src-tauri/Cargo.toml` 與 `Cargo.lock`；四處必須一致且 `vX.Y.Z` tag 不得重複。CI/CD 不執行正式 bundle 啟動 smoke check。
 - E2E 會以假執行檔驗證兩個子程序並行啟停，不會連接實際 Android 裝置或啟動真實 UxPlay/scrcpy。AirPlay 網路探索、視訊、音訊及硬體加速仍需在目標 OS、裝置與區域網路人工驗收。

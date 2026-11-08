@@ -37,6 +37,7 @@
 
 - `.neo_harness/verify.ps1` 執行前端型別與單元測試、Rust 格式與單元測試、Clippy 及前端建置。
 - `bun run test:e2e:ci` 啟動實際桌面程式，驗證第二次啟動、總覽/設定/診斷頁導覽、設定儲存，以及兩個假引擎程序的並行啟停；測試使用隔離 profile，不啟動真實引擎。Linux headless 執行時需使用 `dbus-run-session -- xvfb-run --auto-servernum bun run --silent test:e2e:ci`。
-- CI 在 Windows、macOS、Linux runner 建置並執行桌面 E2E，再建置各平台原生安裝套件並啟動正式執行檔 8 秒。尚未執行的外部 workflow 不代表通過。
-- `bun run smoke:bundle` 使用暫存使用者資料目錄啟動目前平台的正式 bundle 執行檔；Linux headless 執行時使用 `dbus-run-session -- xvfb-run --auto-servernum bun run --silent smoke:bundle`。此檢查不取代安裝後測試或實際 UI E2E。
+- CI 在 `develop` 更新時，於 Windows、macOS、Linux runner 執行驗證和桌面 E2E；三平台全數成功後才建立或沿用 `develop` 到 `main` 的 PR。新提交會取消舊的 CI 執行，PR 工作也會確認目前 `develop` 仍是通過檢查的提交。
+- CD 僅在 PR 合併到 `main` 後執行，於三平台建立 Tauri 設定中的安裝格式；任一平台建置或上傳失敗時不建立 Release。每個合併 PR 都需使用一致且未發布過的 `X.Y.Z` 版本。
+- `bun run smoke:bundle` 仍可手動使用隔離的暫存使用者資料目錄啟動目前平台的正式 bundle 執行檔；Linux headless 執行時使用 `dbus-run-session -- xvfb-run --auto-servernum bun run --silent smoke:bundle`。CI/CD 不執行此啟動檢查。
 - 單元與 UI E2E 不驗證真實 Apple/Android 裝置、mDNS 探索、影像、音訊、GPU renderer 或安裝後 OS 啟動項目；需在各目標平台人工驗收。

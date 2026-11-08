@@ -29,5 +29,6 @@
 - 預設套件不含 UxPlay、GStreamer、ADB、scrcpy、Bonjour 或 Avahi 二進位檔。使用者安裝時需依上游授權與通知要求保留第三方文件。
 - 本機引擎檔案放在 `desktop/engine/`，打包時會作為 Tauri `engine/` 資源。加入任何外部執行檔前，需確認散布授權、來源與必要的授權文件；此目錄除 `.GITKEEP` 外都由 Git 忽略。
 - 自動準備會下載並執行官方套件管理器或工具安裝腳本。UxPlay 來源固定於腳本記錄的 commit 並核對 SHA-256；作業系統套件信任其套件庫的簽章與驗證機制。Rust 不接受由前端傳入的安裝指令或 URL。
-- GitHub Actions 權限為 `contents: read`，只建置、測試並上傳限期 Actions artifact，不建立 tag、推送版本檔或公開 Release。
+- CI workflow 的驗證工作只需 `contents: read`；自動建立 `develop` 到 `main` PR 的工作使用 `pull-requests: write`。儲存庫必須允許 GitHub Actions 建立 PR。
+- CD 的平台建置工作只需 `contents: read`；發布工作使用 `contents: write` 建立版本 tag 與已發布的 GitHub Release。Release 只在合併至 `main` 的 PR 完成三平台安裝檔建置後發布。
 - 專案未設定依賴弱點掃描、Windows 發行者憑證、Apple Developer ID 或執行檔來源驗證。macOS 僅使用 ad-hoc 簽章且未 notarize；這些發佈控制不能視為已完成。
