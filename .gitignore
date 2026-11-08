@@ -1,6 +1,10 @@
 .build/
 dist/
 /engine/
+/desktop/engine/*
+!/desktop/engine/.GITKEEP
+/desktop/src-tauri/resources/engine/*
+!/desktop/src-tauri/resources/engine/README.md
 **/bin/
 **/obj/
 *.user

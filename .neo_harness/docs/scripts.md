@@ -1,11 +1,39 @@
 | 指令 | 用途 |
 | :--- | :--- |
-| dotnet build NeoAirPlay.slnx | 建置 App、Framework 與兩個測試專案。 |
-| dotnet test NeoAirPlay.slnx --filter "Category=Unit" | 執行 Framework 與 App 單元測試。 |
-| dotnet test tests/NeoAirPlay.App.Test/NeoAirPlay.App.Test.csproj --filter "Category=E2E" | 在互動式 Windows 桌面執行 WPF UI E2E 測試。 |
-| dotnet publish src/NeoAirPlay.App/NeoAirPlay.App.csproj -c Release -o dist/NeoAirPlay-Release | 建置 Release 發佈輸出。 |
-| .\scripts\build-engine.ps1 | 準備建置環境並建置接收引擎及影音執行元件。 |
-| .\scripts\Stage-BonjourRuntime.ps1 | 從本機 Bonjour 安裝複製服務執行元件至專案。 |
-| .\scripts\Install-BonjourService.ps1 | 以系統管理員權限將 Bonjour Service 切換至專案路徑。 |
-| .\scripts\Restore-BonjourService.ps1 | 還原 Bonjour Service 原始路徑。 |
-| .\.neo_harness\verify.ps1 | 建置方案並執行標記為 Unit 的測試；不執行 UI E2E。 |
+| `bash desktop/scripts/setup.sh` | 在 macOS／Linux 準備開發工具、投影依賴及前端套件。 |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop\scripts\setup.ps1` | 在 Windows 準備開發工具、投影依賴及前端套件。 |
+| `bash desktop/scripts/launch.sh dev` | 從新 checkout 自動準備開發環境與引擎，然後啟動 Debug。 |
+| `bash desktop/scripts/launch.sh release` | 自動準備環境並建置 Release 執行檔，不產生安裝套件。 |
+| `bash desktop/scripts/launch.sh bundle` | 自動準備環境並建置目前平台的安裝套件。 |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop\scripts\launch.ps1 dev` | 從新 checkout 自動準備 Windows 開發環境與引擎，然後啟動 Debug。 |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop\scripts\launch.ps1 release` | 自動準備 Windows 環境並建置 Release 執行檔，不產生安裝套件。 |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop\scripts\launch.ps1 bundle` | 自動準備 Windows 環境並建置安裝套件。 |
+| `bash desktop/scripts/install.sh --check` | 只檢查 macOS／Linux 投影工具，缺少時回傳非零，不安裝軟體。 |
+| `powershell -NoProfile -ExecutionPolicy Bypass -File desktop/scripts/install.ps1 -Check` | 只檢查 Windows 投影工具，缺少時回傳非零，不安裝軟體。 |
+| `cd desktop && bun run --silent setup:runtime` | 手動準備目前平台的投影工具；正常 DEBUG/RELEASE 啟動會在背景自動檢查及準備。 |
+| `cd desktop && bun install --frozen-lockfile --silent` | 依 `bun.lock` 安裝固定版本的前端套件。 |
+| `cd desktop && bun run --silent dev` | 啟動 Vite 前端開發伺服器。 |
+| `cd desktop && bun run tauri dev` | 啟動 Vite 與 Tauri 桌面開發環境。 |
+| `cd desktop && bun run --silent typecheck` | 執行 Vue/TypeScript 型別檢查。 |
+| `cd desktop && bun run --silent test:unit` | 執行 Vitest 前端單元測試。 |
+| `cd desktop && bun run --silent test:setup` | 使用隔離的假工具執行安裝腳本檢查及跳過安裝情境，不安裝系統套件；Windows 略過 Bash 平台案例。 |
+| `cd desktop && bun run --silent rust:fmt` | 執行 `cargo fmt --check`。 |
+| `cd desktop && bun run --silent rust:test` | 以所有 Rust features 執行單元測試，包含 WDIO Rust 插件編譯。 |
+| `cd desktop && bun run --silent rust:clippy` | 對所有 Rust targets/features 執行 Clippy，warning 視為錯誤。 |
+| `cd desktop && bun run --silent verify` | 執行 Vue/TypeScript 檢查、前端與安裝流程測試、Rust 格式與單元測試、Clippy 及前端建置。 |
+| `pwsh .neo_harness/verify.ps1` | 從專案根目錄執行統一驗證入口。 |
+| `cd desktop && bun run --silent build` | 執行型別檢查並建立 Vite production 前端。 |
+| `cd desktop && bun run --silent preview` | 預覽已建置的 Vite production 前端。 |
+| `cd desktop && bun run release` | 自動檢查／準備環境，建置 Release 執行檔但不打包安裝程式。 |
+| `cd desktop && bun run --silent e2e:build` | 建置桌面 E2E 用的 Tauri 執行檔與假引擎。 |
+| `cd desktop && bun run --silent test:e2e` | 執行已建置的桌面 E2E 測試；需要可互動桌面工作階段。 |
+| `cd desktop && bun run --silent test:e2e:ci` | 建置 WDIO 測試版本並啟動桌面 E2E；需要可互動桌面工作階段。 |
+| `cd desktop && dbus-run-session -- xvfb-run --auto-servernum bun run --silent test:e2e:ci` | 在 Linux 無桌面工作階段時以 D-Bus session 和虛擬顯示器執行桌面 E2E。 |
+| `cd desktop && bun run --silent bundle` | 建置目前平台的 Tauri 安裝套件。 |
+| `cd desktop && bun run --silent smoke:bundle` | 啟動目前平台正式 bundle 執行檔 8 秒；Linux 會使用 AppImage payload 或已安裝 DEB 的執行檔，並需要圖形工作階段。 |
+| `cd desktop && dbus-run-session -- xvfb-run --auto-servernum bun run --silent smoke:bundle` | 在 Linux 無桌面工作階段時以 D-Bus session 和虛擬顯示器啟動正式執行檔。 |
+| `brew install llvm makensis` | 安裝 README 所列 macOS Windows NSIS 交叉建置工具。 |
+| `cargo install --locked cargo-xwin` | 安裝 README 所列 Windows MSVC 交叉建置 runner。 |
+| `rustup target add x86_64-pc-windows-msvc` | 安裝 Windows x64 MSVC Rust target。 |
+| `export PATH="$(brew --prefix llvm)/bin:$PATH"` | 將 Homebrew LLVM 加入目前 shell 的 PATH，以供 Windows 交叉建置使用。 |
+| `cd desktop && bun run tauri build --ci --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis` | 從 macOS 交叉建置 Windows x64 NSIS 套件；Tauri 將此方式列為實驗性。 |
