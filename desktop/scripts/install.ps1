@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [switch]$Development,
     [switch]$Check,
@@ -7,6 +7,8 @@ param(
     [string]$EngineDirectory = $env:NEO_AIRPLAY_ENGINE_DIR,
     [string]$MarkerFile,
     [string]$ResultFile,
+    [string]$ProgressFile,
+    [string]$LogFile,
     [string]$OriginalUserProfile,
     [string]$OriginalLocalAppData,
     [string]$OriginalUserSid
@@ -34,9 +36,15 @@ $script:SetupLocalAppData = if ($OriginalLocalAppData) { [IO.Path]::GetFullPath(
 $script:SetupUserSid = if ($OriginalUserSid) { $OriginalUserSid } else { [Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
 $env:CARGO_HOME = Join-Path $script:SetupUserProfile '.cargo'
 $env:RUSTUP_HOME = Join-Path $script:SetupUserProfile '.rustup'
+$script:InstallStage = 'checking'
+$script:InstallMessage = '正在檢查投影工具…'
+$script:InstallFailure = $null
 $MsysPackages = @(
     'mingw-w64-ucrt-x86_64-cmake',
     'mingw-w64-ucrt-x86_64-gcc',
+    'mingw-w64-ucrt-x86_64-headers',
+    'mingw-w64-ucrt-x86_64-crt',
+    'mingw-w64-ucrt-x86_64-binutils',
     'mingw-w64-ucrt-x86_64-ninja',
     'mingw-w64-ucrt-x86_64-pkgconf',
     'mingw-w64-ucrt-x86_64-libplist',
@@ -49,11 +57,88 @@ $MsysPackages = @(
 )
 
 function Write-Info([string]$Message) {
-    Write-Host $Message
+    if ($LogFile -and -not $Check) {
+        $stream = [IO.FileStream]::new($LogFile, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
+        $writer = [IO.StreamWriter]::new($stream, [Text.UTF8Encoding]::new($false))
+        try { $writer.WriteLine($Message) } finally { $writer.Dispose() }
+    } else {
+        Write-Host $Message
+    }
 }
 
-function Stop-Setup([string]$Message) {
+function Stop-Setup([string]$Message, [string]$Summary = '') {
+    if ($Summary) { $script:InstallFailure = $Summary }
     throw "Setup failed: $Message"
+}
+
+function Write-InstallJson([string]$Path, [hashtable]$Value) {
+    $directory = Split-Path -Parent $Path
+    if ($directory) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
+    $temporary = "$Path.tmp.$PID"
+    try {
+        [IO.File]::WriteAllText($temporary, ($Value | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            [IO.File]::Replace($temporary, $Path, [NullString]::Value)
+        } else {
+            [IO.File]::Move($temporary, $Path)
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+    }
+}
+
+function Set-InstallStage([string]$Stage, [string]$Message) {
+    $script:InstallStage = $Stage
+    $script:InstallMessage = $Message
+    if ($ProgressFile -and -not $Check) {
+        Write-InstallJson $ProgressFile @{ pid = $PID; stage = $Stage; message = $Message }
+    }
+    Write-Info $Message
+}
+
+function ConvertTo-ProcessArgument([string]$Value) {
+    $escaped = [regex]::Replace($Value, '(\\*)"', '$1$1\"')
+    return '"' + [regex]::Replace($escaped, '(\\+)$', '$1$1') + '"'
+}
+
+function Invoke-SetupProcess([string]$FileName, [string[]]$Arguments = @(), [hashtable]$Environment = @{}, [switch]$Quiet) {
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $FileName
+    $startInfo.Arguments = (($Arguments | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' ')
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($name in $Environment.Keys) {
+        if ($null -eq $Environment[$name]) { $startInfo.EnvironmentVariables.Remove($name) }
+        else { $startInfo.EnvironmentVariables[$name] = [string]$Environment[$name] }
+    }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $output = [Text.StringBuilder]::new()
+    try {
+        $null = $process.Start()
+        $process.StandardInput.Close()
+        $readers = @($process.StandardOutput, $process.StandardError)
+        $pending = @($readers[0].ReadLineAsync(), $readers[1].ReadLineAsync())
+        while ($null -ne $pending[0] -or $null -ne $pending[1]) {
+            for ($index = 0; $index -lt 2; $index++) {
+                if ($null -eq $pending[$index] -or -not $pending[$index].IsCompleted) { continue }
+                $line = $pending[$index].GetAwaiter().GetResult()
+                if ($null -eq $line) { $pending[$index] = $null; continue }
+                if (-not $Quiet) { Write-Info $line }
+                $null = $output.AppendLine($line)
+                if ($output.Length -gt 65536) { $null = $output.Remove(0, $output.Length - 65536) }
+                $pending[$index] = $readers[$index].ReadLineAsync()
+            }
+            if ($null -ne $pending[0] -or $null -ne $pending[1]) { Start-Sleep -Milliseconds 10 }
+        }
+        $process.WaitForExit()
+        return @{ ExitCode = $process.ExitCode; Output = $output.ToString() }
+    } finally {
+        $process.Dispose()
+    }
 }
 
 if ($Development) {
@@ -74,20 +159,44 @@ function Invoke-ElevatedInstaller {
         return $null
     }
 
-    Write-Info 'Requesting administrator authorization to install the MSYS2 runtime dependencies.'
+    Set-InstallStage 'authorizing' '請完成系統授權提示，以便繼續準備工具。'
     $powershell = (Get-Process -Id $PID).Path
-    $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'))
+    $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass')
+    if ($Gui) { $arguments += '-NonInteractive' }
+    $arguments += @('-File', $PSCommandPath)
     if ($Development) { $arguments += '-Development' }
     if ($Gui) { $arguments += '-Gui' }
-    $arguments += @('-EngineDirectory', ('"' + $script:EngineDirectory + '"'))
-    if ($MarkerFile) { $arguments += @('-MarkerFile', ('"' + $MarkerFile + '"')) }
-    if ($ResultFile) { $arguments += @('-ResultFile', ('"' + $ResultFile + '"')) }
-    $arguments += @('-OriginalUserProfile', ('"' + $script:SetupUserProfile + '"'))
-    $arguments += @('-OriginalLocalAppData', ('"' + $script:SetupLocalAppData + '"'))
-    $arguments += @('-OriginalUserSid', ('"' + $script:SetupUserSid + '"'))
+    $arguments += @('-EngineDirectory', $script:EngineDirectory)
+    if ($MarkerFile) { $arguments += @('-MarkerFile', $MarkerFile) }
+    if ($ResultFile) { $arguments += @('-ResultFile', $ResultFile) }
+    if ($ProgressFile) { $arguments += @('-ProgressFile', $ProgressFile) }
+    if ($LogFile) { $arguments += @('-LogFile', $LogFile) }
+    $arguments += @('-OriginalUserProfile', $script:SetupUserProfile)
+    $arguments += @('-OriginalLocalAppData', $script:SetupLocalAppData)
+    $arguments += @('-OriginalUserSid', $script:SetupUserSid)
     $arguments += '-Elevated'
-    $process = Start-Process -FilePath $powershell -ArgumentList $arguments -Verb RunAs -Wait -PassThru
-    return $process.ExitCode
+    $startOptions = @{
+        FilePath = $powershell
+        ArgumentList = (($arguments | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' ')
+        Verb = 'RunAs'
+        Wait = $true
+        PassThru = $true
+    }
+    if ($Gui) { $startOptions.WindowStyle = 'Hidden' }
+    try {
+        $process = Start-Process @startOptions
+        try { return $process.ExitCode } finally { $process.Dispose() }
+    } catch {
+        $exception = $_.Exception
+        while ($exception) {
+            if ($exception -is [ComponentModel.Win32Exception] -and $exception.NativeErrorCode -eq 1223) {
+                $script:InstallFailure = '已取消系統授權。請按重新檢查並安裝後，再允許必要的授權。'
+                break
+            }
+            $exception = $exception.InnerException
+        }
+        throw
+    }
 }
 
 function Get-WinGetPath {
@@ -130,10 +239,10 @@ function Invoke-WinGetInstall([string]$PackageId, [string]$Version = '', [string
     if ($Version) { $arguments += @('--version', $Version) }
     if ($Override) { $arguments += @('--override', $Override) }
     if ($Scope) { $arguments += @('--scope', $Scope) }
-    & $winget @arguments
+    $result = Invoke-SetupProcess $winget $arguments
     $alreadyInstalledCodes = @(-1978335189, -1978335135)
-    if ($LASTEXITCODE -ne 0 -and $alreadyInstalledCodes -notcontains $LASTEXITCODE) {
-        Stop-Setup "WinGet failed to install $PackageId (exit code $LASTEXITCODE)."
+    if ($result.ExitCode -ne 0 -and $alreadyInstalledCodes -notcontains $result.ExitCode) {
+        Stop-Setup "WinGet failed to install $PackageId (exit code $($result.ExitCode))."
     }
 }
 
@@ -176,17 +285,52 @@ function Set-ProcessMsysEnvironment([string]$MsysRoot) {
     $env:Path = (($priority + @($env:Path -split ';')) | Where-Object { $_ } | Select-Object -Unique) -join ';'
 }
 
-function Invoke-Msys([string]$Command) {
-    $bash = Join-Path $script:MsysRoot 'usr\bin\bash.exe'
-    for ($attempt = 1; $attempt -le 3; $attempt++) {
-        & $bash -lc $Command
-        if ($LASTEXITCODE -eq 0) { return }
-        if ($attempt -lt 3) {
-            Write-Info "Retrying MSYS2 command (attempt $($attempt + 1)/3)..."
-            Start-Sleep -Seconds 2
-        }
+function Get-MsysProcessEnvironment {
+    $environment = @{
+        MSYSTEM = 'UCRT64'
+        MINGW_PREFIX = '/ucrt64'
+        MSYS2_PATH_TYPE = 'minimal'
+        CHERE_INVOKING = '1'
+        LANG = 'C'
+        LC_ALL = 'C'
+        PATH = (@((Join-Path $script:MsysRoot 'ucrt64\bin'), (Join-Path $script:MsysRoot 'usr\bin'), (Join-Path $env:SystemRoot 'System32'), $env:SystemRoot) -join ';')
     }
-    Stop-Setup "MSYS2 command failed with exit code ${LASTEXITCODE}: $Command"
+    foreach ($name in @('CC', 'CXX', 'CPP', 'CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS', 'CPATH', 'C_INCLUDE_PATH', 'CPLUS_INCLUDE_PATH', 'GCC_EXEC_PREFIX', 'COMPILER_PATH', 'LIBRARY_PATH', 'CMAKE_TOOLCHAIN_FILE', 'CMAKE_PREFIX_PATH', 'CMAKE_GENERATOR', 'CMAKE_GENERATOR_PLATFORM', 'CMAKE_GENERATOR_TOOLSET', 'PKG_CONFIG', 'PKG_CONFIG_PATH', 'PKG_CONFIG_LIBDIR', 'PKG_CONFIG_SYSROOT_DIR', 'INCLUDE', 'LIB')) {
+        $environment[$name] = $null
+    }
+    return $environment
+}
+
+function Invoke-Msys([string]$Command, [switch]$AllowFailure) {
+    $bash = Join-Path $script:MsysRoot 'usr\bin\bash.exe'
+    $Command = $Command.Replace("`r`n", "`n")
+    $result = Invoke-SetupProcess $bash @('--noprofile', '--norc', '-c', $Command) (Get-MsysProcessEnvironment)
+    if ($AllowFailure) { return $result }
+    if ($result.ExitCode -ne 0) {
+        Stop-Setup "MSYS2 command failed with exit code $($result.ExitCode): $Command"
+    }
+}
+
+function Update-Msys2 {
+    Set-InstallStage 'updating' '正在更新工具套件…'
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $result = Invoke-Msys 'pacman -Syu --noconfirm --noprogressbar' -AllowFailure
+        if ($result.Output.Contains('To complete this update all MSYS2 processes')) {
+            Write-Info 'MSYS2 core update requested a fresh shell; continuing the full update.'
+            continue
+        }
+        if ($result.ExitCode -ne 0) {
+            Stop-Setup "MSYS2 update failed with exit code $($result.ExitCode)." '工具套件更新失敗，請查看安裝記錄後重試。'
+        }
+        return
+    }
+    Stop-Setup 'MSYS2 core update still requires a restart after three shells.' '工具套件更新未完成，請查看安裝記錄後重試。'
+}
+
+function ConvertTo-MsysPath([string]$Path) {
+    $result = Invoke-SetupProcess (Join-Path $script:MsysRoot 'usr\bin\cygpath.exe') @('-u', $Path) (Get-MsysProcessEnvironment) -Quiet
+    if ($result.ExitCode -ne 0 -or -not $result.Output.Trim()) { Stop-Setup "Could not convert the MSYS2 path: $Path" }
+    return $result.Output.Trim()
 }
 
 function Add-UserPathEntry([string]$PathEntry) {
@@ -363,7 +507,7 @@ function Test-Runtime {
     }
     if ($missing.Count -gt 0) {
         Write-Info 'Missing runtime dependencies:'
-        $missing | ForEach-Object { Write-Host "  - $_" }
+        $missing | ForEach-Object { Write-Info "  - $_" }
         return $false
     }
     Write-Info 'Runtime dependencies are available.'
@@ -394,7 +538,7 @@ function Test-Development {
     if (-not (Test-WebView2Runtime)) { [void]$missing.Add('Microsoft Edge WebView2 Runtime') }
     if ($missing.Count -gt 0) {
         Write-Info 'Missing development tools:'
-        $missing | ForEach-Object { Write-Host "  - $_" }
+        $missing | ForEach-Object { Write-Info "  - $_" }
         return $false
     }
     Write-Info "Development tools are available (Rust stable, Bun 1.4.2, Node.js $NodeVersion)."
@@ -431,12 +575,13 @@ function Sync-MsysTrust {
             [IO.File]::WriteAllText($pacmanConf, $confContent, [Text.UTF8Encoding]::new($false))
         }
     }
-    Invoke-Msys 'rm -f /var/lib/pacman/db.lck && pacman-key --init && pacman-key --populate msys2'
+    Invoke-Msys 'pacman-key --init && pacman-key --populate msys2'
 }
 
 function Install-Msys2 {
     $script:MsysRoot = Get-MsysRoot
     if (-not $script:MsysRoot) {
+        Set-InstallStage 'msys2' '正在下載並安裝建置工具…'
         Write-Info 'Installing MSYS2 from the official WinGet package.'
         Invoke-WinGetInstall 'MSYS2.MSYS2'
         $script:MsysRoot = Get-MsysRoot
@@ -444,16 +589,79 @@ function Install-Msys2 {
     }
     Set-ProcessMsysEnvironment $script:MsysRoot
     Sync-MsysTrust
-    $bash = Join-Path $script:MsysRoot 'usr\bin\bash.exe'
     $env:NEO_SETUP_PACKAGES = $MsysPackages -join ' '
-    Write-Info 'Updating MSYS2 package databases and installing UCRT64 GStreamer and UxPlay build dependencies.'
-    Invoke-Msys 'pacman -Syu --noconfirm'
-    Invoke-Msys 'pacman -Syu --noconfirm'
-    Invoke-Msys 'pacman -S --needed --noconfirm $NEO_SETUP_PACKAGES'
-    Remove-Item Env:\NEO_SETUP_PACKAGES -ErrorAction SilentlyContinue
+    try {
+        Update-Msys2
+        Set-InstallStage 'packages' '正在安裝投影與編譯所需的套件…'
+        Invoke-Msys 'pacman -S --needed --noconfirm --noprogressbar $NEO_SETUP_PACKAGES'
+        Ensure-UcrtToolchain
+    } finally {
+        Remove-Item Env:\NEO_SETUP_PACKAGES -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-UcrtToolchain {
+    $probeRoot = Join-Path $env:TEMP ([Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $probeRoot -Force | Out-Null
+    try {
+        $cSource = @'
+#include <winsock2.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <time.h>
+#include <vadefs.h>
+int main(void) {
+    WSADATA data;
+    if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return 1;
+    WSACleanup();
+    puts("C toolchain ready");
+    return 0;
+}
+'@
+        $cppSource = @'
+#include <iostream>
+#include <vector>
+int main() {
+    std::vector<int> values(1, 42);
+    std::cout << values.at(0) << std::endl;
+    return values.at(0) == 42 ? 0 : 1;
+}
+'@
+        [IO.File]::WriteAllText((Join-Path $probeRoot 'probe.c'), $cSource, [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText((Join-Path $probeRoot 'probe.cpp'), $cppSource, [Text.UTF8Encoding]::new($false))
+        $env:NEO_SETUP_PROBE = ConvertTo-MsysPath $probeRoot
+        $command = @'
+for header in stdio.h stdlib.h stdint.h stddef.h time.h vadefs.h winsock2.h; do
+    if [ ! -s "/ucrt64/include/$header" ]; then printf 'Missing UCRT64 header: %s\n' "$header" >&2; exit 1; fi
+done
+/ucrt64/bin/gcc "$NEO_SETUP_PROBE/probe.c" -o "$NEO_SETUP_PROBE/probe-c.exe" -lws2_32 &&
+"$NEO_SETUP_PROBE/probe-c.exe" &&
+/ucrt64/bin/g++ "$NEO_SETUP_PROBE/probe.cpp" -o "$NEO_SETUP_PROBE/probe-cpp.exe" &&
+"$NEO_SETUP_PROBE/probe-cpp.exe"
+'@
+        $result = Invoke-Msys $command -AllowFailure
+        return $result.ExitCode -eq 0
+    } finally {
+        Remove-Item Env:\NEO_SETUP_PROBE -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $probeRoot -Recurse -Force
+    }
+}
+
+function Ensure-UcrtToolchain {
+    Set-InstallStage 'toolchain' '正在驗證編譯工具…'
+    if (Test-UcrtToolchain) { return }
+    Set-InstallStage 'repairing' '編譯工具不完整，正在修復…'
+    $null = Invoke-Msys 'pacman -Q mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-headers mingw-w64-ucrt-x86_64-crt mingw-w64-ucrt-x86_64-binutils; pacman -Qkk mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-headers mingw-w64-ucrt-x86_64-crt mingw-w64-ucrt-x86_64-binutils; /ucrt64/bin/gcc -v -E -x c /dev/null' -AllowFailure
+    Invoke-Msys 'pacman -S --noconfirm --noprogressbar mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-headers mingw-w64-ucrt-x86_64-crt mingw-w64-ucrt-x86_64-binutils'
+    if (-not (Test-UcrtToolchain)) {
+        Stop-Setup 'UCRT64 C/C++ compilation or linking still failed after reinstalling the toolchain.' '編譯工具修復後仍無法使用，請查看安裝記錄後重試。'
+    }
 }
 
 function Stage-MsysRuntime {
+    Set-InstallStage 'staging' '正在整理投影工具檔案…'
     $ucrtBin = Join-Path $script:MsysRoot 'ucrt64\bin'
     $pluginSource = Join-Path $script:MsysRoot 'ucrt64\lib\gstreamer-1.0'
     $pluginTarget = Join-Path $script:EngineDirectory 'lib\gstreamer-1.0'
@@ -504,16 +712,19 @@ function Install-UxPlay {
     $build = Join-Path $tempRoot 'build'
     New-Item -ItemType Directory -Path $source -Force | Out-Null
     try {
+        Set-InstallStage 'uxplay-download' '正在下載 AirPlay 投影工具…'
         Write-Info "Downloading pinned UxPlay $UxPlayVersion experimental source ($UxPlayCommit)."
         Invoke-WebRequest -Uri $UxPlayUrl -OutFile $archive -UseBasicParsing
         $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($actualHash -ne $UxPlaySha256) { Stop-Setup 'UxPlay source archive SHA-256 verification failed.' }
 
-        $env:NEO_SETUP_ARCHIVE = (& (Join-Path $script:MsysRoot 'usr\bin\cygpath.exe') -u $archive | Out-String).Trim()
-        $env:NEO_SETUP_SOURCE = (& (Join-Path $script:MsysRoot 'usr\bin\cygpath.exe') -u $source | Out-String).Trim()
-        $env:NEO_SETUP_BUILD = (& (Join-Path $script:MsysRoot 'usr\bin\cygpath.exe') -u $build | Out-String).Trim()
-        $env:NEO_SETUP_ENGINE = (& (Join-Path $script:MsysRoot 'usr\bin\cygpath.exe') -u $script:EngineDirectory | Out-String).Trim()
-        Invoke-Msys 'tar -xzf "$NEO_SETUP_ARCHIVE" -C "$NEO_SETUP_SOURCE" --strip-components=1 && cmake -S "$NEO_SETUP_SOURCE" -B "$NEO_SETUP_BUILD" -G Ninja -DCMAKE_INSTALL_PREFIX="$NEO_SETUP_ENGINE" && cmake --build "$NEO_SETUP_BUILD" --parallel'
+        $env:NEO_SETUP_ARCHIVE = ConvertTo-MsysPath $archive
+        $env:NEO_SETUP_SOURCE = ConvertTo-MsysPath $source
+        $env:NEO_SETUP_BUILD = ConvertTo-MsysPath $build
+        $env:NEO_SETUP_ENGINE = ConvertTo-MsysPath $script:EngineDirectory
+        Set-InstallStage 'uxplay-build' '正在編譯 AirPlay 投影工具…'
+        Invoke-Msys 'tar -xzf "$NEO_SETUP_ARCHIVE" -C "$NEO_SETUP_SOURCE" --strip-components=1 && /ucrt64/bin/cmake -S "$NEO_SETUP_SOURCE" -B "$NEO_SETUP_BUILD" -G Ninja -DCMAKE_C_COMPILER=/ucrt64/bin/gcc.exe -DCMAKE_CXX_COMPILER=/ucrt64/bin/g++.exe -DCMAKE_INSTALL_PREFIX="$NEO_SETUP_ENGINE" && /ucrt64/bin/cmake --build "$NEO_SETUP_BUILD" --parallel'
+        Set-InstallStage 'uxplay-install' '正在安裝 AirPlay 投影工具…'
         Invoke-Msys 'cmake --install "$NEO_SETUP_BUILD"'
     }
     finally {
@@ -540,6 +751,7 @@ function Install-Scrcpy {
     $extract = Join-Path $tempRoot 'extract'
     New-Item -ItemType Directory -Path $extract -Force | Out-Null
     try {
+        Set-InstallStage 'scrcpy-download' '正在下載 Android 投影工具…'
         Write-Info "Downloading official scrcpy $ScrcpyVersion Windows distribution."
         Invoke-WebRequest -Uri $ScrcpyWin64Url -OutFile $archive -UseBasicParsing
         $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -822,12 +1034,7 @@ function Complete-Install([int]$ExitCode) {
     if ($script:DelegatedToElevated) { return }
     try {
         if ($ResultFile) {
-            $resultDirectory = Split-Path -Parent $ResultFile
-            if ($resultDirectory) { New-Item -ItemType Directory -Path $resultDirectory -Force | Out-Null }
-            $temporaryResult = Join-Path $resultDirectory (([IO.Path]::GetFileName($ResultFile)) + ".tmp.$PID")
-            $resultJson = @{ pid = $PID; exitCode = $ExitCode } | ConvertTo-Json -Compress
-            [IO.File]::WriteAllText($temporaryResult, $resultJson, [Text.UTF8Encoding]::new($false))
-            Move-Item -LiteralPath $temporaryResult -Destination $ResultFile -Force
+            Write-InstallJson $ResultFile @{ pid = $PID; exitCode = $ExitCode; stage = $script:InstallStage; message = $script:InstallFailure }
         }
     } finally {
         if ($MarkerFile -and (Test-Path -LiteralPath $MarkerFile)) {
@@ -848,15 +1055,19 @@ if ($Check) {
 $script:DelegatedToElevated = $false
 $InstallExitCode = 0
 try {
+    if ($LogFile) {
+        $logDirectory = Split-Path -Parent $LogFile
+        if ($logDirectory) { New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null }
+    }
+    Write-InstallMarker
+    Set-InstallStage 'checking' '正在檢查投影工具…'
     Refresh-ProcessPath
     $runtimeReady = Test-Runtime
     $developmentReady = $true
     if ($Development) { $developmentReady = Test-Development }
     if ($runtimeReady -and $developmentReady) {
-        Write-InstallMarker
         Write-Info 'All requested dependencies are already available.'
     } else {
-        Write-InstallMarker
         if (Test-NeedsElevation $runtimeReady $developmentReady) {
             $elevatedExitCode = Invoke-ElevatedInstaller
             if ($null -ne $elevatedExitCode) {
@@ -875,15 +1086,19 @@ try {
         }
         if ($Development -and -not $developmentReady) { Install-DevelopmentTools }
         if ($script:MsysRoot) { Set-InstalledEnvironment $script:MsysRoot }
+        Set-InstallStage 'verifying' '正在驗證已安裝的投影工具…'
         $runtimeReady = Test-Runtime
         $developmentReady = $true
         if ($Development) { $developmentReady = Test-Development }
         if (-not $runtimeReady -or -not $developmentReady) { throw 'One or more requested dependencies remain unavailable after installation.' }
     }
+    Set-InstallStage 'ready' '投影工具已就緒。'
 }
 catch {
-    [Console]::Error.WriteLine($_.Exception.Message)
     $InstallExitCode = 1
+    $detail = $_.Exception.Message
+    if (-not $script:InstallFailure) { $script:InstallFailure = "$($script:InstallMessage.TrimEnd([char[]]'…。'))時發生錯誤，請查看安裝記錄。" }
+    Write-Info $detail
 }
 finally {
     try {

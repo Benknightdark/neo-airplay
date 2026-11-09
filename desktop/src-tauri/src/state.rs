@@ -353,11 +353,12 @@ impl EngineController {
             return inner.snapshot.clone();
         };
 
-        let mut command = Command::new(&executable);
+        let mut command = background_command(&executable);
         command
             .args(args)
             .env("PATH", resolved_path(&self.engine_dir))
             .current_dir(executable.parent().unwrap_or(&self.engine_dir))
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let plugin_directory = self.engine_dir.join("lib/gstreamer-1.0");
@@ -679,12 +680,13 @@ pub(crate) fn run_with_timeout_in_path(
     timeout: Duration,
     path: Option<&OsStr>,
 ) -> Result<Output, String> {
-    let mut command = Command::new(executable);
+    let mut command = background_command(executable);
     command.args(args);
     if let Some(path) = path {
         command.env("PATH", path);
     }
     let mut child = command
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -721,6 +723,19 @@ pub(crate) fn run_with_timeout_in_path(
         }
         thread::sleep(Duration::from_millis(40));
     }
+}
+
+pub(crate) fn background_command(executable: impl AsRef<OsStr>) -> Command {
+    let command = Command::new(executable);
+    #[cfg(target_os = "windows")]
+    let command = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut command = command;
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    };
+    command
 }
 
 fn read_pipe<R: Read + Send + 'static>(
@@ -1099,6 +1114,46 @@ mod tests {
     fn engine_test_child_process() {
         if std::env::var_os("NEO_AIRPLAY_HOLD_ENGINE_TEST_CHILD").is_some() {
             std::thread::sleep(Duration::from_secs(30));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn background_child_has_no_console_and_both_pipes_are_captured() {
+        let output = super::background_command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state::tests::background_console_probe",
+                "--nocapture",
+            ])
+            .env("NEO_AIRPLAY_TEST_BACKGROUND_CONSOLE", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stdout.len() >= 128 * 1024);
+        assert!(output.stderr.len() >= 128 * 1024);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn background_console_probe() {
+        if std::env::var_os("NEO_AIRPLAY_TEST_BACKGROUND_CONSOLE").is_none() {
+            return;
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetConsoleWindow() -> *mut std::ffi::c_void;
+        }
+        // This fixture runs in a child process created with CREATE_NO_WINDOW.
+        assert!(unsafe { GetConsoleWindow().is_null() });
+        use std::io::Write;
+        for _ in 0..16 {
+            std::io::stdout().write_all(&[b'o'; 8192]).unwrap();
+            std::io::stderr().write_all(&[b'e'; 8192]).unwrap();
         }
     }
 

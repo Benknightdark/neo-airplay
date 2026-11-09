@@ -16,7 +16,8 @@
 | `cd desktop && bun run tauri dev` | 啟動 Vite 與 Tauri 桌面開發環境。 |
 | `cd desktop && bun run --silent typecheck` | 執行 Vue/TypeScript 型別檢查。 |
 | `cd desktop && bun run --silent test:unit` | 執行 Vitest 前端單元測試。 |
-| `cd desktop && bun run --silent test:setup` | 使用隔離的假工具執行安裝腳本檢查及跳過安裝情境，不安裝系統套件；Windows 略過 Bash 平台案例。 |
+| `cd desktop && bun run --silent test:setup` | 使用隔離的假工具檢查安裝、更新接續、工具鏈修復與提權記錄，不安裝系統套件；Windows 使用 PowerShell，其他平台有 pwsh 時也執行 PowerShell 函式案例。 |
+| `pwsh -NoProfile -NonInteractive -File desktop/scripts/test-windows-setup.ps1 -InstallerPath desktop/scripts/install.ps1` | 從根目錄以假工具執行 Windows 安裝邏輯測試，不安裝系統套件；主控台檢查只在原生 Windows 執行。 |
 | `cd desktop && bun run --silent rust:fmt` | 執行 `cargo fmt --check`。 |
 | `cd desktop && bun run --silent rust:test` | 以所有 Rust features 執行單元測試，包含 WDIO Rust 插件編譯。 |
 | `cd desktop && bun run --silent rust:clippy` | 對所有 Rust targets/features 執行 Clippy，warning 視為錯誤。 |
