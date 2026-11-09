@@ -26,18 +26,16 @@ const shellChecksUnsupported = process.platform === "win32";
 
 test("Windows installer functions handle updates, repair, elevation and background output", (context) => {
   const powershell = process.platform === "win32" ? "powershell.exe" : "pwsh";
-  const available = spawnSync(powershell, ["-NoProfile", "-NonInteractive", "-Command", "exit 0"], { timeout: 10_000 });
-  if (available.error?.code === "ENOENT" && process.platform !== "win32") {
-    context.skip("PowerShell is unavailable on this host");
-    return;
-  }
-  assert.equal(available.status, 0, available.error?.message);
   const result = spawnSync(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", powershellTestsPath, "-InstallerPath", powershellInstallerPath], {
     encoding: "utf8",
     timeout: 90_000,
     windowsHide: true,
     maxBuffer: 2 * 1024 * 1024,
   });
+  if (result.error?.code === "ENOENT" && process.platform !== "win32") {
+    context.skip("PowerShell is unavailable on this host");
+    return;
+  }
   assert.equal(result.status, 0, `${result.error?.message ?? ""}\n${result.stderr ?? ""}\n${result.stdout ?? ""}`);
   assert.match(result.stdout, /installer scenarios passed/);
 });

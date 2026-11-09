@@ -65,16 +65,20 @@ try {
     }
 
     Invoke-Scenario 'Arguments are passed literally, including quotes and trailing slashes' {
-        $fixture = Join-Path $root 'argument fixture.ps1'
-        [IO.File]::WriteAllText($fixture, '[Console]::Out.WriteLine([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @($args) -Compress))))')
+        $node = (Get-Command node -ErrorAction Stop).Source
+        $echoArguments = "process.stdout.write(process.argv.slice(1).map(value => { const bytes = Buffer.from(value, 'utf8'); return bytes.length + ':' + bytes.toString('base64'); }).join('.'))"
         $values = @('a b', 'a"b', 'C:\folder with spaces\', '', '$(must-stay-literal)', '中文路徑')
-        $result = Invoke-SetupProcess $powershell (@('-NoProfile', '-NonInteractive', '-File', $fixture) + $values) -Quiet
-        Assert-True ($result.ExitCode -eq 0) 'Argument fixture failed'
-        $actual = @([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($result.Output.Trim())) | ConvertFrom-Json)
-        Assert-True ($actual.Count -eq $values.Count) 'Argument count changed'
-        for ($index = 0; $index -lt $values.Count; $index++) {
-            Assert-True ($actual[$index] -ceq $values[$index]) "Argument $index changed"
-        }
+        $result = Invoke-SetupProcess $node (@('-e', $echoArguments) + $values) -Quiet
+        Assert-True ($result.ExitCode -eq 0) 'Native argument fixture failed'
+        $expectedArguments = @(
+            foreach ($value in $values) {
+                $bytes = [Text.Encoding]::UTF8.GetBytes($value)
+                '{0}:{1}' -f $bytes.Length, [Convert]::ToBase64String($bytes)
+            }
+        )
+        $expected = $expectedArguments -join '.'
+        $actual = $result.Output.Trim()
+        Assert-True ($actual -ceq $expected) "Arguments changed (expected $expected; actual $actual)"
     }
 
     if ($env:OS -eq 'Windows_NT') {
