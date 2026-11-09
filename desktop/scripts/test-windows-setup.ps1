@@ -65,15 +65,19 @@ try {
     }
 
     Invoke-Scenario 'Arguments are passed literally, including quotes and trailing slashes' {
-        $fixture = Join-Path $root 'argument fixture.ps1'
-        [IO.File]::WriteAllText($fixture, '[Console]::Out.WriteLine([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @($args) -Compress))))')
+        $node = (Get-Command node -ErrorAction Stop).Source
+        $echoArguments = "process.stdout.write(Buffer.from(JSON.stringify(process.argv.slice(1)), 'utf8').toString('base64'))"
         $values = @('a b', 'a"b', 'C:\folder with spaces\', '', '$(must-stay-literal)', '中文路徑')
-        $result = Invoke-SetupProcess $powershell (@('-NoProfile', '-NonInteractive', '-File', $fixture) + $values) -Quiet
-        Assert-True ($result.ExitCode -eq 0) 'Argument fixture failed'
-        $actual = @([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($result.Output.Trim())) | ConvertFrom-Json)
-        Assert-True ($actual.Count -eq $values.Count) 'Argument count changed'
+        $result = Invoke-SetupProcess $node (@('-e', $echoArguments) + $values) -Quiet
+        Assert-True ($result.ExitCode -eq 0) 'Native argument fixture failed'
+        $actualJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($result.Output.Trim()))
+        $actual = @(ConvertFrom-Json -InputObject $actualJson)
+        $expectedJson = ConvertTo-Json -InputObject $values -Compress
+        Assert-True ($actual.Count -eq $values.Count) "Argument count changed (expected $expectedJson; actual $actualJson)"
         for ($index = 0; $index -lt $values.Count; $index++) {
-            Assert-True ($actual[$index] -ceq $values[$index]) "Argument $index changed"
+            $expectedValue = ConvertTo-Json -InputObject $values[$index] -Compress
+            $actualValue = ConvertTo-Json -InputObject $actual[$index] -Compress
+            Assert-True ($actual[$index] -ceq $values[$index]) "Argument $index changed (expected $expectedValue; actual $actualValue)"
         }
     }
 

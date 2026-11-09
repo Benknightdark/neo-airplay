@@ -1,4 +1,4 @@
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
 use crate::state::background_command;
 use crate::state::{installer_path, run_with_timeout_in_path};
 use serde::{Deserialize, Serialize};
