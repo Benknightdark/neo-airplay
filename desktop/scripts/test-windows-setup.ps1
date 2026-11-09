@@ -66,19 +66,19 @@ try {
 
     Invoke-Scenario 'Arguments are passed literally, including quotes and trailing slashes' {
         $node = (Get-Command node -ErrorAction Stop).Source
-        $echoArguments = "process.stdout.write(Buffer.from(JSON.stringify(process.argv.slice(1)), 'utf8').toString('base64'))"
+        $echoArguments = "process.stdout.write(process.argv.slice(1).map(value => { const bytes = Buffer.from(value, 'utf8'); return bytes.length + ':' + bytes.toString('base64'); }).join('.'))"
         $values = @('a b', 'a"b', 'C:\folder with spaces\', '', '$(must-stay-literal)', '中文路徑')
         $result = Invoke-SetupProcess $node (@('-e', $echoArguments) + $values) -Quiet
         Assert-True ($result.ExitCode -eq 0) 'Native argument fixture failed'
-        $actualJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($result.Output.Trim()))
-        $actual = @(ConvertFrom-Json -InputObject $actualJson)
-        $expectedJson = ConvertTo-Json -InputObject $values -Compress
-        Assert-True ($actual.Count -eq $values.Count) "Argument count changed (expected $expectedJson; actual $actualJson)"
-        for ($index = 0; $index -lt $values.Count; $index++) {
-            $expectedValue = ConvertTo-Json -InputObject $values[$index] -Compress
-            $actualValue = ConvertTo-Json -InputObject $actual[$index] -Compress
-            Assert-True ($actual[$index] -ceq $values[$index]) "Argument $index changed (expected $expectedValue; actual $actualValue)"
-        }
+        $expectedArguments = @(
+            foreach ($value in $values) {
+                $bytes = [Text.Encoding]::UTF8.GetBytes($value)
+                '{0}:{1}' -f $bytes.Length, [Convert]::ToBase64String($bytes)
+            }
+        )
+        $expected = $expectedArguments -join '.'
+        $actual = $result.Output.Trim()
+        Assert-True ($actual -ceq $expected) "Arguments changed (expected $expected; actual $actual)"
     }
 
     if ($env:OS -eq 'Windows_NT') {
