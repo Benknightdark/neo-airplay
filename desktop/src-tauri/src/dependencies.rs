@@ -1,3 +1,5 @@
+#[cfg(not(target_os = "macos"))]
+use crate::state::background_command;
 use crate::state::{installer_path, run_with_timeout_in_path};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
@@ -22,6 +24,7 @@ const INSTALL_MARKER: &str = "install.pid";
 const INSTALL_RESULT: &str = "install-result.json";
 const INSTALL_LAUNCH: &str = "install-launch.json";
 const INSTALL_LOG: &str = "install.log";
+const INSTALL_PROGRESS: &str = "install-progress.json";
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -164,6 +167,34 @@ impl SetupOutcome {
 struct InstallResult {
     pid: u32,
     exit_code: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+impl InstallResult {
+    fn detail(&self) -> String {
+        let mut detail = format!("安裝程序結束代碼 {}", self.exit_code);
+        if let Some(stage) = &self.stage {
+            detail.push_str(&format!("（{}）", stage_label(stage)));
+        }
+        if let Some(message) = self
+            .message
+            .as_deref()
+            .filter(|message| !message.is_empty())
+        {
+            detail.push_str(&format!("：{message}"));
+        }
+        detail
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct InstallProgress {
+    pid: u32,
+    stage: String,
+    message: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -207,6 +238,7 @@ fn run_setup(
                     Some(pid),
                     None,
                     previous_attempt.clone(),
+                    snapshot,
                 )?;
             }
             ProcessPresence::Dead if !result_path.exists() => {
@@ -221,6 +253,7 @@ fn run_setup(
                         Some(pid),
                         None,
                         Some(record.clone()),
+                        snapshot,
                     )?;
                 } else {
                     // A just-finished script removes its marker before atomically writing the result.
@@ -234,19 +267,38 @@ fn run_setup(
             match process_presence(pid, engine_dir) {
                 ProcessPresence::Alive | ProcessPresence::Unknown => {
                     publish_installing(snapshot, "正在等待已執行的工具安裝程序完成。");
-                    let _ =
-                        wait_for_install(engine_dir, setup_dir, None, None, Some(record.clone()))?;
+                    let _ = wait_for_install(
+                        engine_dir,
+                        setup_dir,
+                        None,
+                        None,
+                        Some(record.clone()),
+                        snapshot,
+                    )?;
                 }
                 ProcessPresence::Dead if launch_is_recent(record) => {
                     publish_installing(snapshot, "正在確認工具安裝程序是否已結束。");
-                    let _ =
-                        wait_for_install(engine_dir, setup_dir, None, None, Some(record.clone()))?;
+                    let _ = wait_for_install(
+                        engine_dir,
+                        setup_dir,
+                        None,
+                        None,
+                        Some(record.clone()),
+                        snapshot,
+                    )?;
                 }
                 ProcessPresence::Dead => {}
             }
         } else if launch_is_recent(record) {
             publish_installing(snapshot, "正在確認工具安裝程序是否已啟動。");
-            let _ = wait_for_install(engine_dir, setup_dir, None, None, Some(record.clone()))?;
+            let _ = wait_for_install(
+                engine_dir,
+                setup_dir,
+                None,
+                None,
+                Some(record.clone()),
+                snapshot,
+            )?;
         }
     }
 
@@ -270,7 +322,7 @@ fn run_setup(
         &format!("{missing_message} 正在背景安裝，請完成系統授權提示。"),
     );
 
-    let result = install_dependencies(setup_dir, engine_dir);
+    let result = install_dependencies(setup_dir, engine_dir, snapshot);
     let final_check = check_runtime(engine_dir, setup_dir)?;
     if final_check.is_ready() {
         remove_if_exists(&launch_path);
@@ -278,7 +330,7 @@ fn run_setup(
     }
 
     let install_detail = match result {
-        Ok(result) => format!("安裝程序結束代碼 {}", result.exit_code),
+        Ok(result) => result.detail(),
         Err(error) => format!("安裝程序未完成：{error}"),
     };
     let message = format!(
@@ -356,13 +408,18 @@ fn check_runtime(engine_dir: &Path, setup_dir: &Path) -> Result<RuntimeCheck, St
     Ok(RuntimeCheck { missing })
 }
 
-fn install_dependencies(setup_dir: &Path, engine_dir: &Path) -> Result<InstallResult, String> {
+fn install_dependencies(
+    setup_dir: &Path,
+    engine_dir: &Path,
+    snapshot: &Arc<Mutex<DependencySnapshot>>,
+) -> Result<InstallResult, String> {
     let log_path = setup_dir.join(INSTALL_LOG);
     let marker_path = setup_dir.join(INSTALL_MARKER);
     let result_path = setup_dir.join(INSTALL_RESULT);
     let launch_path = setup_dir.join(INSTALL_LAUNCH);
     remove_if_exists(&marker_path);
     remove_if_exists(&result_path);
+    remove_if_exists(&setup_dir.join(INSTALL_PROGRESS));
     let launch = LaunchRecord {
         owner_pid: std::process::id(),
         worker_pid: None,
@@ -408,7 +465,7 @@ fn install_dependencies(setup_dir: &Path, engine_dir: &Path) -> Result<InstallRe
                 let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
                 append_log(&log_path, &format!("Terminal 安裝啟動失敗：{detail}"));
                 // Terminal may have accepted the command before osascript failed.
-                let _ = wait_for_install(engine_dir, setup_dir, None, None, Some(launch));
+                let _ = wait_for_install(engine_dir, setup_dir, None, None, Some(launch), snapshot);
                 return read_install_result(&result_path)?.ok_or_else(|| {
                     if detail.is_empty() {
                         format!("無法啟動 Terminal 安裝程序，結束代碼 {}", output.status)
@@ -419,13 +476,14 @@ fn install_dependencies(setup_dir: &Path, engine_dir: &Path) -> Result<InstallRe
             }
             Err(error) => {
                 append_log(&log_path, &format!("Terminal 安裝啟動結果不明：{error}"));
-                let result = wait_for_install(engine_dir, setup_dir, None, None, Some(launch));
+                let result =
+                    wait_for_install(engine_dir, setup_dir, None, None, Some(launch), snapshot);
                 return result?.ok_or_else(|| {
                     "Terminal 啟動結果不明；為避免重複安裝，請確認終端狀態後再重試。".into()
                 });
             }
         }
-        wait_for_install(engine_dir, setup_dir, None, None, Some(launch))?
+        wait_for_install(engine_dir, setup_dir, None, None, Some(launch), snapshot)?
             .ok_or_else(|| "Terminal 安裝程序沒有回報完成結果。".into())
     }
 
@@ -456,15 +514,28 @@ fn install_dependencies(setup_dir: &Path, engine_dir: &Path) -> Result<InstallRe
         let mut launch = launch;
         launch.worker_pid = Some(child.id());
         write_json_atomic(&launch_path, &launch)?;
-        wait_for_install(engine_dir, setup_dir, None, Some(child), Some(launch))?
-            .ok_or_else(|| "安裝程序沒有回報完成結果。".into())
+        wait_for_install(
+            engine_dir,
+            setup_dir,
+            None,
+            Some(child),
+            Some(launch),
+            snapshot,
+        )?
+        .ok_or_else(|| "安裝程序沒有回報完成結果。".into())
     }
 }
 
 #[cfg(target_os = "windows")]
 fn installer_command(script: &Path, engine_dir: &Path, marker: &Path, result: &Path) -> Command {
-    let mut command = Command::new("powershell.exe");
-    command.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
+    let mut command = background_command("powershell.exe");
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+    ]);
     command
         .arg(script)
         .arg("-Gui")
@@ -473,7 +544,11 @@ fn installer_command(script: &Path, engine_dir: &Path, marker: &Path, result: &P
         .arg("-MarkerFile")
         .arg(marker)
         .arg("-ResultFile")
-        .arg(result);
+        .arg(result)
+        .arg("-ProgressFile")
+        .arg(result.with_file_name(INSTALL_PROGRESS))
+        .arg("-LogFile")
+        .arg(result.with_file_name(INSTALL_LOG));
     command
 }
 
@@ -497,6 +572,7 @@ fn wait_for_install(
     mut expected_pid: Option<u32>,
     mut child: Option<Child>,
     launch: Option<LaunchRecord>,
+    snapshot: &Arc<Mutex<DependencySnapshot>>,
 ) -> Result<Option<InstallResult>, String> {
     let marker_path = setup_dir.join(INSTALL_MARKER);
     let result_path = setup_dir.join(INSTALL_RESULT);
@@ -504,28 +580,15 @@ fn wait_for_install(
         .as_ref()
         .map(|record| record.started_at.saturating_add(LAUNCH_GRACE.as_secs()));
     let mut child_finished_at = None;
+    let mut child_exit = None;
+    let mut last_progress = None;
     let mut unknown_process_since: Option<Instant> = None;
 
     loop {
-        if let Some(result) = read_install_result(&result_path)? {
-            remove_if_exists(&marker_path);
-            return Ok(Some(result));
+        if let Ok(Some(progress)) = read_install_progress(&setup_dir.join(INSTALL_PROGRESS)) {
+            publish_installing(snapshot, &progress.message);
+            last_progress = Some(progress);
         }
-
-        let mut unknown_pid = None;
-        if let Some(pid) = read_install_marker(&marker_path)? {
-            expected_pid = Some(pid);
-            match process_presence(pid, engine_dir) {
-                ProcessPresence::Alive => {
-                    unknown_process_since = None;
-                    thread::sleep(POLL_INTERVAL);
-                    continue;
-                }
-                ProcessPresence::Unknown => unknown_pid = Some(pid),
-                ProcessPresence::Dead => {}
-            }
-        }
-
         let mut child_alive = false;
         let child_finished = if let Some(process) = child.as_mut() {
             match process.try_wait() {
@@ -533,7 +596,10 @@ fn wait_for_install(
                     child_alive = true;
                     false
                 }
-                Ok(Some(_)) => true,
+                Ok(Some(status)) => {
+                    child_exit = Some(status);
+                    true
+                }
                 Err(error) => {
                     let _ = process.kill();
                     let _ = process.wait();
@@ -546,6 +612,40 @@ fn wait_for_install(
         if child_finished {
             child = None;
             child_finished_at.get_or_insert_with(Instant::now);
+        }
+        if let Some(result) = read_install_result(&result_path)? {
+            remove_if_exists(&marker_path);
+            if let Some(mut process) = child.take() {
+                // An elevated installer may finish before its waiting launcher exits.
+                // Reap it without blocking the completed installation's UI state.
+                if let Err(error) = thread::Builder::new()
+                    .name("neo-airplay-installer-reaper".into())
+                    .spawn(move || {
+                        let _ = process.wait();
+                    })
+                {
+                    append_log(
+                        &setup_dir.join(INSTALL_LOG),
+                        &format!("無法啟動安裝程序回收工作：{error}"),
+                    );
+                }
+            }
+            return Ok(Some(result));
+        }
+        // Reap a directly owned child before probing its PID. On Unix a zombie still
+        // answers kill -0 until try_wait collects its exit status.
+        let mut unknown_pid = None;
+        if let Some(pid) = read_install_marker(&marker_path)? {
+            expected_pid = Some(pid);
+            match process_presence(pid, engine_dir) {
+                ProcessPresence::Alive => {
+                    unknown_process_since = None;
+                    thread::sleep(POLL_INTERVAL);
+                    continue;
+                }
+                ProcessPresence::Unknown => unknown_pid = Some(pid),
+                ProcessPresence::Dead => {}
+            }
         }
         if let Some(record) = launch.as_ref() {
             if let Some(pid) = record.worker_pid {
@@ -586,13 +686,63 @@ fn wait_for_install(
 
         let grace_started = child_finished_at.get_or_insert_with(Instant::now);
         if grace_started.elapsed() >= RESULT_GRACE {
-            let detail = expected_pid
-                .map(|pid| format!("安裝程序 {pid} 已結束，但沒有寫入完成結果。"))
-                .unwrap_or_else(|| "安裝程序未寫入完成結果。".into());
+            let detail =
+                interrupted_install_detail(expected_pid, child_exit, last_progress.as_ref());
             append_log(&setup_dir.join(INSTALL_LOG), &detail);
-            return Ok(None);
+            remove_if_exists(&marker_path);
+            remove_if_exists(&setup_dir.join(INSTALL_LAUNCH));
+            return Err(detail);
         }
         thread::sleep(POLL_INTERVAL);
+    }
+}
+
+fn read_install_progress(path: &Path) -> Result<Option<InstallProgress>, String> {
+    match fs::read(path) {
+        Ok(contents) => {
+            let progress: InstallProgress = serde_json::from_slice(&contents)
+                .map_err(|error| format!("安裝階段記錄格式無效：{error}"))?;
+            Ok((progress.pid != 0 && !progress.message.trim().is_empty()).then_some(progress))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("無法讀取安裝階段記錄：{error}")),
+    }
+}
+
+fn interrupted_install_detail(
+    pid: Option<u32>,
+    status: Option<std::process::ExitStatus>,
+    progress: Option<&InstallProgress>,
+) -> String {
+    let mut detail = pid
+        .map(|pid| format!("安裝程序 {pid} 已結束，但沒有寫入完成結果。"))
+        .unwrap_or_else(|| "安裝程序未寫入完成結果。".into());
+    if let Some(status) = status {
+        detail.push_str(&format!("程序退出狀態：{status}。"));
+    }
+    if let Some(progress) = progress {
+        detail.push_str(&format!("最後階段：{}。", stage_label(&progress.stage)));
+    }
+    detail
+}
+
+fn stage_label(stage: &str) -> &str {
+    match stage {
+        "checking" => "檢查投影工具",
+        "authorizing" => "系統授權",
+        "msys2" => "安裝建置工具",
+        "updating" => "更新工具套件",
+        "packages" => "安裝工具套件",
+        "toolchain" => "驗證編譯工具",
+        "repairing" => "修復編譯工具",
+        "uxplay-download" => "下載 AirPlay 工具",
+        "uxplay-build" => "編譯 AirPlay 工具",
+        "uxplay-install" => "安裝 AirPlay 工具",
+        "scrcpy-download" => "下載 Android 工具",
+        "staging" => "整理工具檔案",
+        "verifying" => "驗證投影工具",
+        "ready" => "準備完成",
+        _ => "工具安裝",
     }
 }
 
@@ -812,7 +962,122 @@ mod tests {
         let parsed: InstallResult = serde_json::from_str(r#"{"pid":123,"exitCode":7}"#).unwrap();
         assert_eq!(parsed.pid, 123);
         assert_eq!(parsed.exit_code, 7);
+        assert!(parsed.stage.is_none());
+        assert!(parsed.message.is_none());
         assert!(serde_json::from_str::<InstallResult>(r#"{"pid":123}"#).is_err());
+    }
+
+    #[test]
+    fn install_failure_includes_the_stage_and_summary() {
+        let result: InstallResult = serde_json::from_str(
+            r#"{"pid":123,"exitCode":1,"stage":"repairing","message":"編譯工具修復後仍無法使用。"}"#,
+        ).unwrap();
+        assert!(result.detail().contains("修復編譯工具"));
+        assert!(result.detail().contains("編譯工具修復後仍無法使用。"));
+    }
+
+    #[test]
+    fn installation_reports_progress_and_a_completion_result() {
+        let (directory, snapshot, child) = install_test_process("complete");
+        let result = wait_for_install(
+            Path::new("unused"),
+            &directory,
+            Some(child.id()),
+            Some(child),
+            None,
+            &snapshot,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(snapshot.lock().unwrap().message, "正在編譯投影工具…");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn interrupted_installation_preserves_exit_status_and_allows_retry() {
+        let (directory, snapshot, child) = install_test_process("interrupt");
+        fs::write(directory.join(INSTALL_LAUNCH), b"attempt in progress").unwrap();
+        let detail = wait_for_install(
+            Path::new("unused"),
+            &directory,
+            Some(child.id()),
+            Some(child),
+            None,
+            &snapshot,
+        )
+        .unwrap_err();
+        assert!(detail.contains("11"));
+        assert!(detail.contains("編譯 AirPlay 工具"));
+        assert!(!directory.join(INSTALL_MARKER).exists());
+        assert!(!directory.join(INSTALL_LAUNCH).exists());
+        assert!(!directory.join(INSTALL_RESULT).exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn install_test_child_process() {
+        let Ok(mode) = std::env::var("NEO_AIRPLAY_TEST_INSTALL_MODE") else {
+            return;
+        };
+        let directory = PathBuf::from(std::env::var_os("NEO_AIRPLAY_TEST_INSTALL_DIR").unwrap());
+        fs::write(
+            directory.join(INSTALL_MARKER),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        write_json_atomic(
+            &directory.join(INSTALL_PROGRESS),
+            &InstallProgress {
+                pid: std::process::id(),
+                stage: "uxplay-build".into(),
+                message: "正在編譯投影工具…".into(),
+            },
+        )
+        .unwrap();
+        if mode == "interrupt" {
+            std::process::exit(11);
+        }
+        thread::sleep(Duration::from_millis(100));
+        write_json_atomic(
+            &directory.join(INSTALL_RESULT),
+            &InstallResult {
+                pid: std::process::id(),
+                exit_code: 0,
+                stage: None,
+                message: None,
+            },
+        )
+        .unwrap();
+    }
+
+    fn install_test_process(mode: &str) -> (PathBuf, Arc<Mutex<DependencySnapshot>>, Child) {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("neo-install-test-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let snapshot = Arc::new(Mutex::new(DependencySnapshot {
+            status: "installing".into(),
+            message: "waiting".into(),
+            missing: Vec::new(),
+            log_path: String::new(),
+        }));
+        let child = crate::state::background_command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "dependencies::tests::install_test_child_process",
+                "--nocapture",
+            ])
+            .env("NEO_AIRPLAY_TEST_INSTALL_MODE", mode)
+            .env("NEO_AIRPLAY_TEST_INSTALL_DIR", &directory)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        (directory, snapshot, child)
     }
 
     #[test]
