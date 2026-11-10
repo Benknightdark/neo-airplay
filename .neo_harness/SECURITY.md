@@ -16,6 +16,7 @@
 - Android 投影只可使用剛由 ADB 列舉且狀態為 `device` 的裝置序號。App 不執行 ADB 配對或 TCP/IP 連線命令。
 - 引擎執行檔只會從 Debug 的 `desktop/engine/` 或 Release 使用者資料目錄的 `engine/` 尋找，不會從系統 `PATH`、MSYS2 或 WinGet 目錄回退。這些目錄是程式碼執行信任邊界；使用者應只安裝或放置可信任來源的 UxPlay、ADB、scrcpy 及相依檔案。
 - UxPlay 提供區域網路 AirPlay 接收服務。Linux 準備腳本會安裝並啟用 Avahi。macOS 使用系統 Bonjour；Windows 固定採用 UxPlay 官方 1.74 實驗來源的內建 mDNS。OS 防火牆與區域網路可達性仍需由使用者允許。
+- macOS 就緒判定以固定參數啟動 `/usr/bin/dns-sd -B _airplay._tcp local.`，只在輸出中找到設定的服務名稱後回報就緒；停止、逾時或 App 結束時會清理該瀏覽程序。GStreamer registry 存放於 Tauri app cache，並與 UxPlay 共用同一路徑。
 - App 會將 UxPlay、scrcpy 與 ADB 的輸出寫入本機診斷記錄。Android 投影啟動資訊可能含裝置型號與序號；分享記錄前應先檢查內容。
 
 ## 使用者資料與 E2E

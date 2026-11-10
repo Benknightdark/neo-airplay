@@ -15,6 +15,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(90);
+#[cfg(target_os = "macos")]
+const GSTREAMER_REGISTRY_WARMUP_TIMEOUT: Duration = Duration::from_secs(100);
 const PROCESS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const RESULT_GRACE: Duration = Duration::from_secs(5);
 const LAUNCH_GRACE: Duration = Duration::from_secs(120);
@@ -39,12 +41,18 @@ pub struct DependencyManager {
     snapshot: Arc<Mutex<DependencySnapshot>>,
     worker_active: Arc<AtomicBool>,
     engine_dir: PathBuf,
+    gstreamer_registry_path: PathBuf,
     setup_dir: PathBuf,
     enabled: bool,
 }
 
 impl DependencyManager {
-    pub fn new(engine_dir: PathBuf, config_dir: &Path, enabled: bool) -> Self {
+    pub fn new(
+        engine_dir: PathBuf,
+        gstreamer_registry_path: PathBuf,
+        config_dir: &Path,
+        enabled: bool,
+    ) -> Self {
         let setup_dir = config_dir.join("setup");
         Self {
             snapshot: Arc::new(Mutex::new(DependencySnapshot {
@@ -60,6 +68,7 @@ impl DependencyManager {
             })),
             worker_active: Arc::new(AtomicBool::new(false)),
             engine_dir,
+            gstreamer_registry_path,
             setup_dir,
             enabled,
         }
@@ -98,12 +107,13 @@ impl DependencyManager {
         let shared = Arc::clone(&self.snapshot);
         let worker_active = Arc::clone(&self.worker_active);
         let engine_dir = self.engine_dir.clone();
+        let gstreamer_registry_path = self.gstreamer_registry_path.clone();
         let setup_dir = self.setup_dir.clone();
         let spawned = thread::Builder::new()
             .name("neo-airplay-dependency-setup".into())
             .spawn(move || {
                 let run = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    run_setup(&engine_dir, &setup_dir, &shared)
+                    run_setup(&engine_dir, &gstreamer_registry_path, &setup_dir, &shared)
                 }));
                 let outcome = match run {
                     Ok(Ok(outcome)) => outcome,
@@ -218,6 +228,7 @@ impl RuntimeCheck {
 
 fn run_setup(
     engine_dir: &Path,
+    gstreamer_registry_path: &Path,
     setup_dir: &Path,
     snapshot: &Arc<Mutex<DependencySnapshot>>,
 ) -> Result<SetupOutcome, String> {
@@ -307,6 +318,7 @@ fn run_setup(
     stage_installer(setup_dir)?;
     let runtime = check_runtime(engine_dir, setup_dir)?;
     if runtime.is_ready() {
+        warm_gstreamer_registry(engine_dir, gstreamer_registry_path, setup_dir, snapshot);
         remove_if_exists(&launch_path);
         return Ok(SetupOutcome::ready());
     }
@@ -325,6 +337,7 @@ fn run_setup(
     let result = install_dependencies(setup_dir, engine_dir, snapshot);
     let final_check = check_runtime(engine_dir, setup_dir)?;
     if final_check.is_ready() {
+        warm_gstreamer_registry(engine_dir, gstreamer_registry_path, setup_dir, snapshot);
         remove_if_exists(&launch_path);
         return Ok(SetupOutcome::ready());
     }
@@ -339,6 +352,70 @@ fn run_setup(
     );
     append_log(&setup_dir.join(INSTALL_LOG), &message);
     Ok(SetupOutcome::failed(message, final_check.missing))
+}
+
+fn warm_gstreamer_registry(
+    engine_dir: &Path,
+    registry_path: &Path,
+    setup_dir: &Path,
+    snapshot: &Arc<Mutex<DependencySnapshot>>,
+) {
+    #[cfg(target_os = "macos")]
+    {
+        if fs::metadata(registry_path).is_ok_and(|metadata| metadata.len() > 0) {
+            return;
+        }
+
+        publish_installing(snapshot, "正在準備 GStreamer 快取…");
+        let started_at = Instant::now();
+        let script = setup_dir.join("install.sh");
+        let args = vec![
+            script.to_string_lossy().into_owned(),
+            "--warm-gstreamer-registry".into(),
+            "--engine-dir".into(),
+            engine_dir.to_string_lossy().into_owned(),
+            "--registry-path".into(),
+            registry_path.to_string_lossy().into_owned(),
+        ];
+        let output = run_with_timeout_in_path(
+            Path::new("/bin/bash"),
+            &args,
+            GSTREAMER_REGISTRY_WARMUP_TIMEOUT,
+            Some(installer_path(engine_dir).as_os_str()),
+        );
+        match output {
+            Ok(output) => {
+                let output_text = combined_output(&output);
+                if !output_text.trim().is_empty() {
+                    append_log(&setup_dir.join(INSTALL_LOG), output_text.trim());
+                }
+                if !output.status.success() {
+                    append_log(
+                        &setup_dir.join(INSTALL_LOG),
+                        &format!(
+                            "GStreamer registry 預熱失敗，仍繼續啟動：{}",
+                            first_useful_line(&output_text)
+                                .unwrap_or_else(|| format!("結束代碼 {}", output.status))
+                        ),
+                    );
+                }
+            }
+            Err(error) => append_log(
+                &setup_dir.join(INSTALL_LOG),
+                &format!("GStreamer registry 預熱失敗，仍繼續啟動：{error}"),
+            ),
+        }
+        append_log(
+            &setup_dir.join(INSTALL_LOG),
+            &format!(
+                "GStreamer registry 預熱耗時 {} 毫秒。",
+                started_at.elapsed().as_millis()
+            ),
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    let _ = (engine_dir, registry_path, setup_dir, snapshot);
 }
 
 fn stage_installer(setup_dir: &Path) -> Result<PathBuf, String> {
@@ -933,14 +1010,24 @@ mod tests {
 
     #[test]
     fn disabled_session_does_not_start_installation() {
-        let manager = DependencyManager::new(PathBuf::from("unused"), Path::new("unused"), false);
+        let manager = DependencyManager::new(
+            PathBuf::from("unused"),
+            PathBuf::from("unused-cache"),
+            Path::new("unused"),
+            false,
+        );
         assert_eq!(manager.start().unwrap().status, "disabled");
         assert_eq!(manager.snapshot().unwrap().status, "disabled");
     }
 
     #[test]
     fn concurrent_start_requests_share_one_background_worker() {
-        let manager = DependencyManager::new(PathBuf::from("unused"), Path::new("unused"), true);
+        let manager = DependencyManager::new(
+            PathBuf::from("unused"),
+            PathBuf::from("unused-cache"),
+            Path::new("unused"),
+            true,
+        );
         manager.worker_active.store(true, Ordering::Release);
         assert_eq!(manager.start().unwrap().status, "checking");
         assert!(manager.worker_active.load(Ordering::Acquire));

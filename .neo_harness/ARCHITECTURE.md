@@ -38,6 +38,7 @@
 - AirPlay 與 Android 分別由 `EngineController` 持有程序及狀態；停止或故障其中一個不會呼叫另一個引擎。
 - 單一執行個體插件先於其他插件註冊；第二次啟動會喚醒並顯示既有主視窗，不會建立另一組引擎控制器。
 - AirPlay 啟動 UxPlay，使用獨立引數傳遞接收器名稱、全螢幕與 allowlist 中的 renderer。Android 只接受目前 ADB 清單中狀態為 `device` 的序號，並以 `--serial` 獨立引數啟動 scrcpy。
+- macOS 將 GStreamer registry 放在 Tauri app cache；依賴檢查成功後以 UxPlay 相同的外掛、scanner、函式庫及 registry 路徑執行一次最佳努力預熱。GStreamer 子程序的函式庫路徑使用 engine `lib`、Homebrew prefix `lib` 及繼承路徑，不枚舉所有 Homebrew formula。AirPlay 只有在系統 `dns-sd` 找到設定的 `_airplay._tcp` 名稱後才回報 `Running`。
 - App 只從目前模式使用的 `engine/` 目錄尋找 UxPlay、ADB、scrcpy 與 GStreamer 檢查工具；Debug 指向 `desktop/engine/`，Release 指向使用者資料目錄的 `engine/`。執行程序的 `PATH` 只包含該目錄及其 Android 子目錄。Unix 執行檔必須有執行權限。
 - App 會讀取子程序標準輸出和錯誤並寫入診斷記錄。Android ADB 列舉逾時為 15 秒，兩條輸出管道由背景讀取器同步排空。
 - 關閉主視窗會隱藏視窗並保留程式；系統匣選單可顯示視窗或結束程式。結束時 Rust state 會停止仍持有的 UxPlay/scrcpy 子程序。

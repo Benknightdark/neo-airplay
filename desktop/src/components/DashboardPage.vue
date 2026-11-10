@@ -19,6 +19,21 @@ const emit = defineEmits<{
 const selectedSerial = ref("");
 const availableDevices = computed(() => props.dashboard.devices.filter((device) => device.status === "ready"));
 const selectedDevice = computed(() => availableDevices.value.find((device) => device.serial === selectedSerial.value));
+const airplayActive = computed(() => ["starting", "running", "stopping"].includes(props.dashboard.airplay.status));
+const airplayButtonLabel = computed(() => {
+  if (props.dashboard.airplay.status === "starting") return "取消啟動";
+  if (props.dashboard.airplay.status === "stopping") return "正在停止…";
+  return "停止接收";
+});
+const airplayHint = computed(() => {
+  if (props.dashboard.airplay.status === "starting") {
+    return "正在等待 Bonjour 廣播；接收器出現在 iPhone 清單後即可連線。";
+  }
+  if (props.dashboard.airplay.status === "running") {
+    return `請從 iPhone 的螢幕鏡像清單選擇「${props.dashboard.settings.receiverName}」。`;
+  }
+  return "需要安裝 UxPlay 與影音執行環境";
+});
 const unavailableDeviceHint = computed(() => {
   const devices = props.dashboard.devices;
 
@@ -44,9 +59,9 @@ watch(availableDevices, (devices) => {
 }, { immediate: true });
 
 function toggleAirplay(): void {
-  if (props.dashboard.airplay.status === "running") {
+  if (props.dashboard.airplay.status === "running" || props.dashboard.airplay.status === "starting") {
     emit("stop-airplay");
-  } else {
+  } else if (props.dashboard.airplay.status !== "stopping") {
     emit("start-airplay");
   }
 }
@@ -90,15 +105,15 @@ function toggleAndroid(): void {
         </div>
         <div class="card-actions">
           <button
-            v-if="dashboard.airplay.status !== 'running'"
+            v-if="!airplayActive"
             class="button-primary"
             type="button"
             :disabled="busy"
             data-testid="airplay-start"
             @click="toggleAirplay"
           >開始接收</button>
-          <button v-else class="button-secondary" type="button" :disabled="busy" data-testid="airplay-stop" @click="toggleAirplay">停止接收</button>
-          <span class="action-hint">需要安裝 UxPlay 與影音執行環境</span>
+          <button v-else class="button-secondary" type="button" :disabled="busy || dashboard.airplay.status === 'stopping'" data-testid="airplay-stop" @click="toggleAirplay">{{ airplayButtonLabel }}</button>
+          <span class="action-hint">{{ airplayHint }}</span>
         </div>
       </article>
 
