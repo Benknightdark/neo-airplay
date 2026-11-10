@@ -311,10 +311,37 @@ function Invoke-Msys([string]$Command, [switch]$AllowFailure) {
     }
 }
 
+function Invoke-MsysPacmanWithLockRetry([string]$Command, [switch]$AllowFailure) {
+    $retryLimit = 24
+    $retryDelaySeconds = 5
+    for ($attempt = 0; $attempt -le $retryLimit; $attempt++) {
+        $result = Invoke-Msys $Command -AllowFailure
+        if ($result.ExitCode -eq 0) {
+            if ($AllowFailure) { return $result }
+            return
+        }
+
+        if ($result.Output -notmatch '(?i)unable to lock database') {
+            if ($AllowFailure) { return $result }
+            Stop-Setup "MSYS2 command failed with exit code $($result.ExitCode): $Command"
+        }
+
+        if ($attempt -eq $retryLimit) {
+            Stop-Setup "MSYS2 package database lock remained after $($retryLimit * $retryDelaySeconds) seconds: $Command" 'MSYS2 套件資料庫鎖定逾時，請確認沒有其他 MSYS2 套件作業，查看安裝記錄後再試。'
+        }
+
+        if ($attempt -eq 0) {
+            Set-InstallStage 'waiting-for-package-lock' 'MSYS2 套件資料庫目前忙碌，等待後重試…'
+            Write-Info "MSYS2 package database lock detected; retrying every $retryDelaySeconds seconds for up to $($retryLimit * $retryDelaySeconds) seconds."
+        }
+        Start-Sleep -Seconds $retryDelaySeconds
+    }
+}
+
 function Update-Msys2 {
     Set-InstallStage 'updating' '正在更新工具套件…'
     for ($attempt = 1; $attempt -le 3; $attempt++) {
-        $result = Invoke-Msys 'pacman -Syu --noconfirm --noprogressbar' -AllowFailure
+        $result = Invoke-MsysPacmanWithLockRetry 'pacman -Syu --noconfirm --noprogressbar' -AllowFailure
         if ($result.Output.Contains('To complete this update all MSYS2 processes')) {
             Write-Info 'MSYS2 core update requested a fresh shell; continuing the full update.'
             continue
@@ -593,7 +620,7 @@ function Install-Msys2 {
     try {
         Update-Msys2
         Set-InstallStage 'packages' '正在安裝投影與編譯所需的套件…'
-        Invoke-Msys 'pacman -S --needed --noconfirm --noprogressbar $NEO_SETUP_PACKAGES'
+        Invoke-MsysPacmanWithLockRetry 'pacman -S --needed --noconfirm --noprogressbar $NEO_SETUP_PACKAGES'
         Ensure-UcrtToolchain
     } finally {
         Remove-Item Env:\NEO_SETUP_PACKAGES -ErrorAction SilentlyContinue
@@ -654,7 +681,7 @@ function Ensure-UcrtToolchain {
     if (Test-UcrtToolchain) { return }
     Set-InstallStage 'repairing' '編譯工具不完整，正在修復…'
     $null = Invoke-Msys 'pacman -Q mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-headers mingw-w64-ucrt-x86_64-crt mingw-w64-ucrt-x86_64-binutils; pacman -Qkk mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-headers mingw-w64-ucrt-x86_64-crt mingw-w64-ucrt-x86_64-binutils; /ucrt64/bin/gcc -v -E -x c /dev/null' -AllowFailure
-    Invoke-Msys 'pacman -S --noconfirm --noprogressbar mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-headers mingw-w64-ucrt-x86_64-crt mingw-w64-ucrt-x86_64-binutils'
+    Invoke-MsysPacmanWithLockRetry 'pacman -S --noconfirm --noprogressbar mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-headers mingw-w64-ucrt-x86_64-crt mingw-w64-ucrt-x86_64-binutils'
     if (-not (Test-UcrtToolchain)) {
         Stop-Setup 'UCRT64 C/C++ compilation or linking still failed after reinstalling the toolchain.' '編譯工具修復後仍無法使用，請查看安裝記錄後重試。'
     }

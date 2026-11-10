@@ -110,6 +110,52 @@ try {
         Assert-True ($script:commands.Count -eq 2) 'Core update must continue exactly once'
     }
 
+    Invoke-Scenario 'A database lock clears and the update retries' {
+        $script:commands = [Collections.Generic.List[string]]::new()
+        $script:sleeps = 0
+        function Invoke-Msys([string]$Command, [switch]$AllowFailure) {
+            $script:commands.Add($Command)
+            if ($script:commands.Count -eq 1) { return @{ ExitCode = 1; Output = 'error: failed to synchronize all databases (unable to lock database)' } }
+            return @{ ExitCode = 0; Output = 'Full system upgrade complete' }
+        }
+        function Start-Sleep([int]$Seconds, [int]$Milliseconds) {
+            if ($Seconds -gt 0) { $script:sleeps += $Seconds }
+        }
+        Update-Msys2
+        Assert-True ($script:commands.Count -eq 2 -and $script:sleeps -eq 5) 'A temporary database lock must wait and retry once'
+    }
+
+    Invoke-Scenario 'A database lock clears during package installation' {
+        $script:commands = [Collections.Generic.List[string]]::new()
+        $script:sleeps = 0
+        function Invoke-Msys([string]$Command, [switch]$AllowFailure) {
+            $script:commands.Add($Command)
+            if ($script:commands.Count -eq 1) { return @{ ExitCode = 1; Output = 'error: failed to synchronize all databases (unable to lock database)' } }
+            return @{ ExitCode = 0; Output = 'Packages installed' }
+        }
+        function Start-Sleep([int]$Seconds, [int]$Milliseconds) {
+            if ($Seconds -gt 0) { $script:sleeps += $Seconds }
+        }
+        Invoke-MsysPacmanWithLockRetry 'pacman -S --needed package'
+        Assert-True ($script:commands.Count -eq 2 -and $script:sleeps -eq 5) 'Package installation must use the database lock retry'
+    }
+
+    Invoke-Scenario 'A persistent database lock stops after the bounded wait' {
+        $script:calls = 0
+        $script:sleeps = 0
+        function Invoke-Msys([string]$Command, [switch]$AllowFailure) {
+            $script:calls++
+            return @{ ExitCode = 1; Output = 'error: failed to synchronize all databases (unable to lock database)' }
+        }
+        function Start-Sleep([int]$Seconds, [int]$Milliseconds) {
+            if ($Seconds -gt 0) { $script:sleeps += $Seconds }
+        }
+        $failed = $false
+        try { Update-Msys2 } catch { $failed = $true }
+        Assert-True ($failed -and $script:calls -eq 25 -and $script:sleeps -eq 120) 'A persistent database lock must stop after two minutes'
+        Assert-True ($script:InstallFailure.Contains('資料庫鎖定逾時')) 'The lock timeout summary was not preserved'
+    }
+
     Invoke-Scenario 'A genuine update failure stops without retry' {
         $script:calls = 0
         function Invoke-Msys([string]$Command, [switch]$AllowFailure) {
