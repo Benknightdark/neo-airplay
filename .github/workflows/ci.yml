@@ -84,11 +84,19 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - name: Check whether this is still the latest develop commit
+      - name: Check out pushed commit and inspect changed files
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Check latest head and pending promotion changes
         id: current-head
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+
           current_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/develop" --jq '.object.sha')"
           if [[ "$current_sha" == "$GITHUB_SHA" ]]; then
             echo "is_current=true" >> "$GITHUB_OUTPUT"
@@ -97,8 +105,17 @@ jobs:
             echo "A newer develop commit exists; its CI run will handle the PR."
           fi
 
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          merge_base="$(git merge-base origin/main "$GITHUB_SHA")"
+          mapfile -d '' changed_paths < <(git diff --name-only -z "$merge_base" "$GITHUB_SHA")
+          is_version_only="$(node desktop/scripts/project-version.mjs is-version-only "${changed_paths[@]}")"
+          echo "is_version_only=$is_version_only" >> "$GITHUB_OUTPUT"
+          if [[ "$is_version_only" == "true" ]]; then
+            echo "develop differs from main only in project version files; CI verification still ran, and no promotion PR is needed."
+          fi
+
       - name: Create a PR if one is not already open
-        if: steps.current-head.outputs.is_current == 'true'
+        if: steps.current-head.outputs.is_current == 'true' && steps.current-head.outputs.is_version_only != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

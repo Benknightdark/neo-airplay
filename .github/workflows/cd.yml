@@ -20,67 +20,111 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.value }}
+      release_ready: ${{ steps.version.outputs.release_ready }}
+      already_published: ${{ steps.version.outputs.already_published }}
+      correction_required: ${{ steps.version.outputs.correction_required }}
+      correction_version: ${{ steps.version.outputs.correction_version }}
     steps:
       - name: Check out merged commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
 
-      - name: Validate version and release tag
+      - name: Validate version and decide release action
         id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
-          package_version="$(jq -r '.version' desktop/package.json)"
-          tauri_version="$(jq -r '.version' desktop/src-tauri/tauri.conf.json)"
-          cargo_version="$(awk '
-            /^\[package\]/ { in_package = 1; next }
-            /^\[/ { if (in_package) exit }
-            in_package && /^version[[:space:]]*=/ {
-              gsub(/["[:space:]]/, "", $0)
-              sub(/^version=/, "")
-              print
-              exit
-            }
-          ' desktop/src-tauri/Cargo.toml)"
-          lock_version="$(awk '
-            /^\[\[package\]\]$/ { in_package = 1; package_name = ""; next }
-            /^\[/ { in_package = 0 }
-            in_package && /^name = / {
-              package_name = $3
-              gsub(/"/, "", package_name)
-            }
-            in_package && package_name == "neo-airplay" && /^version = / {
-              version = $3
-              gsub(/"/, "", version)
-              print version
-              exit
-            }
-          ' desktop/src-tauri/Cargo.lock)"
-
-          if [[ -z "$package_version" || "$package_version" != "$tauri_version" || \
-                "$package_version" != "$cargo_version" || "$package_version" != "$lock_version" ]]; then
-            echo "::error::Project versions must match in package.json, tauri.conf.json, Cargo.toml, and Cargo.lock."
-            exit 1
-          fi
-
-          if [[ ! "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::Expected a stable X.Y.Z release version, found '$package_version'."
-            exit 1
-          fi
-
-          tag="v${package_version}"
+          version="$(node desktop/scripts/project-version.mjs read)"
           git fetch --tags --force
-          if git show-ref --verify --quiet "refs/tags/$tag"; then
-            echo "::error::Release tag $tag already exists. Bump the project version in this PR."
-            exit 1
+          tag="v${version}"
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+          echo "correction_required=false" >> "$GITHUB_OUTPUT"
+          echo "correction_version=" >> "$GITHUB_OUTPUT"
+          echo "already_published=false" >> "$GITHUB_OUTPUT"
+
+          if ! git show-ref --verify --quiet "refs/tags/$tag"; then
+            echo "release_ready=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-          echo "value=$package_version" >> "$GITHUB_OUTPUT"
+          tag_target="$(git rev-parse "refs/tags/${tag}^{commit}")"
+          if [[ "$tag_target" != "$GITHUB_SHA" ]]; then
+            correction_version="$(node desktop/scripts/project-version.mjs next-patch "$version")"
+            echo "correction_required=true" >> "$GITHUB_OUTPUT"
+            echo "correction_version=$correction_version" >> "$GITHUB_OUTPUT"
+            echo "release_ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Release tag $tag already points to $tag_target. A version correction PR for $correction_version will be opened against main."
+            exit 0
+          fi
+
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "already_published=true" >> "$GITHUB_OUTPUT"
+            echo "release_ready=false" >> "$GITHUB_OUTPUT"
+            echo "Release $tag already exists for this commit; skipping duplicate publication."
+          else
+            # A prior run may have created the tag before it failed to publish the release.
+            echo "release_ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  correct-release-version:
+    name: Open release version correction PR
+    needs: prepare-release
+    if: needs.prepare-release.outputs.correction_required == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out merged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Update version and open or refresh PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CORRECTION_VERSION: ${{ needs.prepare-release.outputs.correction_version }}
+          RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          branch="automation/release-version-${CORRECTION_VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch" "$GITHUB_SHA"
+          node desktop/scripts/project-version.mjs set "$CORRECTION_VERSION"
+          git add desktop/package.json desktop/src-tauri/tauri.conf.json \
+            desktop/src-tauri/Cargo.toml desktop/src-tauri/Cargo.lock
+          git commit -m "chore(release): bump version to ${CORRECTION_VERSION}"
+
+          remote_sha="$(git ls-remote --heads origin "refs/heads/$branch" | awk 'NR == 1 {print $1}')"
+          if [[ -n "$remote_sha" ]]; then
+            git push --force-with-lease="refs/heads/$branch:$remote_sha" origin "HEAD:refs/heads/$branch"
+          else
+            git push --force-with-lease="refs/heads/$branch:" origin "HEAD:refs/heads/$branch"
+          fi
+
+          pr_number="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$GITHUB_REPOSITORY_OWNER:$branch" \
+            --base main --state open --json number --jq '.[0].number // empty')"
+          title="Bump release version to ${CORRECTION_VERSION}"
+          body="Release tag v${RELEASE_VERSION} already points to another commit. This PR advances the four project version sources to ${CORRECTION_VERSION}; CD will publish after this PR is merged."
+          if [[ -n "$pr_number" ]]; then
+            gh pr edit "$pr_number" --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+            echo "Updated release version correction PR #$pr_number."
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" \
+              --title "$title" --body "$body"
+          fi
 
   build-installers:
     name: Build installers (${{ matrix.os }})
     needs: prepare-release
+    if: needs.prepare-release.outputs.release_ready == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -149,7 +193,7 @@ jobs:
     needs:
       - prepare-release
       - build-installers
-    if: github.event.pull_request.merged == true
+    if: needs.prepare-release.outputs.release_ready == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -190,3 +234,67 @@ jobs:
             --target "$RELEASE_TARGET" \
             --title "Neo AirPlay $tag" \
             --generate-notes
+
+  prepare-next-version:
+    name: Open next version PR for develop
+    needs:
+      - prepare-release
+      - publish-release
+    if: >-
+      always() && needs.prepare-release.result == 'success' &&
+      needs.prepare-release.outputs.correction_required != 'true' &&
+      (needs.prepare-release.outputs.already_published == 'true' || needs.publish-release.result == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out develop
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Open or refresh next patch version PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          git fetch --tags --force origin
+          develop_version="$(node desktop/scripts/project-version.mjs read)"
+          comparison="$(node desktop/scripts/project-version.mjs compare "$develop_version" "$RELEASE_VERSION")"
+          if [[ "$comparison" == "1" ]]; then
+            echo "develop already has version $develop_version, ahead of released version $RELEASE_VERSION; no bump is needed."
+            exit 0
+          fi
+
+          next_version="$(node desktop/scripts/project-version.mjs next-patch "$RELEASE_VERSION")"
+          branch="automation/next-version"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch" origin/develop
+          node desktop/scripts/project-version.mjs set "$next_version"
+          git add desktop/package.json desktop/src-tauri/tauri.conf.json \
+            desktop/src-tauri/Cargo.toml desktop/src-tauri/Cargo.lock
+          git commit -m "chore(release): bump version to ${next_version}"
+
+          remote_sha="$(git ls-remote --heads origin "refs/heads/$branch" | awk 'NR == 1 {print $1}')"
+          if [[ -n "$remote_sha" ]]; then
+            git push --force-with-lease="refs/heads/$branch:$remote_sha" origin "HEAD:refs/heads/$branch"
+          else
+            git push --force-with-lease="refs/heads/$branch:" origin "HEAD:refs/heads/$branch"
+          fi
+
+          pr_number="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$GITHUB_REPOSITORY_OWNER:$branch" \
+            --base develop --state open --json number --jq '.[0].number // empty')"
+          title="Bump develop version to ${next_version}"
+          body="Release v${RELEASE_VERSION} succeeded. This PR advances the four project version sources to the next unused patch version, ${next_version}."
+          if [[ -n "$pr_number" ]]; then
+            gh pr edit "$pr_number" --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+            echo "Updated next version PR #$pr_number."
+          else
+            gh pr create --repo "$GITHUB_REPOSITORY" --base develop --head "$branch" \
+              --title "$title" --body "$body"
+          fi

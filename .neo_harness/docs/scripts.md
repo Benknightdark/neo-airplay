@@ -17,11 +17,12 @@
 | `cd desktop && bun run --silent typecheck` | 執行 Vue/TypeScript 型別檢查。 |
 | `cd desktop && bun run --silent test:unit` | 執行 Vitest 前端單元測試。 |
 | `cd desktop && bun run --silent test:setup` | 使用隔離的假工具檢查安裝、更新接續、工具鏈修復與提權記錄，不安裝系統套件；Windows 使用 PowerShell，其他平台有 pwsh 時也執行 PowerShell 函式案例。 |
+| `cd desktop && bun run --silent test:version` | 驗證穩定版本格式、四處版本一致、patch 遞增與 tag 避讓、Cargo.lock 專案項目更新及純版本變更判斷。 |
 | `pwsh -NoProfile -NonInteractive -File desktop/scripts/test-windows-setup.ps1 -InstallerPath desktop/scripts/install.ps1` | 從根目錄以假工具執行 Windows 安裝邏輯測試，不安裝系統套件；主控台檢查只在原生 Windows 執行。 |
 | `cd desktop && bun run --silent rust:fmt` | 執行 `cargo fmt --check`。 |
 | `cd desktop && bun run --silent rust:test` | 以所有 Rust features 執行單元測試，包含 WDIO Rust 插件編譯。 |
 | `cd desktop && bun run --silent rust:clippy` | 對所有 Rust targets/features 執行 Clippy，warning 視為錯誤。 |
-| `cd desktop && bun run --silent verify` | 執行 Vue/TypeScript 檢查、前端與安裝流程測試、Rust 格式與單元測試、Clippy 及前端建置。 |
+| `cd desktop && bun run --silent verify` | 執行 Vue/TypeScript 檢查、前端、安裝流程與版本工具測試、Rust 格式與單元測試、Clippy 及前端建置。 |
 | `pwsh .neo_harness/verify.ps1` | 從專案根目錄執行統一驗證入口。 |
 | `cd desktop && bun run --silent build` | 執行型別檢查並建立 Vite production 前端。 |
 | `cd desktop && bun run --silent preview` | 預覽已建置的 Vite production 前端。 |
