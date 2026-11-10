@@ -49,3 +49,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop\scripts\launch.ps1
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop\scripts\launch.ps1 bundle
 ```
+
+## 執行測試
+
+分別安裝應用程式與測試專案的套件：
+
+```sh
+(cd desktop && bun install --frozen-lockfile --silent)
+(cd desktop-test && bun install --frozen-lockfile --silent)
+```
+
+執行前端與後端單元測試：
+
+```sh
+cd desktop-test && bun run --silent verify
+```
+
+建置並執行桌面端對端測試：
+
+```sh
+cd desktop-test && bun run --silent test:e2e:ci
+```

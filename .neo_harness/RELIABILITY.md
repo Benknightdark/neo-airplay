@@ -40,8 +40,8 @@
 
 ## 驗證界線
 
-- `.neo_harness/verify.ps1` 執行前端型別與單元測試、Rust 格式與單元測試、Clippy 及前端建置。
-- `bun run test:e2e:ci` 啟動實際桌面程式，驗證第二次啟動、總覽/設定/診斷頁導覽、設定儲存，以及兩個假引擎程序的並行啟停；測試使用隔離 profile，不啟動真實引擎。Linux headless 執行時需使用 `dbus-run-session -- xvfb-run --auto-servernum bun run --silent test:e2e:ci`。
+- `.neo_harness/verify.ps1` 執行前端型別與單元測試、Rust 格式與後端單元測試、Clippy 及前端建置；前端和後端單元測試由根目錄 `desktop-test` 執行。
+- `cd desktop-test && bun run --silent test:e2e:ci` 啟動實際桌面程式，驗證第二次啟動、總覽/設定/診斷頁導覽、設定儲存，以及兩個假引擎程序的並行啟停；測試使用隔離 profile，不啟動真實引擎。Linux headless 執行時需使用 `cd desktop-test && dbus-run-session -- xvfb-run --auto-servernum bun run --silent test:e2e:ci`。
 - CI 在 `develop` 更新時，於 Windows、macOS、Linux runner 執行驗證和桌面 E2E；`develop` 相對 `main` 的完整差異只有版本檔時仍完成驗證，但不建立 promotion PR。其他差異三平台全數成功且仍是最新 develop commit 時才建立或沿用 `develop` 到 `main` 的 PR。
 - CD 僅在 PR 合併到 `main` 後執行，於三平台建立 Tauri 設定中的安裝格式；任一平台建置或上傳失敗時不建立 Release。四處版本必須一致且為穩定 `X.Y.Z`；tag 指向其他提交時，CD 建立下一個未使用 patch 版本的 `main` 修正 PR 並略過建置，修正 PR 合併後才發布。Release 成功後建立或更新下一個未使用 patch 版本的 `develop` PR。
 - CD 使用 `GITHUB_TOKEN` 推送自動化分支及建立 PR；GitHub repository 的 Actions 設定必須允許 workflow 建立 pull request。相關 jobs 僅授予 `contents: write` 與 `pull-requests: write`。

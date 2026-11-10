@@ -1,8 +1,11 @@
 import { chmodSync, copyFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const targetDir = resolve(process.env.CARGO_TARGET_DIR ?? "src-tauri/target");
+const testDirectory = dirname(fileURLToPath(import.meta.url));
+const desktopDirectory = resolve(testDirectory, "../../desktop");
+const targetDir = resolve(desktopDirectory, process.env.CARGO_TARGET_DIR ?? "src-tauri/target");
 const appBinaryPath = join(targetDir, "debug", `neo-airplay${process.platform === "win32" ? ".exe" : ""}`);
 const profileOwner = process.env.NEO_AIRPLAY_WDIO_PROFILE === undefined;
 const profilePath =
@@ -28,7 +31,7 @@ if (profileOwner) {
 export const config = {
   runner: "local",
   logLevel: "error",
-  specs: ["./e2e/**/*.spec.ts"],
+  specs: [join(testDirectory, "**/*.spec.ts")],
   maxInstances: 1,
   capabilities: [{
     browserName: "tauri",

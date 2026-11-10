@@ -106,11 +106,6 @@ select, .text-input { outline: none; }
 .picker-row select:focus, .text-input:focus { border-color: #91a6f4; box-shadow: 0 0 0 3px #4267e812; }
 .field-hint { margin: 6px 0 0; color: #9aa3b0; font-size: 10px; line-height: 1.5; }
 .android-actions { margin-top: 13px; }
-.summary-strip { display: flex; align-items: center; gap: 30px; margin-top: 20px; padding: 16px 19px; border: 1px solid #e5e9ef; border-radius: 11px; background: #fff; }
-.summary-item { display: grid; grid-template-columns: 19px auto; align-items: center; column-gap: 9px; color: #8691a0; font-size: 10px; }
-.summary-item strong { grid-column: 2; margin-top: 3px; color: #3d485c; font-size: 11px; font-weight: 600; }
-.summary-icon { grid-row: span 2; color: #8095e9; font-size: 17px; }
-.summary-divider { width: 1px; height: 29px; background: #e8ebf0; }
 
 .settings-layout { max-width: 900px; }
 .settings-layout .section-intro { margin-bottom: 21px; }
@@ -161,5 +156,4 @@ select, .text-input { outline: none; }
   .sidebar-footer { padding: 12px 0 0; }
   .main-panel { width: calc(100% - 72px); margin-left: 72px; padding-right: 20px; padding-left: 20px; }
   .welcome-row, .section-intro { align-items: flex-start; flex-direction: column; }
-  .summary-strip { flex-wrap: wrap; gap: 16px; }
 }

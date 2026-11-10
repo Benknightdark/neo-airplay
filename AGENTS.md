@@ -9,7 +9,7 @@ Neo AirPlay 是以 Tauri 2、Rust、Vue 3、TypeScript 與 Bun 建立的跨平�
 - [已驗證命令清單](.neo_harness/docs/scripts.md)
 - [安全與信任邊界](.neo_harness/SECURITY.md)
 - [程序生命週期與復原](.neo_harness/RELIABILITY.md)
-- Vue 應用程式位於 `desktop/src/`，Rust 命令與服務位於 `desktop/src-tauri/`，單元及 E2E 測試位於 `desktop/src/` 與 `desktop/e2e/`。
+- Vue 應用程式位於 `desktop/src/`，Rust 命令與服務位於 `desktop/src-tauri/`，前端／後端單元測試及桌面 E2E 位於根目錄 `desktop-test/`。
 
 ## 工作規則
 

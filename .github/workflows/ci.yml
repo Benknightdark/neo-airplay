@@ -62,6 +62,10 @@ jobs:
         working-directory: desktop
         run: bun install --frozen-lockfile --silent
 
+      - name: Install desktop test dependencies
+        working-directory: desktop-test
+        run: bun install --frozen-lockfile --silent
+
       - name: Run unit checks and build checks
         working-directory: desktop
         run: bun run --silent verify

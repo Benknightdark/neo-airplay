@@ -22,7 +22,7 @@
 ## 使用者資料與 E2E
 
 - 設定及每日記錄存放在 Tauri path resolver 提供的使用者應用程式設定與記錄目錄。設定以 JSON 儲存，記錄以 JSONL 附加寫入。
-- WDIO 測試以 `--e2e-profile` 將設定與記錄導向作業系統暫存目錄。此參數只在 Rust `wdio` feature 編譯時啟用；測試能力只由 `tauri.e2e.conf.json` 及 WDIO build script 啟用。
+- WDIO 測試以 `--e2e-profile` 將設定與記錄導向作業系統暫存目錄。此參數只在 Rust `wdio` feature 編譯時啟用；測試能力只由 `desktop-test/e2e/tauri.e2e.conf.json` 及 WDIO build script 啟用。
 - 自動化測試不操作實際投影引擎，不會連接 Android 裝置，也不會更改登入啟動設定。
 
 ## 第三方元件與發佈

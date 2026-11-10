@@ -26,9 +26,10 @@
 | 模型 | 定義跨 IPC 傳輸的序列化結構、設定預設值及 renderer 選項。 | `desktop/src-tauri/src/models.rs` |
 | 執行狀態、程序與記錄 | 管理設定 JSON、每日 JSONL、ADB 裝置清單及兩個分離的子程序。 | `desktop/src-tauri/src/state.rs` |
 | 依賴準備 | 共用平台安裝腳本、背景檢查與安裝、介面進度與重試。 | `desktop/src-tauri/src/dependencies.rs`、`desktop/scripts/install.sh`、`desktop/scripts/install.ps1`、`desktop/src/components/DependencyPanel.vue` |
-| 前端單元測試 | 驗證狀態標籤、時間格式、總覽操作、設定表單與錯誤狀態。 | `desktop/src/lib/status.test.ts`、`desktop/src/components/DashboardPage.test.ts`、`desktop/src/components/SettingsPage.test.ts`、`desktop/src/composables/useAppState.test.ts` |
-| Rust 單元測試 | 驗證設定正規化、ADB 輸出解析、UxPlay 參數、renderer allowlist 與引擎程序生命週期。 | `desktop/src-tauri/src/models.rs`、`desktop/src-tauri/src/state.rs` |
-| 桌面 E2E | 以 WebdriverIO 啟動實際 Tauri 程式，檢查第二次啟動、頁面導覽、設定儲存及兩個假引擎程序的並行啟停。 | `desktop/e2e/main.spec.ts`、`desktop/e2e/fake-engine.rs`、`desktop/wdio.conf.ts` |
+| 獨立測試專案 | 使用獨立 Bun 與 Cargo 專案執行前端、後端單元測試及桌面 E2E；測試直接載入桌面程式原始碼。 | `desktop-test/package.json`、`desktop-test/backend/Cargo.toml` |
+| 前端單元測試 | 驗證狀態標籤、時間格式、總覽操作、設定表單與錯誤狀態。 | `desktop-test/frontend/` |
+| Rust 單元測試 | 驗證設定正規化、ADB 輸出解析、UxPlay 參數、renderer allowlist 與引擎程序生命週期；測試 crate 以路徑載入桌面後端模組。 | `desktop-test/backend/`、`desktop/src-tauri/src/` |
+| 桌面 E2E | 以 WebdriverIO 啟動實際 Tauri 程式，檢查第二次啟動、頁面導覽、設定儲存及兩個假引擎程序的並行啟停。 | `desktop-test/e2e/` |
 | 正式應用程式啟動檢查 | `smoke:bundle` 可啟動目前平台正式 bundle 執行檔 8 秒，使用隔離的暫存使用者資料目錄；CI/CD 工作流程不執行此檢查。 | `desktop/scripts/smoke-bundle.mjs` |
 | CI | `develop` 有新提交時，於原生 Windows、macOS、Linux runner 執行驗證及桌面 E2E；三平台成功後，`develop` 相對 `main` 的差異不只版本檔時才建立或沿用 promotion PR。 | `.github/workflows/ci.yml` |
 | CD 與安裝套件 | PR 合併到 `main` 後檢查四處一致的穩定版本及 tag；tag 撞號時先建立版本修正 PR，否則於三平台建置安裝檔並發布 GitHub Release，成功後建立下一個 patch 版本的 `develop` PR。 | `.github/workflows/cd.yml`、`desktop/scripts/project-version.mjs` |
@@ -49,8 +50,8 @@
 
 ## 驗證界線
 
-- `.neo_harness/verify.ps1` 呼叫 `bun run verify`，執行 Vue/TypeScript 型別檢查、前端與版本工具單元測試、安裝流程測試、Rust 格式檢查、Rust 單元測試、Clippy 與 Vite 建置。
-- `bun run test:e2e:ci` 額外建置 `wdio` 測試版本與假引擎，並啟動桌面 E2E。測試會驗證第二次啟動退出並由既有執行個體處理；假執行檔只放在隔離的 E2E profile。Linux CI 以 D-Bus session 和 Xvfb 啟動測試。
+- `.neo_harness/verify.ps1` 呼叫 `desktop` 的 `verify`；前端與後端單元測試命令轉接至 `desktop-test`，其餘流程執行版本工具與安裝流程測試、Rust 格式檢查、Clippy 及 Vite 建置。
+- `desktop-test` 的 `test:e2e:ci` 建置 `wdio` 測試版本與假引擎，並啟動桌面 E2E。測試會驗證第二次啟動退出並由既有執行個體處理；假執行檔只放在隔離的 E2E profile。Linux CI 以 D-Bus session 和 Xvfb 啟動測試。
 - CI 在 `develop` 更新時對 `ubuntu-24.04`、`windows-latest`、`macos-latest` 執行 verify 與桌面 E2E；若 `develop` 相對 `main` 的完整差異只有版本檔，仍驗證但不建立 promotion PR。其他提交三平台成功後建立或沿用 `develop` 到 `main` 的 PR。
 - Release 版本由 `desktop/scripts/project-version.mjs` 讀取 `desktop/package.json`、`desktop/src-tauri/tauri.conf.json`、`desktop/src-tauri/Cargo.toml` 與 `Cargo.lock`；四處必須一致且採用穩定 `X.Y.Z` 格式。若相同 tag 指向其他提交，CD 建立下一個未使用 patch 版本的 `main` 修正 PR，合併後再執行發布；發布成功後，CD 建立或更新下一個未使用 patch 版本的 `develop` PR。CI/CD 不執行正式 bundle 啟動 smoke check。
 - E2E 會以假執行檔驗證兩個子程序並行啟停，不會連接實際 Android 裝置或啟動真實 UxPlay/scrcpy。AirPlay 網路探索、視訊、音訊及硬體加速仍需在目標 OS、裝置與區域網路人工驗收。

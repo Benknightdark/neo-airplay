@@ -1,10 +1,10 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import * as api from "../api";
-import type { DependencySnapshot } from "../types";
-import DependencyPanel from "./DependencyPanel.vue";
+import * as api from "../../../desktop/src/api";
+import type { DependencySnapshot } from "../../../desktop/src/types";
+import DependencyPanel from "../../../desktop/src/components/DependencyPanel.vue";
 
-vi.mock("../api", () => ({
+vi.mock("../../../desktop/src/api", () => ({
   getDependencies: vi.fn(),
   installDependencies: vi.fn(),
 }));

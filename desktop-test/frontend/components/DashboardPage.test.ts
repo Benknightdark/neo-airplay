@@ -1,7 +1,7 @@
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
-import DashboardPage from "./DashboardPage.vue";
-import type { AndroidDeviceStatus, DashboardSnapshot } from "../types";
+import DashboardPage from "../../../desktop/src/components/DashboardPage.vue";
+import type { AndroidDeviceStatus, DashboardSnapshot } from "../../../desktop/src/types";
 
 const dashboard: DashboardSnapshot = {
   settings: { receiverName: "Neo AirPlay", renderer: "Auto", fullscreen: false, startOnLogin: false },
