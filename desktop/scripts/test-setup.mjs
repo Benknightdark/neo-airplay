@@ -73,6 +73,7 @@ function createScenario(options = {}) {
   const cltInstallMarker = join(root, "clt-install-was-requested");
   const scrcpyDownloadMarker = join(root, "scrcpy-download-was-called");
   const gstInspectMarker = join(root, "gst-inspect-calls");
+  const gstInspectEnvironmentMarker = join(root, "gst-inspect-environment");
   mkdirSync(home);
   mkdirSync(fakeBin);
   mkdirSync(utilityBin);
@@ -90,6 +91,8 @@ function createScenario(options = {}) {
   for (const pluginFile of ["libgstplayback.dylib", "libgstvideoparsersbad.dylib", "libgstvideoconvertscale.dylib", "libgstautodetect.dylib", "libgstlibav.dylib", "libgstosxvideo.dylib"]) {
     writeFileSync(join(engineGstreamerPlugins, pluginFile), "fixture GStreamer plugin\n");
   }
+  writeFileSync(join(engineBin, "gst-plugin-scanner"), "#!/bin/sh\nexit 0\n");
+  chmodSync(join(engineBin, "gst-plugin-scanner"), 0o755);
 
   const fakeCommands = {
     uname: '#!/bin/sh\ncase "$1" in -m) printf "%s\\n" "${FAKE_ARCH:-x86_64}" ;; *) printf "%s\\n" "${FAKE_UNAME:-Linux}" ;; esac\n',
@@ -97,6 +100,10 @@ function createScenario(options = {}) {
     "gst-inspect-1.0": `#!/bin/sh
 printf '%s\\n' "$*" >> "$GST_INSPECT_MARKER"
 if [ "\${1:-}" = "--print-plugin-auto-install-info" ]; then
+  if [ -n "\${GST_REGISTRY:-}" ]; then
+    printf 'registry=%s\\nplugins=%s\\nscanner=%s\\nlibrary=%s\\n' "$GST_REGISTRY" "$GST_PLUGIN_PATH_1_0" "$GST_PLUGIN_SCANNER_1_0" "$DYLD_LIBRARY_PATH" >> "$GST_INSPECT_ENV_MARKER"
+    printf 'fake registry\\n' > "$GST_REGISTRY"
+  fi
   case "\${FAKE_GST_SCAN_MODE:-}" in
     error) printf "fake GStreamer scan error\\n" >&2; exit 42 ;;
     timeout) printf "fake GStreamer scan timeout\\n" >&2; exit 124 ;;
@@ -195,6 +202,7 @@ exec "$@"
     CLT_INSTALL_MARKER: cltInstallMarker,
     SCRCPY_DOWNLOAD_MARKER: scrcpyDownloadMarker,
     GST_INSPECT_MARKER: gstInspectMarker,
+    GST_INSPECT_ENV_MARKER: gstInspectEnvironmentMarker,
     FAKE_SCRCPY_SHA256: "9f969d30cc574816077edecda65719c1c70b0aee1df1ba5fa00779ac07b8fd6e",
   };
 
@@ -206,6 +214,7 @@ exec "$@"
     cltInstallMarker,
     scrcpyDownloadMarker,
     gstInspectMarker,
+    gstInspectEnvironmentMarker,
     engineDirectory,
     engineSnapshot,
     temporaryFiles,
@@ -412,6 +421,24 @@ test("install.sh --check scans macOS GStreamer elements once and cleans its temp
     assert.match(result.stdout, /Runtime dependencies are available\./);
     assert.deepEqual(readFileSync(scenario.gstInspectMarker, "utf8").trim().split("\n"), ["--print-plugin-auto-install-info"]);
     assertReadOnly(scenario);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("install.sh warms a persistent macOS GStreamer registry with the runtime environment", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({ uname: "Darwin" });
+  const registryPath = join(scenario.root, "app-cache", "gstreamer", "registry.bin");
+  try {
+    const result = scenario.runInstaller(["--warm-gstreamer-registry", "--registry-path", registryPath]);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(existsSync(registryPath), true);
+    const inspectCalls = readFileSync(scenario.gstInspectMarker, "utf8");
+    assert.match(inspectCalls, /--print-plugin-auto-install-info/);
+    const environment = readFileSync(scenario.gstInspectEnvironmentMarker, "utf8");
+    assert.ok(environment.includes(`registry=${registryPath}`));
+    assert.ok(environment.includes(`plugins=${join(scenario.engineDirectory, "lib", "gstreamer-1.0")}`));
+    assert.ok(environment.includes(`scanner=${join(scenario.engineDirectory, "bin", "gst-plugin-scanner")}`));
   } finally {
     scenario.cleanup();
   }

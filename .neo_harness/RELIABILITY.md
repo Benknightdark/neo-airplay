@@ -15,6 +15,8 @@
 - Vue 總覽每 1.5 秒重新讀取程序狀態。ADB 裝置清單只在使用者按重新整理時更新。
 - 找不到引擎會回報 `DependencyMissing`；程序無法啟動、意外非零退出或狀態查詢失敗會回報 `Faulted`。成功退出回報 `Stopped`。
 - 重複啟動已執行的引擎會返回目前狀態。AirPlay 和 Android 各有自己的程序、鎖與狀態。
+- macOS 會把 GStreamer registry 保存在 app cache。依賴工具準備完成後若 registry 尚未建立，安裝檢查會嘗試預熱；預熱失敗只記錄於安裝記錄，不會阻止工具就緒或引擎啟動。
+- macOS AirPlay 子程序啟動後先顯示 `Starting`，並以系統 Bonjour 瀏覽確認目前設定的服務名稱。找到後轉為 `Running` 並記錄等待毫秒數；30 秒內未找到、瀏覽程序提早結束或 UxPlay 提早退出時，會清理相關程序並回報 `Faulted`。啟動中可以取消。Windows 與 Linux 維持子程序建立成功後立即回報 `Running`。
 - UxPlay/scrcpy stdout 和 stderr 由背景讀取器持續排空並寫入診斷記錄，避免外部程序因輸出管道填滿而停住。
 - Android ADB 列舉逾時上限為 15 秒；逾時會終止 ADB client。輸出可含多筆裝置，所以 stdout 和 stderr 會在輪詢程序期間分別讀取。
 - ADB 刷新失敗時清除過期裝置清單。若 scrcpy 程序仍在執行，Android 狀態會保持 Running，確保停止操作仍可用；成功列舉且沒有執行中的程序時，舊的 Faulted 或 DependencyMissing 狀態會重設為 Stopped。

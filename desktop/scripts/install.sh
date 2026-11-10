@@ -16,8 +16,10 @@ readonly SCRCPY_MACOS_X86_64_SHA256="31a5467a9e907f162b093267cbbab1276b15c6e709c
 
 development=0
 check_only=0
+warm_registry=0
 gui=0
 engine_dir="${NEO_AIRPLAY_ENGINE_DIR:-}"
+registry_path=""
 marker_file=""
 result_file=""
 
@@ -26,10 +28,14 @@ while (($#)); do
   case "$argument" in
     --development) development=1 ;;
     --check) check_only=1 ;;
+    --warm-gstreamer-registry) warm_registry=1 ;;
     --gui) gui=1 ;;
     --engine-dir)
       (($# >= 2)) || { printf 'Missing value for --engine-dir\n' >&2; exit 2; }
       engine_dir="$2"; shift ;;
+    --registry-path)
+      (($# >= 2)) || { printf 'Missing value for --registry-path\n' >&2; exit 2; }
+      registry_path="$2"; shift ;;
     --marker-file)
       (($# >= 2)) || { printf 'Missing value for --marker-file\n' >&2; exit 2; }
       marker_file="$2"; shift ;;
@@ -364,6 +370,42 @@ EOF
   fi
   export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${HOME}/.bun/bin:${PATH:-}"
 }
+
+if ((warm_registry)); then
+  [[ "$(uname -s)" == "Darwin" ]] || fail "GStreamer registry warm-up is supported only on macOS."
+  [[ -n "$registry_path" ]] || fail "--registry-path is required for GStreamer registry warm-up."
+
+  local_gst_inspect="$(runtime_executable gst-inspect-1.0 || true)"
+  local_timeout="$(runtime_executable gtimeout || true)"
+  [[ -x "$local_gst_inspect" ]] || fail "GStreamer gst-inspect-1.0 is unavailable."
+  [[ -x "$local_timeout" ]] || fail "GNU timeout utility is unavailable."
+
+  mkdir -p "$(dirname "$registry_path")"
+  if [[ -s "$registry_path" ]]; then
+    log "GStreamer registry cache already exists."
+    exit 0
+  fi
+
+  export GST_PLUGIN_PATH_1_0="${engine_dir}/lib/gstreamer-1.0"
+  export GST_PLUGIN_SYSTEM_PATH_1_0="${engine_dir}/lib/gstreamer-1.0"
+  export GST_PLUGIN_SCANNER_1_0="${engine_bin}/gst-plugin-scanner"
+  export GST_REGISTRY="$registry_path"
+  export GST_REGISTRY_1_0="$registry_path"
+  setup_macos_library_path
+
+  if ! warm_output="$("$local_timeout" --kill-after=2s 30s "$local_gst_inspect" --print-plugin-auto-install-info 2>&1)"; then
+    rm -f "$registry_path"
+    log "GStreamer registry warm-up failed: ${warm_output:0:240}"
+    exit 1
+  fi
+  if [[ ! -s "$registry_path" ]]; then
+    rm -f "$registry_path"
+    log "GStreamer registry warm-up did not create a cache file."
+    exit 1
+  fi
+  log "GStreamer registry cache is ready."
+  exit 0
+fi
 
 if ((check_only)); then
   if check_runtime; then runtime_status=0; else runtime_status=1; fi

@@ -44,6 +44,20 @@ describe("投影總覽", () => {
     expect(wrapper.emitted("refresh-devices")).toHaveLength(1);
   });
 
+  it("AirPlay 等待 Bonjour 時會顯示啟動中並允許取消", async () => {
+    const startingDashboard: DashboardSnapshot = {
+      ...dashboard,
+      airplay: { status: "starting", message: "正在等待 Bonjour 廣播。", processId: 42 },
+    };
+    const wrapper = mount(DashboardPage, { props: { dashboard: startingDashboard, busy: false } });
+
+    expect(wrapper.get('[data-testid="airplay-status"]').text()).toContain("啟動中");
+    expect(wrapper.get('[data-testid="airplay-stop"]').text()).toBe("取消啟動");
+    expect(wrapper.get(".airplay-card .action-hint").text()).toContain("等待 Bonjour 廣播");
+    await wrapper.get('[data-testid="airplay-stop"]').trigger("click");
+    expect(wrapper.emitted("stop-airplay")).toHaveLength(1);
+  });
+
   it.each([
     ["unauthorized", "找到未授權的裝置。請在 Android 裝置上確認並允許此電腦的偵錯連線。"],
     ["offline", "裝置目前離線，請確認手機已連線並重新整理裝置清單。"],

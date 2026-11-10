@@ -9,6 +9,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -16,6 +17,7 @@ use std::time::{Duration, Instant};
 const MAX_RECENT_LOGS: usize = 300;
 const MAX_CAPTURED_PROCESS_OUTPUT_BYTES: usize = 1024 * 1024;
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(15);
+const AIRPLAY_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct AppState {
     settings_path: PathBuf,
@@ -28,19 +30,41 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(config_dir: PathBuf, log_dir: PathBuf, engine_dir: PathBuf) -> Result<Self, String> {
+    pub fn new(
+        config_dir: PathBuf,
+        log_dir: PathBuf,
+        engine_dir: PathBuf,
+        gstreamer_registry_path: PathBuf,
+        require_airplay_discovery: bool,
+    ) -> Result<Self, String> {
         fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
         fs::create_dir_all(&log_dir).map_err(|error| error.to_string())?;
+        #[cfg(target_os = "macos")]
+        if let Some(parent) = gstreamer_registry_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
 
         let settings_path = config_dir.join("settings.json");
         let logger = AppLogger::new(log_dir);
         Ok(Self {
             settings_path: settings_path.clone(),
             settings: Mutex::new(load_settings(&settings_path)),
-            airplay: EngineController::new(EngineKind::AirPlay, engine_dir.clone(), logger.clone()),
-            android: EngineController::new(EngineKind::Android, engine_dir, logger.clone()),
+            logger: logger.clone(),
+            airplay: EngineController::new(
+                EngineKind::AirPlay,
+                engine_dir.clone(),
+                gstreamer_registry_path,
+                require_airplay_discovery,
+                logger.clone(),
+            ),
+            android: EngineController::new(
+                EngineKind::Android,
+                engine_dir,
+                PathBuf::new(),
+                false,
+                logger,
+            ),
             android_refresh: Mutex::new(()),
-            logger,
             devices: Mutex::new(Vec::new()),
         })
     }
@@ -83,8 +107,9 @@ impl AppState {
     }
 
     pub fn start_airplay(&self) -> Result<EngineSnapshot, String> {
-        let args = airplay_arguments(&self.settings()?);
-        Ok(self.airplay.start(&args))
+        let settings = self.settings()?;
+        let args = airplay_arguments(&settings);
+        Ok(self.airplay.start(&args, Some(&settings.receiver_name)))
     }
 
     pub fn stop_airplay(&self) -> Result<EngineSnapshot, String> {
@@ -185,7 +210,7 @@ impl AppState {
         }
         drop(devices);
 
-        let snapshot = self.android.start(&args);
+        let snapshot = self.android.start(&args, None);
         if snapshot.status == EngineStatus::Running {
             self.logger.write(
                 LogLevel::Information,
@@ -281,18 +306,37 @@ enum EngineKind {
 
 struct EngineInner {
     child: Option<Child>,
+    discovery_child: Option<Child>,
+    discovery_events: Option<Receiver<DiscoveryEvent>>,
+    started_at: Option<Instant>,
     snapshot: EngineSnapshot,
+}
+
+enum DiscoveryEvent {
+    Ready,
 }
 
 struct EngineController {
     kind: EngineKind,
     engine_dir: PathBuf,
+    #[cfg(target_os = "macos")]
+    gstreamer_registry_path: PathBuf,
+    require_airplay_discovery: bool,
     inner: Mutex<EngineInner>,
     logger: AppLogger,
 }
 
 impl EngineController {
-    fn new(kind: EngineKind, engine_dir: PathBuf, logger: AppLogger) -> Self {
+    fn new(
+        kind: EngineKind,
+        engine_dir: PathBuf,
+        gstreamer_registry_path: PathBuf,
+        require_airplay_discovery: bool,
+        logger: AppLogger,
+    ) -> Self {
+        #[cfg(not(target_os = "macos"))]
+        drop(gstreamer_registry_path);
+
         let message = match kind {
             EngineKind::AirPlay => "AirPlay 接收器尚未啟動。",
             EngineKind::Android => "Android 投影尚未啟動。",
@@ -300,15 +344,21 @@ impl EngineController {
         Self {
             kind,
             engine_dir,
+            #[cfg(target_os = "macos")]
+            gstreamer_registry_path,
+            require_airplay_discovery,
             inner: Mutex::new(EngineInner {
                 child: None,
+                discovery_child: None,
+                discovery_events: None,
+                started_at: None,
                 snapshot: EngineSnapshot::stopped(message),
             }),
             logger,
         }
     }
 
-    fn start(&self, args: &[String]) -> EngineSnapshot {
+    fn start(&self, args: &[String], receiver_name: Option<&str>) -> EngineSnapshot {
         let Ok(mut inner) = self.inner.lock() else {
             return EngineSnapshot::stopped("接收器狀態無法更新。");
         };
@@ -317,6 +367,8 @@ impl EngineController {
                 Ok(None) => return inner.snapshot.clone(),
                 Ok(Some(status)) => {
                     inner.child = None;
+                    stop_discovery_monitor(&mut inner);
+                    inner.started_at = None;
                     let (status, message, level) = exit_snapshot(self.kind, status);
                     inner.snapshot = EngineSnapshot {
                         status,
@@ -365,6 +417,12 @@ impl EngineController {
         command
             .env("GST_PLUGIN_PATH_1_0", &plugin_directory)
             .env("GST_PLUGIN_SYSTEM_PATH_1_0", &plugin_directory);
+        if matches!(self.kind, EngineKind::AirPlay) {
+            #[cfg(target_os = "macos")]
+            command
+                .env("GST_REGISTRY", &self.gstreamer_registry_path)
+                .env("GST_REGISTRY_1_0", &self.gstreamer_registry_path);
+        }
         #[cfg(target_os = "macos")]
         command.env("DYLD_LIBRARY_PATH", macos_library_path(&self.engine_dir));
         #[cfg(target_os = "windows")]
@@ -385,14 +443,44 @@ impl EngineController {
                     EngineKind::AirPlay => "UxPlay",
                     EngineKind::Android => "scrcpy",
                 };
-                let message = format!("{name} 已啟動。");
+                let started_at = Instant::now();
                 inner.child = Some(child);
-                inner.snapshot = EngineSnapshot {
-                    status: EngineStatus::Running,
-                    message: message.clone(),
-                    process_id: Some(process_id),
-                };
-                self.logger.write(LogLevel::Information, &message);
+                inner.started_at = Some(started_at);
+                if matches!(self.kind, EngineKind::AirPlay) && self.require_airplay_discovery {
+                    let expected_name = receiver_name.unwrap_or("Neo AirPlay");
+                    match spawn_discovery_monitor(expected_name, self.logger.clone()) {
+                        Ok((discovery_child, events)) => {
+                            inner.discovery_child = Some(discovery_child);
+                            inner.discovery_events = Some(events);
+                            let message = "UxPlay 已啟動，正在等待 Bonjour 廣播。".to_owned();
+                            inner.snapshot = EngineSnapshot {
+                                status: EngineStatus::Starting,
+                                message: message.clone(),
+                                process_id: Some(process_id),
+                            };
+                            self.logger.write(LogLevel::Information, &message);
+                        }
+                        Err(error) => {
+                            terminate_child(&mut inner.child);
+                            let message = format!("無法監控 Bonjour 服務：{error}");
+                            inner.snapshot = EngineSnapshot {
+                                status: EngineStatus::Faulted,
+                                message: message.clone(),
+                                process_id: None,
+                            };
+                            inner.started_at = None;
+                            self.logger.write(LogLevel::Error, &message);
+                        }
+                    }
+                } else {
+                    let message = format!("{name} 已啟動。");
+                    inner.snapshot = EngineSnapshot {
+                        status: EngineStatus::Running,
+                        message: message.clone(),
+                        process_id: Some(process_id),
+                    };
+                    self.logger.write(LogLevel::Information, &message);
+                }
             }
             Err(error) => {
                 let message = format!("無法啟動引擎：{error}");
@@ -414,8 +502,21 @@ impl EngineController {
         let observation = inner.child.as_mut().map(Child::try_wait);
         match observation {
             Some(Ok(Some(exit_status))) => {
+                let was_starting = inner.snapshot.status == EngineStatus::Starting;
                 inner.child = None;
-                let (status, message, level) = exit_snapshot(self.kind, exit_status);
+                stop_discovery_monitor(&mut inner);
+                inner.started_at = None;
+                let (status, message, level) = if was_starting {
+                    (
+                        EngineStatus::Faulted,
+                        format!(
+                            "AirPlay 啟動失敗：UxPlay 在 Bonjour 就緒前結束（{exit_status}）。"
+                        ),
+                        LogLevel::Error,
+                    )
+                } else {
+                    exit_snapshot(self.kind, exit_status)
+                };
                 inner.snapshot = EngineSnapshot {
                     status,
                     message: message.clone(),
@@ -435,14 +536,101 @@ impl EngineController {
             }
             _ => {}
         }
+        if inner.snapshot.status == EngineStatus::Starting {
+            self.update_airplay_readiness(&mut inner);
+        }
         inner.snapshot.clone()
+    }
+
+    fn update_airplay_readiness(&self, inner: &mut EngineInner) {
+        let discovery_result = match inner.discovery_events.as_ref() {
+            Some(events) => match events.try_recv() {
+                Ok(DiscoveryEvent::Ready) => Some(Ok(())),
+                Err(TryRecvError::Disconnected) => Some(Err("Bonjour 監控程序已中斷。".to_owned())),
+                Err(TryRecvError::Empty) => None,
+            },
+            None => Some(Err("Bonjour 監控程序未啟動。".to_owned())),
+        };
+
+        if let Some(result) = discovery_result {
+            match result {
+                Ok(()) => {
+                    stop_discovery_monitor(inner);
+                    let elapsed = inner
+                        .started_at
+                        .take()
+                        .map(|started_at| started_at.elapsed().as_millis());
+                    let message = match elapsed {
+                        Some(milliseconds) => {
+                            format!("AirPlay 已在 Bonjour 上就緒（{} 毫秒）。", milliseconds)
+                        }
+                        None => "AirPlay 已在 Bonjour 上就緒。".to_owned(),
+                    };
+                    let process_id = inner.child.as_ref().map(Child::id);
+                    inner.snapshot = EngineSnapshot {
+                        status: EngineStatus::Running,
+                        message: message.clone(),
+                        process_id,
+                    };
+                    self.logger.write(LogLevel::Information, &message);
+                    return;
+                }
+                Err(reason) => {
+                    self.fail_airplay_start(inner, reason);
+                    return;
+                }
+            }
+        }
+
+        if let Some(discovery_child) = inner.discovery_child.as_mut() {
+            match discovery_child.try_wait() {
+                Ok(Some(status)) => {
+                    self.fail_airplay_start(
+                        inner,
+                        format!("Bonjour 瀏覽程序提早結束（{status}）。"),
+                    );
+                    return;
+                }
+                Err(error) => {
+                    self.fail_airplay_start(inner, format!("無法檢查 Bonjour 瀏覽程序：{error}"));
+                    return;
+                }
+                Ok(None) => {}
+            }
+        }
+
+        if inner
+            .started_at
+            .is_some_and(|started_at| started_at.elapsed() >= AIRPLAY_READY_TIMEOUT)
+        {
+            self.fail_airplay_start(
+                inner,
+                "30 秒內沒有在 Bonjour 找到 AirPlay 接收器。請確認區域網路與防火牆設定後重試。"
+                    .to_owned(),
+            );
+        }
+    }
+
+    fn fail_airplay_start(&self, inner: &mut EngineInner, reason: String) {
+        stop_discovery_monitor(inner);
+        terminate_child(&mut inner.child);
+        inner.started_at = None;
+        let message = format!("AirPlay 啟動失敗：{reason}");
+        inner.snapshot = EngineSnapshot {
+            status: EngineStatus::Faulted,
+            message: message.clone(),
+            process_id: None,
+        };
+        self.logger.write(LogLevel::Error, &message);
     }
 
     fn stop(&self) -> EngineSnapshot {
         let Ok(mut inner) = self.inner.lock() else {
             return EngineSnapshot::stopped("接收器狀態無法更新。");
         };
+        stop_discovery_monitor(&mut inner);
         let Some(mut child) = inner.child.take() else {
+            inner.started_at = None;
             if inner.snapshot.status != EngineStatus::DependencyMissing {
                 let message = match self.kind {
                     EngineKind::AirPlay => "AirPlay 接收器已停止。",
@@ -486,6 +674,7 @@ impl EngineController {
             message: message.clone(),
             process_id: None,
         };
+        inner.started_at = None;
         self.logger.write(level, &message);
         inner.snapshot.clone()
     }
@@ -564,11 +753,78 @@ impl EngineController {
 impl Drop for EngineController {
     fn drop(&mut self) {
         if let Ok(inner) = self.inner.get_mut() {
+            stop_discovery_monitor(inner);
             if let Some(child) = inner.child.as_mut() {
                 let _ = child.kill();
                 let _ = child.wait();
             }
         }
+    }
+}
+
+fn spawn_discovery_monitor(
+    receiver_name: &str,
+    logger: AppLogger,
+) -> Result<(Child, Receiver<DiscoveryEvent>), String> {
+    let mut child = Command::new("/usr/bin/dns-sd")
+        .args(["-B", "_airplay._tcp", "local."])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    let (sender, events) = mpsc::channel();
+    if let Some(stdout) = child.stdout.take() {
+        let expected_name = receiver_name.to_owned();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if bonjour_instance_matches(&line, &expected_name) {
+                    let _ = sender.send(DiscoveryEvent::Ready);
+                    break;
+                }
+            }
+        });
+    }
+    if let Some(stderr) = child.stderr.take() {
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                logger.write(LogLevel::Warning, &format!("Bonjour: {line}"));
+            }
+        });
+    }
+    Ok((child, events))
+}
+
+fn bonjour_instance_matches(line: &str, expected_name: &str) -> bool {
+    let Some((prefix, suffix)) = line.split_once("_airplay._tcp") else {
+        return false;
+    };
+    if !prefix.split_whitespace().any(|field| field == "Add") {
+        return false;
+    }
+    let Some(boundary) = suffix.chars().next() else {
+        return false;
+    };
+    if boundary != '.' && !boundary.is_whitespace() {
+        return false;
+    }
+    suffix.strip_prefix('.').unwrap_or(suffix).trim() == expected_name
+}
+
+fn stop_discovery_monitor(inner: &mut EngineInner) {
+    if let Some(mut child) = inner.discovery_child.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    inner.discovery_events = None;
+}
+
+fn terminate_child(child: &mut Option<Child>) {
+    if let Some(mut child) = child.take() {
+        if matches!(child.try_wait(), Ok(None) | Err(_)) {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
     }
 }
 
@@ -894,9 +1150,9 @@ fn push_recent(entries: &mut VecDeque<AppLogEntry>, entry: AppLogEntry) {
 #[cfg(test)]
 mod tests {
     use super::{
-        airplay_arguments, finish_pipe, load_settings, parse_adb_devices, read_pipe,
-        renderer_argument, write_settings, AppLogger, AppState, EngineController, EngineKind,
-        MAX_CAPTURED_PROCESS_OUTPUT_BYTES,
+        airplay_arguments, bonjour_instance_matches, finish_pipe, load_settings, parse_adb_devices,
+        read_pipe, renderer_argument, write_settings, AppLogger, AppState, DiscoveryEvent,
+        EngineController, EngineKind, AIRPLAY_READY_TIMEOUT, MAX_CAPTURED_PROCESS_OUTPUT_BYTES,
     };
     #[cfg(unix)]
     use super::{find_executable, is_executable_file};
@@ -926,6 +1182,84 @@ mod tests {
             parse_adb_devices("* daemon started successfully\nList of devices attached\n")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn matches_only_added_airplay_services_with_the_configured_instance_name() {
+        let matching = "11:23:10.123 Add 2 4 local. _airplay._tcp. Neo AirPlay";
+        let repeated_spaces = "11:23:10.123 Add 2 4 local. _airplay._tcp. Living  Room";
+        let removed = "11:23:10.123 Rmv 2 4 local. _airplay._tcp. Neo AirPlay";
+        let other_name = "11:23:10.123 Add 2 4 local. _airplay._tcp. Other Receiver";
+
+        assert!(bonjour_instance_matches(matching, "Neo AirPlay"));
+        assert!(bonjour_instance_matches(repeated_spaces, "Living  Room"));
+        assert!(!bonjour_instance_matches(removed, "Neo AirPlay"));
+        assert!(!bonjour_instance_matches(other_name, "Neo AirPlay"));
+        assert!(!bonjour_instance_matches("Browse complete", "Neo AirPlay"));
+    }
+
+    #[test]
+    fn bonjour_ready_event_moves_airplay_from_starting_to_running() {
+        let directory = test_directory("airplay-ready-event");
+        fs::create_dir_all(&directory).unwrap();
+        let controller = EngineController::new(
+            EngineKind::AirPlay,
+            PathBuf::new(),
+            PathBuf::new(),
+            false,
+            AppLogger::new(directory.clone()),
+        );
+        let (sender, events) = std::sync::mpsc::channel();
+        sender.send(DiscoveryEvent::Ready).unwrap();
+        let mut inner = controller.inner.lock().unwrap();
+        inner.snapshot = EngineSnapshot {
+            status: EngineStatus::Starting,
+            message: "等待 Bonjour。".to_owned(),
+            process_id: Some(42),
+        };
+        inner.discovery_events = Some(events);
+        inner.started_at = Some(std::time::Instant::now());
+
+        controller.update_airplay_readiness(&mut inner);
+
+        assert_eq!(inner.snapshot.status, EngineStatus::Running);
+        assert_eq!(inner.snapshot.process_id, None);
+        assert!(inner.snapshot.message.contains("Bonjour 上就緒"));
+        drop(inner);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn missing_bonjour_service_times_out_and_faults_airplay_start() {
+        let directory = test_directory("airplay-ready-timeout");
+        fs::create_dir_all(&directory).unwrap();
+        let controller = EngineController::new(
+            EngineKind::AirPlay,
+            PathBuf::new(),
+            PathBuf::new(),
+            false,
+            AppLogger::new(directory.clone()),
+        );
+        let (_sender, events) = std::sync::mpsc::channel();
+        let mut inner = controller.inner.lock().unwrap();
+        inner.snapshot = EngineSnapshot {
+            status: EngineStatus::Starting,
+            message: "等待 Bonjour。".to_owned(),
+            process_id: Some(42),
+        };
+        inner.discovery_events = Some(events);
+        inner.started_at = Some(std::time::Instant::now() - AIRPLAY_READY_TIMEOUT);
+
+        controller.update_airplay_readiness(&mut inner);
+
+        assert_eq!(inner.snapshot.status, EngineStatus::Faulted);
+        assert_eq!(inner.snapshot.process_id, None);
+        assert!(inner
+            .snapshot
+            .message
+            .contains("30 秒內沒有在 Bonjour 找到"));
+        drop(inner);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -993,6 +1327,8 @@ mod tests {
                 directory.join("config"),
                 directory.join("logs"),
                 PathBuf::new(),
+                directory.join("cache/gstreamer/registry.bin"),
+                false,
             )
             .unwrap(),
         );
@@ -1079,7 +1415,13 @@ mod tests {
         let directory = test_directory("running-engine");
         fs::create_dir_all(&directory).unwrap();
         let logger = AppLogger::new(directory.clone());
-        let controller = EngineController::new(EngineKind::Android, PathBuf::new(), logger);
+        let controller = EngineController::new(
+            EngineKind::Android,
+            PathBuf::new(),
+            PathBuf::new(),
+            false,
+            logger,
+        );
         let child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",

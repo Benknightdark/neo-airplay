@@ -122,6 +122,14 @@ pub fn run() {
             let e2e_profile = e2e_profile_directory();
             let (config_dir, log_dir) =
                 application_directories(app.handle(), e2e_profile.as_deref())?;
+            let gstreamer_registry_path = if cfg!(target_os = "macos") {
+                match e2e_profile.as_deref() {
+                    Some(profile) => profile.join("cache/gstreamer/registry.bin"),
+                    None => app.path().app_cache_dir()?.join("gstreamer/registry.bin"),
+                }
+            } else {
+                std::path::PathBuf::new()
+            };
             let engine_dir = match &e2e_profile {
                 Some(profile) => profile.join("engine"),
                 None => {
@@ -143,8 +151,14 @@ pub fn run() {
             std::fs::create_dir_all(&config_dir)?;
             std::fs::create_dir_all(&log_dir)?;
             std::fs::create_dir_all(&engine_dir)?;
-            let state = AppState::new(config_dir.clone(), log_dir, engine_dir.clone())
-                .map_err(std::io::Error::other)?;
+            let state = AppState::new(
+                config_dir.clone(),
+                log_dir,
+                engine_dir.clone(),
+                gstreamer_registry_path.clone(),
+                cfg!(target_os = "macos") && e2e_profile.is_none(),
+            )
+            .map_err(std::io::Error::other)?;
             if state
                 .settings()
                 .map_err(std::io::Error::other)?
@@ -157,6 +171,7 @@ pub fn run() {
             app.manage(state);
             let dependencies = dependencies::DependencyManager::new(
                 engine_dir,
+                gstreamer_registry_path,
                 &config_dir,
                 e2e_profile.is_none()
                     && std::env::var_os("NEO_AIRPLAY_SKIP_SETUP").is_none_or(|value| value != "1"),
