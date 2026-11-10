@@ -74,6 +74,7 @@ function createScenario(options = {}) {
   const scrcpyDownloadMarker = join(root, "scrcpy-download-was-called");
   const gstInspectMarker = join(root, "gst-inspect-calls");
   const gstInspectEnvironmentMarker = join(root, "gst-inspect-environment");
+  const gstTimeoutMarker = join(root, "gtimeout-calls");
   mkdirSync(home);
   mkdirSync(fakeBin);
   mkdirSync(utilityBin);
@@ -121,15 +122,22 @@ while [ "\${1#-}" != "$1" ]; do shift; done
 shift
 if [ "\${FAKE_GST_SCAN_MODE:-}" = "timeout" ] &&
   [ "\${1##*/}" = "gst-inspect-1.0" ] &&
-  [ "\${2:-}" = "--print-plugin-auto-install-info" ]; then exit 124; fi
+  [ "\${2:-}" = "--print-plugin-auto-install-info" ]; then
+  if [ -n "\${GST_REGISTRY:-}" ]; then printf 'partial registry\\n' > "$GST_REGISTRY"; fi
+  exit 124
+fi
 exec "$@"
 `,
     gtimeout: `#!/bin/sh
+printf '%s\\n' "$*" >> "$GST_TIMEOUT_MARKER"
 while [ "\${1#-}" != "$1" ]; do shift; done
 shift
 if [ "\${FAKE_GST_SCAN_MODE:-}" = "timeout" ] &&
   [ "\${1##*/}" = "gst-inspect-1.0" ] &&
-  [ "\${2:-}" = "--print-plugin-auto-install-info" ]; then exit 124; fi
+  [ "\${2:-}" = "--print-plugin-auto-install-info" ]; then
+  if [ -n "\${GST_REGISTRY:-}" ]; then printf 'partial registry\\n' > "$GST_REGISTRY"; fi
+  exit 124
+fi
 exec "$@"
 `,
     adb: '#!/bin/sh\ncase "${ADB_PROBE:-ok}" in fail) exit 1 ;; empty) exit 0 ;; *) printf "Android Debug Bridge version 1.0.41\\n" ;; esac\n',
@@ -180,6 +188,7 @@ exec "$@"
     ...process.env,
     HOME: home,
     PATH: [fakeBin, utilityBin].join(delimiter),
+    DYLD_LIBRARY_PATH: "",
     NEO_AIRPLAY_ENGINE_DIR: engineDirectory,
     TMPDIR: temporaryFiles,
     GSTREAMER_PLUGINS: gstreamerPlugins,
@@ -203,6 +212,7 @@ exec "$@"
     SCRCPY_DOWNLOAD_MARKER: scrcpyDownloadMarker,
     GST_INSPECT_MARKER: gstInspectMarker,
     GST_INSPECT_ENV_MARKER: gstInspectEnvironmentMarker,
+    GST_TIMEOUT_MARKER: gstTimeoutMarker,
     FAKE_SCRCPY_SHA256: "9f969d30cc574816077edecda65719c1c70b0aee1df1ba5fa00779ac07b8fd6e",
   };
 
@@ -215,6 +225,7 @@ exec "$@"
     scrcpyDownloadMarker,
     gstInspectMarker,
     gstInspectEnvironmentMarker,
+    gstTimeoutMarker,
     engineDirectory,
     engineSnapshot,
     temporaryFiles,
@@ -420,6 +431,7 @@ test("install.sh --check scans macOS GStreamer elements once and cleans its temp
     assert.equal(result.status, 0, result.stderr || result.stdout);
     assert.match(result.stdout, /Runtime dependencies are available\./);
     assert.deepEqual(readFileSync(scenario.gstInspectMarker, "utf8").trim().split("\n"), ["--print-plugin-auto-install-info"]);
+    assert.match(readFileSync(scenario.gstTimeoutMarker, "utf8"), /--kill-after=2s 30s .*gst-inspect-1\.0 --print-plugin-auto-install-info/);
     assertReadOnly(scenario);
   } finally {
     scenario.cleanup();
@@ -435,10 +447,25 @@ test("install.sh warms a persistent macOS GStreamer registry with the runtime en
     assert.equal(existsSync(registryPath), true);
     const inspectCalls = readFileSync(scenario.gstInspectMarker, "utf8");
     assert.match(inspectCalls, /--print-plugin-auto-install-info/);
+    assert.match(readFileSync(scenario.gstTimeoutMarker, "utf8"), /--kill-after=2s 90s .*gst-inspect-1\.0 --print-plugin-auto-install-info/);
     const environment = readFileSync(scenario.gstInspectEnvironmentMarker, "utf8");
     assert.ok(environment.includes(`registry=${registryPath}`));
     assert.ok(environment.includes(`plugins=${join(scenario.engineDirectory, "lib", "gstreamer-1.0")}`));
     assert.ok(environment.includes(`scanner=${join(scenario.engineDirectory, "bin", "gst-plugin-scanner")}`));
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("install.sh reports a GStreamer warm-up timeout and removes the partial registry", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({ uname: "Darwin", gstScanMode: "timeout" });
+  const registryPath = join(scenario.root, "app-cache", "gstreamer", "registry.bin");
+  try {
+    const result = scenario.runInstaller(["--warm-gstreamer-registry", "--registry-path", registryPath]);
+    assert.equal(result.status, 1, result.stderr || result.stdout);
+    assert.match(result.stdout, /timed out after 90 seconds/);
+    assert.equal(existsSync(registryPath), false);
+    assert.match(readFileSync(scenario.gstTimeoutMarker, "utf8"), /--kill-after=2s 90s .*gst-inspect-1\.0 --print-plugin-auto-install-info/);
   } finally {
     scenario.cleanup();
   }

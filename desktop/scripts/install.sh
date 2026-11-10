@@ -104,13 +104,10 @@ runtime_executable() {
 }
 
 setup_macos_library_path() {
-  local prefix library_path candidate
+  local prefix library_path
   library_path="${engine_dir}/lib"
   for prefix in /opt/homebrew /usr/local; do
     [[ -d "${prefix}/lib" ]] && library_path="${library_path}:${prefix}/lib"
-    for candidate in "${prefix}"/opt/*/lib; do
-      [[ -d "$candidate" ]] && library_path="${library_path}:${candidate}"
-    done
   done
   export DYLD_LIBRARY_PATH="${library_path}${DYLD_LIBRARY_PATH:+:${DYLD_LIBRARY_PATH}}"
 }
@@ -393,17 +390,28 @@ if ((warm_registry)); then
   export GST_REGISTRY_1_0="$registry_path"
   setup_macos_library_path
 
-  if ! warm_output="$("$local_timeout" --kill-after=2s 30s "$local_gst_inspect" --print-plugin-auto-install-info 2>&1)"; then
+  warm_started_at=$SECONDS
+  if warm_output="$("$local_timeout" --kill-after=2s 90s "$local_gst_inspect" --print-plugin-auto-install-info 2>&1)"; then
+    warm_status=0
+  else
+    warm_status=$?
+  fi
+  warm_elapsed=$((SECONDS - warm_started_at))
+  if ((warm_status != 0)); then
     rm -f "$registry_path"
-    log "GStreamer registry warm-up failed: ${warm_output:0:240}"
+    if ((warm_status == 124 || warm_status == 137)); then
+      log "GStreamer registry warm-up timed out after 90 seconds (${warm_elapsed}s elapsed)."
+    else
+      log "GStreamer registry warm-up failed with exit ${warm_status} after ${warm_elapsed}s: ${warm_output:0:240}"
+    fi
     exit 1
   fi
   if [[ ! -s "$registry_path" ]]; then
     rm -f "$registry_path"
-    log "GStreamer registry warm-up did not create a cache file."
+    log "GStreamer registry warm-up did not create a cache file after ${warm_elapsed}s."
     exit 1
   fi
-  log "GStreamer registry cache is ready."
+  log "GStreamer registry cache is ready after ${warm_elapsed}s."
   exit 0
 fi
 

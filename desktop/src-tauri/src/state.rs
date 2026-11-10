@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 const MAX_RECENT_LOGS: usize = 300;
 const MAX_CAPTURED_PROCESS_OUTPUT_BYTES: usize = 1024 * 1024;
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(15);
-const AIRPLAY_READY_TIMEOUT: Duration = Duration::from_secs(30);
+const AIRPLAY_READY_TIMEOUT: Duration = Duration::from_secs(90);
 
 pub struct AppState {
     settings_path: PathBuf,
@@ -452,7 +452,10 @@ impl EngineController {
                         Ok((discovery_child, events)) => {
                             inner.discovery_child = Some(discovery_child);
                             inner.discovery_events = Some(events);
-                            let message = "UxPlay 已啟動，正在等待 Bonjour 廣播。".to_owned();
+                            let message = format!(
+                                "UxPlay 已啟動，正在等待 Bonjour 廣播（最多 {} 秒）。",
+                                AIRPLAY_READY_TIMEOUT.as_secs()
+                            );
                             inner.snapshot = EngineSnapshot {
                                 status: EngineStatus::Starting,
                                 message: message.clone(),
@@ -605,8 +608,10 @@ impl EngineController {
         {
             self.fail_airplay_start(
                 inner,
-                "30 秒內沒有在 Bonjour 找到 AirPlay 接收器。請確認區域網路與防火牆設定後重試。"
-                    .to_owned(),
+                format!(
+                    "{} 秒內沒有在 Bonjour 找到 AirPlay 接收器。請確認區域網路與防火牆設定後重試。",
+                    AIRPLAY_READY_TIMEOUT.as_secs()
+                ),
             );
         }
     }
@@ -863,17 +868,20 @@ pub(crate) fn resolved_path(engine_dir: &Path) -> OsString {
 
 #[cfg(target_os = "macos")]
 fn macos_library_path(engine_dir: &Path) -> OsString {
+    let paths = macos_library_paths(engine_dir, std::env::var_os("DYLD_LIBRARY_PATH").as_deref());
+    std::env::join_paths(paths).unwrap_or_default()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_library_paths(engine_dir: &Path, inherited: Option<&OsStr>) -> Vec<PathBuf> {
     let mut paths = vec![engine_dir.join("lib")];
     for prefix in [Path::new("/opt/homebrew"), Path::new("/usr/local")] {
         paths.push(prefix.join("lib"));
-        if let Ok(formulas) = fs::read_dir(prefix.join("opt")) {
-            paths.extend(formulas.flatten().map(|formula| formula.path().join("lib")));
-        }
     }
-    if let Some(inherited) = std::env::var_os("DYLD_LIBRARY_PATH") {
-        paths.extend(std::env::split_paths(&inherited));
+    if let Some(inherited) = inherited {
+        paths.extend(std::env::split_paths(inherited));
     }
-    std::env::join_paths(paths).unwrap_or_default()
+    paths
 }
 
 pub(crate) fn installer_path(engine_dir: &Path) -> OsString {
@@ -1149,6 +1157,8 @@ fn push_recent(entries: &mut VecDeque<AppLogEntry>, entry: AppLogEntry) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use super::macos_library_paths;
     use super::{
         airplay_arguments, bonjour_instance_matches, finish_pipe, load_settings, parse_adb_devices,
         read_pipe, renderer_argument, write_settings, AppLogger, AppState, DiscoveryEvent,
@@ -1157,12 +1167,32 @@ mod tests {
     #[cfg(unix)]
     use super::{find_executable, is_executable_file};
     use crate::models::{AndroidDeviceStatus, EngineSnapshot, EngineStatus, ReceiverSettings};
+    #[cfg(target_os = "macos")]
+    use std::ffi::OsStr;
     use std::fs;
     use std::io::Cursor;
+    #[cfg(target_os = "macos")]
+    use std::path::Path;
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_library_path_uses_only_base_homebrew_directories() {
+        let paths = macos_library_paths(Path::new("/engine"), Some(OsStr::new("/inherited/lib")));
+
+        assert_eq!(
+            paths,
+            [
+                PathBuf::from("/engine/lib"),
+                PathBuf::from("/opt/homebrew/lib"),
+                PathBuf::from("/usr/local/lib"),
+                PathBuf::from("/inherited/lib"),
+            ]
+        );
+    }
 
     #[test]
     fn parses_android_devices_and_states() {
@@ -1257,7 +1287,7 @@ mod tests {
         assert!(inner
             .snapshot
             .message
-            .contains("30 秒內沒有在 Bonjour 找到"));
+            .contains("90 秒內沒有在 Bonjour 找到"));
         drop(inner);
         fs::remove_dir_all(directory).unwrap();
     }

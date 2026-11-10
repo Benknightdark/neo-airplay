@@ -15,6 +15,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(90);
+#[cfg(target_os = "macos")]
+const GSTREAMER_REGISTRY_WARMUP_TIMEOUT: Duration = Duration::from_secs(100);
 const PROCESS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const RESULT_GRACE: Duration = Duration::from_secs(5);
 const LAUNCH_GRACE: Duration = Duration::from_secs(120);
@@ -365,6 +367,7 @@ fn warm_gstreamer_registry(
         }
 
         publish_installing(snapshot, "正在準備 GStreamer 快取…");
+        let started_at = Instant::now();
         let script = setup_dir.join("install.sh");
         let args = vec![
             script.to_string_lossy().into_owned(),
@@ -377,7 +380,7 @@ fn warm_gstreamer_registry(
         let output = run_with_timeout_in_path(
             Path::new("/bin/bash"),
             &args,
-            Duration::from_secs(40),
+            GSTREAMER_REGISTRY_WARMUP_TIMEOUT,
             Some(installer_path(engine_dir).as_os_str()),
         );
         match output {
@@ -402,6 +405,13 @@ fn warm_gstreamer_registry(
                 &format!("GStreamer registry 預熱失敗，仍繼續啟動：{error}"),
             ),
         }
+        append_log(
+            &setup_dir.join(INSTALL_LOG),
+            &format!(
+                "GStreamer registry 預熱耗時 {} 毫秒。",
+                started_at.elapsed().as_millis()
+            ),
+        );
     }
 
     #[cfg(not(target_os = "macos"))]
