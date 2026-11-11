@@ -4,12 +4,21 @@ param()
 $ErrorActionPreference = 'Stop'
 $desktopRoot = Split-Path -Parent $PSScriptRoot
 
+$nodeVersionFile = Join-Path $desktopRoot '.node-version'
+if (-not (Test-Path -LiteralPath $nodeVersionFile -PathType Leaf)) {
+    throw "Node.js version file is unavailable: $nodeVersionFile"
+}
+$requiredNodeVersion = (Get-Content -LiteralPath $nodeVersionFile -Raw).Trim()
+if (-not $requiredNodeVersion) {
+    throw "Node.js version file is empty: $nodeVersionFile"
+}
+$requiredVersion = [version]$requiredNodeVersion
+$requiredNodeMajor = $requiredVersion.Major
+
 if ($env:OS -eq 'Windows_NT' -and $env:NEO_AIRPLAY_SKIP_SETUP -ne '1') {
-    $nodeVersionFile = Join-Path $desktopRoot '.node-version'
-    $pinnedNode = if (Test-Path -LiteralPath $nodeVersionFile -PathType Leaf) { (Get-Content -LiteralPath $nodeVersionFile -Raw).Trim() } else { '' }
     $priorityPaths = @()
-    if ($pinnedNode -and $env:LOCALAPPDATA) {
-        $managedNode = Join-Path (Join-Path $env:LOCALAPPDATA 'NeoAirPlay') "node-v$pinnedNode"
+    if ($requiredNodeVersion -and $env:LOCALAPPDATA) {
+        $managedNode = Join-Path (Join-Path $env:LOCALAPPDATA 'NeoAirPlay') "node-v$requiredNodeVersion"
         if (Test-Path -LiteralPath $managedNode -PathType Container) { $priorityPaths += $managedNode }
     }
     if ($env:USERPROFILE) {
@@ -35,12 +44,12 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 }
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    throw 'Node.js 24 is required for frontend unit tests. Install the version documented in README.md.'
+    throw "Node.js $requiredNodeMajor is required for frontend unit tests. Install the version documented in README.md."
 }
 
 $nodeVersion = (& node --version).Trim()
-if ($LASTEXITCODE -ne 0 -or $nodeVersion -notmatch '^v24\.[0-9]+\.[0-9]+$' -or [version]$nodeVersion.TrimStart('v') -lt [version]'24.22.2') {
-    throw "Node.js 24.22.2 or newer within the 24.x line is required for frontend unit tests. Found '$nodeVersion'."
+if ($LASTEXITCODE -ne 0 -or $nodeVersion -notmatch "^v$requiredNodeMajor\.[0-9]+\.[0-9]+$" -or [version]$nodeVersion.TrimStart('v') -lt $requiredVersion) {
+    throw "Node.js $requiredNodeVersion or newer within the $requiredNodeMajor.x line is required for frontend unit tests. Found '$nodeVersion'."
 }
 
 Push-Location $desktopRoot
