@@ -54,6 +54,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop\scripts\launch.ps1
 
 ## 執行測試
 
+測試需要 Node.js 24.22.2 以上的 24.x 版本；開發準備腳本與 CI 使用 `desktop/.node-version` 固定的版本。
+
 分別安裝應用程式與測試專案的套件：
 
 ```sh

@@ -16,7 +16,7 @@ if [[ "$mode" == "bundle" && $# -gt 0 ]]; then
 fi
 
 /bin/bash "$script_dir/setup.sh"
-export PATH="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.cargo/bin:/opt/homebrew/opt/node@22/bin:/usr/local/opt/node@22/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH="$HOME/.local/bin:$HOME/.bun/bin:$HOME/.cargo/bin:/opt/homebrew/opt/node@24/bin:/usr/local/opt/node@24/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 export NEO_AIRPLAY_SETUP_COMPLETE=1
 cd "$project_dir/desktop"
 

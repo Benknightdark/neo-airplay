@@ -4,22 +4,25 @@ param()
 $ErrorActionPreference = 'Stop'
 $desktopRoot = Split-Path -Parent $PSScriptRoot
 
-if ($env:OS -eq 'Windows_NT') {
+if ($env:OS -eq 'Windows_NT' -and $env:NEO_AIRPLAY_SKIP_SETUP -ne '1') {
     $nodeVersionFile = Join-Path $desktopRoot '.node-version'
     $pinnedNode = if (Test-Path -LiteralPath $nodeVersionFile -PathType Leaf) { (Get-Content -LiteralPath $nodeVersionFile -Raw).Trim() } else { '' }
     $priorityPaths = @()
     if ($pinnedNode -and $env:LOCALAPPDATA) {
-        $managedNode = Join-Path $env:LOCALAPPDATA "NeoAirPlay\node-v$pinnedNode"
+        $managedNode = Join-Path (Join-Path $env:LOCALAPPDATA 'NeoAirPlay') "node-v$pinnedNode"
         if (Test-Path -LiteralPath $managedNode -PathType Container) { $priorityPaths += $managedNode }
     }
     if ($env:USERPROFILE) {
-        foreach ($subPath in @('.cargo\bin', '.bun\bin')) {
-            $candidate = Join-Path $env:USERPROFILE $subPath
+        foreach ($subPath in @('.cargo', '.bun')) {
+            $candidate = Join-Path (Join-Path $env:USERPROFILE $subPath) 'bin'
             if (Test-Path -LiteralPath $candidate -PathType Container) { $priorityPaths += $candidate }
         }
     }
     if ($priorityPaths.Count -gt 0) {
-        $env:Path = (($priorityPaths + @($env:Path -split ';')) | Where-Object { $_ } | Select-Object -Unique) -join ';'
+        $currentPath = if ($env:Path) { $env:Path } else { $env:PATH }
+        $updatedPath = (($priorityPaths + @($currentPath -split ';')) | Where-Object { $_ } | Select-Object -Unique) -join ';'
+        $env:Path = $updatedPath
+        $env:PATH = $updatedPath
     }
 }
 
@@ -32,12 +35,12 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 }
 
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    throw 'Node.js 22 is required for frontend unit tests. Install the version documented in README.md.'
+    throw 'Node.js 24 is required for frontend unit tests. Install the version documented in README.md.'
 }
 
 $nodeVersion = (& node --version).Trim()
-if ($LASTEXITCODE -ne 0 -or $nodeVersion -notmatch '^v22\.' -or [version]$nodeVersion.TrimStart('v') -lt [version]'22.22.2') {
-    throw "Node.js 22.22.2 or newer within the 22.x line is required for frontend unit tests. Found '$nodeVersion'."
+if ($LASTEXITCODE -ne 0 -or $nodeVersion -notmatch '^v24\.[0-9]+\.[0-9]+$' -or [version]$nodeVersion.TrimStart('v') -lt [version]'24.22.2') {
+    throw "Node.js 24.22.2 or newer within the 24.x line is required for frontend unit tests. Found '$nodeVersion'."
 }
 
 Push-Location $desktopRoot

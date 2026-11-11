@@ -35,8 +35,8 @@ export function withDevelopmentPath(environment, platform, desktopDirectory, hom
       joinPath(home, ".cargo", "bin"),
       ...(platform === "darwin"
         ? [
-          "/opt/homebrew/opt/node@22/bin",
-          "/usr/local/opt/node@22/bin",
+          "/opt/homebrew/opt/node@24/bin",
+          "/usr/local/opt/node@24/bin",
           "/opt/homebrew/bin",
           "/opt/homebrew/sbin",
           "/usr/local/bin",
@@ -80,7 +80,9 @@ export function runTauri(args, {
     if (setupResult.status !== 0) return setupResult.status ?? 1;
   }
 
-  childEnvironment = withDevelopmentPath(childEnvironment, platform, desktopDirectory, homeDirectory);
+  if (!setupDisabled) {
+    childEnvironment = withDevelopmentPath(childEnvironment, platform, desktopDirectory, homeDirectory);
+  }
   childEnvironment.NEO_AIRPLAY_SETUP_COMPLETE = "1";
   const joinPath = platform === "win32" ? win32.join : posix.join;
   const cliEntry = joinPath(desktopDirectory, "node_modules", "@tauri-apps", "cli", "tauri.js");

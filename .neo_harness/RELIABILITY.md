@@ -8,7 +8,7 @@
 - App 每次啟動都在背景檢查投影工具，缺少時執行內嵌平台安裝腳本；先前安裝失敗時，下次啟動會自動重試。介面顯示進度；失敗可查看安裝記錄並手動重試。「工具管理」頁也可強制升級工具與平台相依套件，或停止兩種引擎、清除 App 專用工具和 GStreamer registry 後重新安裝。此操作保留設定、診斷記錄及系統套件。
 - Windows 背景程序禁止建立主控台視窗；需要提權時保留 UAC 授權提示，安裝 PowerShell 視窗隱藏。背景檢查、套件管理、編譯及提權後的輸出寫入同一份 `setup/install.log`，介面透過 `install-progress.json` 顯示目前階段。
 - Windows pacman 套件更新、安裝或修復若明確回報資料庫鎖定，每 5 秒重試一次，最多等待 2 分鐘；逾時時保留鎖檔並提供安裝記錄與重試指引。核心更新要求重新啟動時仍以新 shell 接續，最多三輪；其他一般錯誤直接失敗。編譯前使用固定 UCRT64 路徑與隔離的編譯環境，實際編譯並執行 C/C++ 探針；失敗時記錄套件完整性與標頭搜尋路徑，重新安裝 GCC、headers、CRT 與 binutils 一次後再驗證。
-- 開發與建置入口會先執行 `setup.sh`／`setup.ps1`，檢查開發工具與投影依賴；全部就緒時略過安裝，缺少時依平台腳本補齊。新 checkout 可使用 `launch.sh`／`launch.ps1`，先 setup 再啟動 Debug、Release 或打包；直接呼叫 Tauri CLI 也會自動執行 setup。CI 可用 `NEO_AIRPLAY_SKIP_SETUP=1` 停用。
+- 開發與建置入口會先執行 `setup.sh`／`setup.ps1`，檢查開發工具與投影依賴；全部就緒時略過安裝，缺少時依平台腳本補齊。新 checkout 可使用 `launch.sh`／`launch.ps1`，先 setup 再啟動 Debug、Release 或打包；直接呼叫 Tauri CLI 也會自動執行 setup。CI 可用 `NEO_AIRPLAY_SKIP_SETUP=1` 停用；設定此旗標時，驗證入口及 Tauri runner 保留呼叫端的工具路徑，使用工作流程選定的工具版本。
 - 第二次啟動會交由單一執行個體插件轉送至既有 App，顯示主視窗後結束新程序。
 - 引擎執行程序的 `PATH` 僅包含目前使用的 `engine/` 目錄及其 Android 子目錄；找不到該目錄中的工具時會回報缺少依賴，不從系統 `PATH` 回退。
 - macOS 啟動 UxPlay 時使用原生 `osxvideosink`、libav 軟體 H.264 解碼及 `-vsync no`；「Auto」輸出選項會採用原生 sink。其他平台維持 UxPlay 自動選擇。
