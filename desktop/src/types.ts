@@ -1,9 +1,12 @@
 export type EngineStatus = "stopped" | "starting" | "running" | "stopping" | "faulted" | "dependencyMissing";
 export type AndroidDeviceStatus = "ready" | "unauthorized" | "offline" | "unknown";
 export type LogLevel = "information" | "warning" | "error";
+export type DependencyAction = "upgrade" | "reinstall";
+export type DependencyOperation = "install" | DependencyAction;
 
 export interface DependencySnapshot {
   status: "checking" | "installing" | "ready" | "failed" | "disabled";
+  operation: DependencyOperation | null;
   message: string;
   missing: string[];
   logPath: string;

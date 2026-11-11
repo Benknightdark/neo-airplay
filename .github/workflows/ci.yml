@@ -18,6 +18,9 @@ concurrency:
 jobs:
   verify:
     name: verify (${{ matrix.os }})
+    if: >-
+      !contains(github.event.head_commit.message, '/automation/next-version') &&
+      github.head_ref != 'automation/next-version'
     strategy:
       fail-fast: false
       matrix:
@@ -46,7 +49,6 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           toolchain: stable
-          profile: minimal
           components: rustfmt, clippy
 
       - name: Install Linux desktop dependencies
@@ -62,9 +64,18 @@ jobs:
         working-directory: desktop
         run: bun install --frozen-lockfile --silent
 
-      - name: Run unit checks and build checks
-        working-directory: desktop
-        run: bun run --silent verify
+      - name: Install desktop test dependencies
+        working-directory: desktop-test
+        run: bun install --frozen-lockfile --silent
+
+      - name: Run unit and build checks on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./desktop/scripts/verify.ps1
+
+      - name: Run unit and build checks on macOS and Linux
+        if: runner.os != 'Windows'
+        run: bash desktop/scripts/verify.sh
 
       - name: Run desktop E2E tests
         if: runner.os != 'Linux'
@@ -89,6 +100,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: desktop/.node-version
+          package-manager-cache: false
 
       - name: Check latest head and pending promotion changes
         id: current-head

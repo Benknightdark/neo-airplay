@@ -158,12 +158,5 @@ function toggleAndroid(): void {
       </article>
     </div>
 
-    <div class="summary-strip">
-      <div class="summary-item"><span class="summary-icon">⌘</span><span>Apple 裝置</span><strong>AirPlay</strong></div>
-      <div class="summary-divider"></div>
-      <div class="summary-item"><span class="summary-icon">▣</span><span>Android 裝置</span><strong>scrcpy</strong></div>
-      <div class="summary-divider"></div>
-      <div class="summary-item"><span class="summary-icon">◉</span><span>執行方式</span><strong>獨立程序</strong></div>
-    </div>
   </section>
 </template>

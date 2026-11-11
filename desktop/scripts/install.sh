@@ -18,6 +18,7 @@ development=0
 check_only=0
 warm_registry=0
 gui=0
+upgrade=0
 engine_dir="${NEO_AIRPLAY_ENGINE_DIR:-}"
 registry_path=""
 marker_file=""
@@ -28,6 +29,7 @@ while (($#)); do
   case "$argument" in
     --development) development=1 ;;
     --check) check_only=1 ;;
+    --upgrade) upgrade=1 ;;
     --warm-gstreamer-registry) warm_registry=1 ;;
     --gui) gui=1 ;;
     --engine-dir)
@@ -437,7 +439,7 @@ runtime_ready=0
 development_ready=0
 if check_runtime; then runtime_ready=1; fi
 if ((development)) && check_development; then development_ready=1; fi
-if ((runtime_ready && (!development || development_ready))); then
+if ((runtime_ready && (!development || development_ready) && !upgrade)); then
   if ((development)); then persist_development_path; fi
   exit 0
 fi
@@ -459,7 +461,7 @@ run_privileged() {
 
 install_uxplay_source() {
   local archive work_dir source_dir actual_sha version_output version_number
-  if [[ -x "${engine_bin}/uxplay" ]]; then
+  if ((upgrade == 0)) && [[ -x "${engine_bin}/uxplay" ]]; then
     version_output="$("${engine_bin}/uxplay" -v 2>&1 || true)"
     version_number="$(printf '%s\n' "$version_output" | sed -nE 's/.*UxPlay version ([0-9]+(\.[0-9]+)+).*/\1/p' | head -n 1 || true)"
     if [[ -n "$version_number" ]] && awk -v actual="$version_number" -v minimum="$UXPLAY_VERSION" 'BEGIN { split(actual, a, "."); split(minimum, b, "."); for (i=1; i<=3; i++) { if ((a[i]+0) > (b[i]+0)) exit 0; if ((a[i]+0) < (b[i]+0)) exit 1 } exit 0 }'; then
@@ -484,10 +486,32 @@ install_uxplay_source() {
   export PATH="${engine_bin}:${PATH}"
 }
 
+external_runtime_executable() {
+  local command_name="$1" directory candidate
+  local path_entries=()
+  IFS=: read -r -a path_entries <<< "${PATH:-}"
+  for directory in "${path_entries[@]}"; do
+    [[ "$directory" == "$engine_dir" || "$directory" == "${engine_dir}/"* ]] && continue
+    candidate="${directory}/${command_name}"
+    if [[ -x "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 stage_runtime_tool() {
   local command_name="$1" source_path="${2:-}" target_path
   target_path="${engine_bin}/${command_name}"
-  [[ -x "$target_path" ]] && return 0
+  if [[ -x "$target_path" ]] && ((upgrade == 0)); then return 0; fi
+  if ((upgrade)); then
+    if [[ "$source_path" == "${engine_dir}/"* ]]; then source_path=""; fi
+    if [[ -z "$source_path" ]]; then
+      source_path="$(external_runtime_executable "$command_name" || true)"
+    fi
+  fi
+  if [[ -x "$target_path" && -z "$source_path" ]]; then return 0; fi
   if [[ -z "$source_path" ]]; then source_path="$(command -v "$command_name" 2>/dev/null || true)"; fi
   [[ -n "$source_path" && -x "$source_path" ]] || fail "Required runtime tool is not available for staging: ${command_name}."
   mkdir -p "$engine_bin"
@@ -497,6 +521,12 @@ stage_runtime_tool() {
 
 stage_runtime_tools() {
   local scrcpy_server scrcpy_prefix
+  if ((upgrade)); then
+    rm -rf "${engine_dir}/lib/gstreamer-1.0" "${engine_dir}/share/gstreamer-1.0"
+    if [[ "$(uname -s)" == "Linux" && "$(uname -m)" != x86_64 && "$(uname -m)" != amd64 ]]; then
+      rm -f "${engine_bin}/scrcpy-server"
+    fi
+  fi
   stage_runtime_tool adb
   stage_runtime_tool scrcpy
   stage_runtime_tool gst-inspect-1.0
@@ -613,8 +643,18 @@ install_macos_runtime() {
   ensure_xcode_cli_tools
   ensure_homebrew
   export HOMEBREW_PREFIX="$(brew --prefix)"
+  if ((upgrade)); then
+    log "Refreshing Homebrew metadata before updating runtime dependencies."
+    brew update --quiet
+  fi
   log "Installing GStreamer and UxPlay build dependencies with Homebrew."
   brew install --quiet cmake coreutils libplist openssl@3 pkg-config gstreamer
+  if ((upgrade)); then
+    local package
+    for package in cmake coreutils libplist openssl@3 pkg-config gstreamer; do
+      brew upgrade --quiet "$package"
+    done
+  fi
   stage_runtime_tool gtimeout "$(command -v gtimeout 2>/dev/null || true)"
   bounded_timeout="$(runtime_executable gtimeout || true)"
   install_uxplay_source
@@ -645,7 +685,7 @@ install_scrcpy_macos() {
       expected_sha="$SCRCPY_MACOS_X86_64_SHA256" ;;
     *) fail "The official scrcpy release does not support macOS ${architecture}." ;;
   esac
-  if scrcpy_bundle_ready; then return; fi
+  if ((upgrade == 0)) && scrcpy_bundle_ready; then return; fi
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-scrcpy.XXXXXX")"
   archive="${work_dir}/${asset}"
   extract_dir="${work_dir}/extract"
@@ -674,7 +714,7 @@ install_scrcpy_macos() {
 
 install_scrcpy_linux() {
   local architecture work_dir archive actual_sha extract_dir binary server target_dir
-  if scrcpy_bundle_ready; then return; fi
+  if ((upgrade == 0)) && scrcpy_bundle_ready; then return; fi
   architecture="$(uname -m)"
   if [[ "$architecture" == x86_64 || "$architecture" == amd64 ]]; then
     work_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-scrcpy.XXXXXX")"
@@ -752,13 +792,13 @@ install_node_binary() {
   architecture="$(uname -m)"
   case "$system:$architecture" in
     Linux:x86_64|Linux:amd64)
-      asset="node-v${NODE_VERSION}-linux-x64.tar.xz"; expected_sha="df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de" ;;
+      asset="node-v${NODE_VERSION}-linux-x64.tar.xz"; expected_sha="48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75" ;;
     Linux:aarch64|Linux:arm64)
-      asset="node-v${NODE_VERSION}-linux-arm64.tar.xz"; expected_sha="a44aeb94849a299b22df10b9e622ec2f605c2183501bc40590705131de7c740f" ;;
+      asset="node-v${NODE_VERSION}-linux-arm64.tar.xz"; expected_sha="eb187837a2230d4047161ac0be008584e16b46f726e9c9490ee35dc6b17d9ba8" ;;
     Darwin:x86_64|Darwin:amd64)
-      asset="node-v${NODE_VERSION}-darwin-x64.tar.xz"; expected_sha="ac41874c3352937119cfec39e1a98c578fe58ce8a86d7e785b89a4706015f305" ;;
+      asset="node-v${NODE_VERSION}-darwin-x64.tar.xz"; expected_sha="6965578fd823e72c1b5387f5ab84cb25368f886e02eb8779e6f0fce6b91c27b7" ;;
     Darwin:arm64|Darwin:aarch64)
-      asset="node-v${NODE_VERSION}-darwin-arm64.tar.xz"; expected_sha="72d5d8832b41c9d9646197af614ffd751406ea4d215060eb91b98864e1919a3e" ;;
+      asset="node-v${NODE_VERSION}-darwin-arm64.tar.xz"; expected_sha="1f5ac075be50bed4780ea3be19a007fda95ea4d527d28d76d0b91de47d915115" ;;
     *) fail "Official Node.js ${NODE_VERSION} binaries are unavailable for ${system}/${architecture}." ;;
   esac
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-node.XXXXXX")"
@@ -799,7 +839,7 @@ install_development_package_manager_tools() {
 
 linux_packages() {
   local manager="$1" architecture
-  local runtime_packages=() build_packages=() development_packages=()
+  local runtime_packages=() build_packages=() development_packages=() dnf_arguments=()
   architecture="$(uname -m)"
   case "$manager" in
     apt)
@@ -837,7 +877,8 @@ linux_packages() {
         run_privileged dnf -q -y install dnf-plugins-core
         run_privileged dnf -q -y copr enable zeno/scrcpy
       fi
-      run_privileged dnf -q -y install "${runtime_packages[@]}" "${build_packages[@]}"
+      if ((upgrade)); then dnf_arguments+=(--refresh); fi
+      run_privileged dnf -q -y "${dnf_arguments[@]}" install "${runtime_packages[@]}" "${build_packages[@]}"
       ;;
     pacman)
       run_privileged pacman -Syu --noconfirm --noprogressbar --needed "${runtime_packages[@]}" "${build_packages[@]}"
@@ -928,7 +969,7 @@ install_linux_dev_tools() {
   rm -rf "$temp_dir"
 }
 
-if ((!runtime_ready)); then
+if ((!runtime_ready || upgrade)); then
   case "$(uname -s)" in
     Darwin)
       install_macos_runtime

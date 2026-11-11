@@ -1,16 +1,18 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import * as api from "../api";
-import type { DependencySnapshot } from "../types";
-import DependencyPanel from "./DependencyPanel.vue";
+import * as api from "../../../desktop/src/api";
+import type { DependencySnapshot } from "../../../desktop/src/types";
+import DependencyPanel from "../../../desktop/src/components/DependencyPanel.vue";
 
-vi.mock("../api", () => ({
+vi.mock("../../../desktop/src/api", () => ({
   getDependencies: vi.fn(),
   installDependencies: vi.fn(),
+  readInstallLog: vi.fn(),
 }));
 
 const ready: DependencySnapshot = {
   status: "ready",
+  operation: null,
   message: "投影工具已就緒。",
   missing: [],
   logPath: "",
@@ -18,6 +20,7 @@ const ready: DependencySnapshot = {
 
 const failed: DependencySnapshot = {
   status: "failed",
+  operation: null,
   message: "部分投影工具尚未安裝。",
   missing: ["scrcpy"],
   logPath: "/tmp/neo-airplay-install.log",
@@ -79,6 +82,7 @@ describe("投影工具準備", () => {
 
     await flushPromises();
     expect(wrapper.text()).toContain("/tmp/neo-airplay-install.log");
+    expect(wrapper.get('[data-testid="install-log-open"]').text()).toBe("查看安裝記錄");
     await wrapper.get('[data-testid="dependency-retry"]').trigger("click");
     await flushPromises();
 
@@ -135,6 +139,7 @@ describe("投影工具準備", () => {
     vi.useFakeTimers();
     vi.mocked(api.getDependencies).mockResolvedValue({
       status: "disabled",
+      operation: null,
       message: "自動安裝已停用。",
       missing: [],
       logPath: "",

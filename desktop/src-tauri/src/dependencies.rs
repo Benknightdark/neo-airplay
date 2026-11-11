@@ -28,10 +28,35 @@ const INSTALL_LAUNCH: &str = "install-launch.json";
 const INSTALL_LOG: &str = "install.log";
 const INSTALL_PROGRESS: &str = "install-progress.json";
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DependencyAction {
+    Upgrade,
+    Reinstall,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DependencyOperation {
+    Install,
+    Upgrade,
+    Reinstall,
+}
+
+impl From<DependencyAction> for DependencyOperation {
+    fn from(action: DependencyAction) -> Self {
+        match action {
+            DependencyAction::Upgrade => Self::Upgrade,
+            DependencyAction::Reinstall => Self::Reinstall,
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DependencySnapshot {
     pub status: String,
+    pub operation: Option<DependencyOperation>,
     pub message: String,
     pub missing: Vec<String>,
     pub log_path: String,
@@ -40,6 +65,7 @@ pub struct DependencySnapshot {
 pub struct DependencyManager {
     snapshot: Arc<Mutex<DependencySnapshot>>,
     worker_active: Arc<AtomicBool>,
+    operation_gate: Arc<Mutex<()>>,
     engine_dir: PathBuf,
     gstreamer_registry_path: PathBuf,
     setup_dir: PathBuf,
@@ -57,6 +83,7 @@ impl DependencyManager {
         Self {
             snapshot: Arc::new(Mutex::new(DependencySnapshot {
                 status: if enabled { "checking" } else { "disabled" }.into(),
+                operation: None,
                 message: if enabled {
                     "正在檢查投影工具…"
                 } else {
@@ -67,6 +94,7 @@ impl DependencyManager {
                 log_path: setup_dir.join(INSTALL_LOG).to_string_lossy().into_owned(),
             })),
             worker_active: Arc::new(AtomicBool::new(false)),
+            operation_gate: Arc::new(Mutex::new(())),
             engine_dir,
             gstreamer_registry_path,
             setup_dir,
@@ -81,31 +109,100 @@ impl DependencyManager {
             .map_err(|_| "無法讀取工具安裝狀態。".into())
     }
 
+    pub fn read_install_log(&self) -> Result<String, String> {
+        fs::read_to_string(self.setup_dir.join(INSTALL_LOG)).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                "尚無安裝記錄。".to_owned()
+            } else {
+                format!("無法讀取安裝記錄：{error}")
+            }
+        })
+    }
+
     pub fn start(&self) -> Result<DependencySnapshot, String> {
-        if !self.enabled {
-            return self.snapshot();
+        self.begin_operation(DependencyOperation::Install, true, || Ok(()))
+    }
+
+    pub fn manage<F>(
+        &self,
+        action: DependencyAction,
+        prepare: F,
+    ) -> Result<DependencySnapshot, String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        self.begin_operation(action.into(), false, prepare)
+    }
+
+    pub fn with_engine_access<T>(
+        &self,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _operation = self
+            .operation_gate
+            .lock()
+            .map_err(|_| "工具維護狀態無法讀取。".to_owned())?;
+        if self.worker_active.load(Ordering::Acquire) {
+            return Err("工具正在檢查或維護，請稍候再試。".into());
         }
-        if self
-            .worker_active
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return self.snapshot();
+        action()
+    }
+
+    fn begin_operation<F>(
+        &self,
+        operation: DependencyOperation,
+        return_existing: bool,
+        prepare: F,
+    ) -> Result<DependencySnapshot, String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        if !self.enabled {
+            if return_existing {
+                return self.snapshot();
+            }
+            return Err("此工作階段已停用工具管理。".into());
         }
 
-        match self.snapshot.lock() {
-            Ok(mut snapshot) => {
-                snapshot.status = "checking".into();
-                snapshot.message = "正在檢查 UxPlay、GStreamer、ADB 與 scrcpy…".into();
+        {
+            let _operation = self
+                .operation_gate
+                .lock()
+                .map_err(|_| "工具維護狀態無法更新。".to_owned())?;
+            if self.worker_active.swap(true, Ordering::AcqRel) {
+                if return_existing {
+                    return self.snapshot();
+                }
+                return Err("另一項工具檢查或維護作業仍在進行。".into());
             }
-            Err(_) => {
-                self.worker_active.store(false, Ordering::Release);
-                return Err("無法更新工具安裝狀態。".into());
-            }
+            let mut snapshot = match self.snapshot.lock() {
+                Ok(snapshot) => snapshot,
+                Err(_) => {
+                    self.worker_active.store(false, Ordering::Release);
+                    return Err("無法更新工具安裝狀態。".into());
+                }
+            };
+            snapshot.status = if operation == DependencyOperation::Install {
+                "checking".into()
+            } else {
+                "installing".into()
+            };
+            snapshot.operation = Some(operation);
+            snapshot.message = match operation {
+                DependencyOperation::Install => "正在檢查 UxPlay、GStreamer、ADB 與 scrcpy…".into(),
+                DependencyOperation::Upgrade => "正在準備升級投影工具…".into(),
+                DependencyOperation::Reinstall => "正在準備清除並重新安裝…".into(),
+            };
+        }
+
+        if let Err(error) = prepare() {
+            self.fail_operation(&error);
+            return Err(error);
         }
 
         let shared = Arc::clone(&self.snapshot);
         let worker_active = Arc::clone(&self.worker_active);
+        let operation_gate = Arc::clone(&self.operation_gate);
         let engine_dir = self.engine_dir.clone();
         let gstreamer_registry_path = self.gstreamer_registry_path.clone();
         let setup_dir = self.setup_dir.clone();
@@ -113,7 +210,13 @@ impl DependencyManager {
             .name("neo-airplay-dependency-setup".into())
             .spawn(move || {
                 let run = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    run_setup(&engine_dir, &gstreamer_registry_path, &setup_dir, &shared)
+                    run_setup(
+                        &engine_dir,
+                        &gstreamer_registry_path,
+                        &setup_dir,
+                        &shared,
+                        operation,
+                    )
                 }));
                 let outcome = match run {
                     Ok(Ok(outcome)) => outcome,
@@ -122,29 +225,43 @@ impl DependencyManager {
                         SetupOutcome::failed(error, Vec::new())
                     }
                     Err(_) => {
-                        let message = "工具檢查背景程序意外結束。".to_owned();
+                        let message = "工具維護背景程序意外結束。".to_owned();
                         append_log(&setup_dir.join(INSTALL_LOG), &message);
                         SetupOutcome::failed(message, Vec::new())
                     }
                 };
-                if let Ok(mut snapshot) = shared.lock() {
-                    snapshot.status = outcome.status;
-                    snapshot.message = outcome.message;
-                    snapshot.missing = outcome.missing;
+                if let Ok(_operation) = operation_gate.lock() {
+                    if let Ok(mut snapshot) = shared.lock() {
+                        snapshot.status = outcome.status;
+                        snapshot.message = outcome.message;
+                        snapshot.missing = outcome.missing;
+                    }
+                    worker_active.store(false, Ordering::Release);
+                } else {
+                    worker_active.store(false, Ordering::Release);
                 }
-                worker_active.store(false, Ordering::Release);
             });
 
         if let Err(error) = spawned {
-            self.worker_active.store(false, Ordering::Release);
-            if let Ok(mut snapshot) = self.snapshot.lock() {
-                snapshot.status = "failed".into();
-                snapshot.message = format!("無法啟動背景工具檢查：{error}");
-            }
+            self.fail_operation(&format!("無法啟動背景工具維護：{error}"));
             return Err(error.to_string());
         }
 
         self.snapshot()
+    }
+
+    fn fail_operation(&self, message: &str) {
+        append_log(&self.setup_dir.join(INSTALL_LOG), message);
+        if let Ok(_operation) = self.operation_gate.lock() {
+            if let Ok(mut snapshot) = self.snapshot.lock() {
+                snapshot.status = "failed".into();
+                snapshot.message = message.to_owned();
+                snapshot.missing.clear();
+            }
+            self.worker_active.store(false, Ordering::Release);
+        } else {
+            self.worker_active.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -155,10 +272,14 @@ struct SetupOutcome {
 }
 
 impl SetupOutcome {
-    fn ready() -> Self {
+    fn ready(operation: DependencyOperation) -> Self {
         Self {
             status: "ready".into(),
-            message: "投影工具已就緒。".into(),
+            message: match operation {
+                DependencyOperation::Install => "投影工具已就緒。".into(),
+                DependencyOperation::Upgrade => "投影工具升級完成。".into(),
+                DependencyOperation::Reinstall => "投影工具重新安裝完成。".into(),
+            },
             missing: Vec::new(),
         }
     }
@@ -231,6 +352,7 @@ fn run_setup(
     gstreamer_registry_path: &Path,
     setup_dir: &Path,
     snapshot: &Arc<Mutex<DependencySnapshot>>,
+    operation: DependencyOperation,
 ) -> Result<SetupOutcome, String> {
     fs::create_dir_all(setup_dir).map_err(|error| format!("無法建立安裝記錄目錄：{error}"))?;
 
@@ -313,43 +435,64 @@ fn run_setup(
         }
     }
 
+    if operation == DependencyOperation::Reinstall {
+        publish_installing(snapshot, "正在清除 Neo AirPlay 專用工具與快取…");
+        clear_app_tools(engine_dir, gstreamer_registry_path)?;
+    } else if operation == DependencyOperation::Upgrade {
+        publish_installing(snapshot, "正在升級投影工具並更新 GStreamer 快取…");
+        clear_gstreamer_registry(gstreamer_registry_path)?;
+    }
+
     // Avoid rewriting a staged script while an installer from an earlier app process may be
     // reading it. Recovery waits above before refreshing the embedded copy.
     stage_installer(setup_dir)?;
     let runtime = check_runtime(engine_dir, setup_dir)?;
-    if runtime.is_ready() {
+    if runtime.is_ready() && operation == DependencyOperation::Install {
         warm_gstreamer_registry(engine_dir, gstreamer_registry_path, setup_dir, snapshot);
         remove_if_exists(&launch_path);
-        return Ok(SetupOutcome::ready());
+        return Ok(SetupOutcome::ready(operation));
     }
 
     remove_if_exists(&marker_path);
     remove_if_exists(&result_path);
     remove_if_exists(&launch_path);
 
-    let missing_message = format!("缺少或無法載入：{}", runtime.missing.join("、"));
-    append_log(&setup_dir.join(INSTALL_LOG), &missing_message);
-    publish_installing(
-        snapshot,
-        &format!("{missing_message} 正在背景安裝，請完成系統授權提示。"),
-    );
+    let message = match operation {
+        DependencyOperation::Install => {
+            let missing_message = format!("缺少或無法載入：{}", runtime.missing.join("、"));
+            append_log(&setup_dir.join(INSTALL_LOG), &missing_message);
+            format!("{missing_message} 正在背景安裝，請完成系統授權提示。")
+        }
+        DependencyOperation::Upgrade => "正在更新平台相依套件與 Neo AirPlay 工具…".into(),
+        DependencyOperation::Reinstall => "正在更新平台相依套件並重新安裝工具…".into(),
+    };
+    publish_installing(snapshot, &message);
 
-    let result = install_dependencies(setup_dir, engine_dir, snapshot);
+    let result = install_dependencies(
+        setup_dir,
+        engine_dir,
+        snapshot,
+        operation != DependencyOperation::Install,
+    );
     let final_check = check_runtime(engine_dir, setup_dir)?;
-    if final_check.is_ready() {
+    let installer_succeeded = result.as_ref().is_ok_and(|result| result.exit_code == 0);
+    if final_check.is_ready() && (operation == DependencyOperation::Install || installer_succeeded)
+    {
         warm_gstreamer_registry(engine_dir, gstreamer_registry_path, setup_dir, snapshot);
         remove_if_exists(&launch_path);
-        return Ok(SetupOutcome::ready());
+        return Ok(SetupOutcome::ready(operation));
     }
 
     let install_detail = match result {
         Ok(result) => result.detail(),
         Err(error) => format!("安裝程序未完成：{error}"),
     };
-    let message = format!(
-        "{install_detail}；仍缺少 {}。請查看安裝記錄後重試。",
-        final_check.missing.join("、")
-    );
+    let missing_detail = if final_check.missing.is_empty() {
+        "工具檢查仍通過，但維護作業未成功完成。".to_owned()
+    } else {
+        format!("仍缺少 {}。", final_check.missing.join("、"))
+    };
+    let message = format!("{install_detail}；{missing_detail}請查看安裝記錄後重試。");
     append_log(&setup_dir.join(INSTALL_LOG), &message);
     Ok(SetupOutcome::failed(message, final_check.missing))
 }
@@ -489,6 +632,7 @@ fn install_dependencies(
     setup_dir: &Path,
     engine_dir: &Path,
     snapshot: &Arc<Mutex<DependencySnapshot>>,
+    force_upgrade: bool,
 ) -> Result<InstallResult, String> {
     let log_path = setup_dir.join(INSTALL_LOG);
     let marker_path = setup_dir.join(INSTALL_MARKER);
@@ -508,9 +652,10 @@ fn install_dependencies(
     {
         let script = setup_dir.join("install.sh");
         let launch_script = setup_dir.join("launch.sh");
+        let upgrade_argument = if force_upgrade { " --upgrade" } else { "" };
         fs::write(
             &launch_script,
-            "#!/bin/bash\nset -u\nexec > >(tee -a \"$2\") 2>&1\nexec /bin/bash \"$1\" --gui --engine-dir \"$3\" --marker-file \"$4\" --result-file \"$5\"\n",
+            format!("#!/bin/bash\nset -u\nexec > >(tee -a \"$2\") 2>&1\nexec /bin/bash \"$1\" --gui --engine-dir \"$3\" --marker-file \"$4\" --result-file \"$5\"{upgrade_argument}\n"),
         )
         .map_err(|error| format!("無法準備終端安裝程序：{error}"))?;
         let command_line = [
@@ -576,7 +721,13 @@ fn install_dependencies(
             .append(true)
             .open(&log_path)
             .map_err(|error| format!("無法建立安裝記錄：{error}"))?;
-        let mut command = installer_command(&script, engine_dir, &marker_path, &result_path);
+        let mut command = installer_command(
+            &script,
+            engine_dir,
+            &marker_path,
+            &result_path,
+            force_upgrade,
+        );
         command
             .env("PATH", installer_path(engine_dir))
             .stdin(Stdio::null())
@@ -604,7 +755,13 @@ fn install_dependencies(
 }
 
 #[cfg(target_os = "windows")]
-fn installer_command(script: &Path, engine_dir: &Path, marker: &Path, result: &Path) -> Command {
+fn installer_command(
+    script: &Path,
+    engine_dir: &Path,
+    marker: &Path,
+    result: &Path,
+    force_upgrade: bool,
+) -> Command {
     let mut command = background_command("powershell.exe");
     command.args([
         "-NoProfile",
@@ -626,11 +783,20 @@ fn installer_command(script: &Path, engine_dir: &Path, marker: &Path, result: &P
         .arg(result.with_file_name(INSTALL_PROGRESS))
         .arg("-LogFile")
         .arg(result.with_file_name(INSTALL_LOG));
+    if force_upgrade {
+        command.arg("-Upgrade");
+    }
     command
 }
 
 #[cfg(target_os = "linux")]
-fn installer_command(script: &Path, engine_dir: &Path, marker: &Path, result: &Path) -> Command {
+fn installer_command(
+    script: &Path,
+    engine_dir: &Path,
+    marker: &Path,
+    result: &Path,
+    force_upgrade: bool,
+) -> Command {
     let mut command = Command::new("/bin/bash");
     command
         .arg(script)
@@ -640,6 +806,9 @@ fn installer_command(script: &Path, engine_dir: &Path, marker: &Path, result: &P
         .arg(marker)
         .arg("--result-file")
         .arg(result);
+    if force_upgrade {
+        command.arg("--upgrade");
+    }
     command
 }
 
@@ -950,6 +1119,57 @@ fn remove_if_exists(path: &Path) {
     }
 }
 
+fn clear_app_tools(engine_dir: &Path, gstreamer_registry_path: &Path) -> Result<(), String> {
+    clear_engine_directory(engine_dir)?;
+    clear_gstreamer_registry(gstreamer_registry_path)
+}
+
+fn clear_gstreamer_registry(path: &Path) -> Result<(), String> {
+    if !path.as_os_str().is_empty() {
+        remove_file_if_exists(path)?;
+    }
+    Ok(())
+}
+
+fn clear_engine_directory(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path).map_err(|error| format!("無法建立工具目錄：{error}"))?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| format!("無法檢查工具目錄：{error}"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err("工具目錄不是安全的資料夾，未移除任何工具。".into());
+    }
+
+    for entry in fs::read_dir(path).map_err(|error| format!("無法讀取工具目錄：{error}"))?
+    {
+        let entry = entry.map_err(|error| format!("無法讀取工具目錄項目：{error}"))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == ".GITKEEP" || name.starts_with(".bundled-") {
+            continue;
+        }
+        let entry_path = entry.path();
+        let entry_type = fs::symlink_metadata(&entry_path)
+            .map_err(|error| format!("無法檢查工具目錄項目：{error}"))?
+            .file_type();
+        if entry_type.is_dir() {
+            fs::remove_dir_all(&entry_path)
+                .map_err(|error| format!("無法清除工具目錄項目：{error}"))?;
+        } else {
+            fs::remove_file(&entry_path)
+                .map_err(|error| format!("無法清除工具目錄項目：{error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("無法清除工具快取：{error}")),
+    }
+}
+
 fn append_log(path: &Path, message: &str) {
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "{message}");
@@ -1005,185 +1225,5 @@ fn shell_quote(value: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn disabled_session_does_not_start_installation() {
-        let manager = DependencyManager::new(
-            PathBuf::from("unused"),
-            PathBuf::from("unused-cache"),
-            Path::new("unused"),
-            false,
-        );
-        assert_eq!(manager.start().unwrap().status, "disabled");
-        assert_eq!(manager.snapshot().unwrap().status, "disabled");
-    }
-
-    #[test]
-    fn concurrent_start_requests_share_one_background_worker() {
-        let manager = DependencyManager::new(
-            PathBuf::from("unused"),
-            PathBuf::from("unused-cache"),
-            Path::new("unused"),
-            true,
-        );
-        manager.worker_active.store(true, Ordering::Release);
-        assert_eq!(manager.start().unwrap().status, "checking");
-        assert!(manager.worker_active.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn check_output_reports_each_missing_runtime_component() {
-        let missing = parse_missing_dependencies(
-            "Missing runtime dependencies:\n  - uxplay 1.73.7 or newer\n  - GStreamer element avdec_aac\n",
-        );
-        assert_eq!(
-            missing,
-            ["uxplay 1.73.7 or newer", "GStreamer element avdec_aac"]
-        );
-    }
-
-    #[test]
-    fn install_result_requires_pid_and_exit_code() {
-        let parsed: InstallResult = serde_json::from_str(r#"{"pid":123,"exitCode":7}"#).unwrap();
-        assert_eq!(parsed.pid, 123);
-        assert_eq!(parsed.exit_code, 7);
-        assert!(parsed.stage.is_none());
-        assert!(parsed.message.is_none());
-        assert!(serde_json::from_str::<InstallResult>(r#"{"pid":123}"#).is_err());
-    }
-
-    #[test]
-    fn install_failure_includes_the_stage_and_summary() {
-        let result: InstallResult = serde_json::from_str(
-            r#"{"pid":123,"exitCode":1,"stage":"repairing","message":"編譯工具修復後仍無法使用。"}"#,
-        ).unwrap();
-        assert!(result.detail().contains("修復編譯工具"));
-        assert!(result.detail().contains("編譯工具修復後仍無法使用。"));
-    }
-
-    #[test]
-    fn installation_reports_progress_and_a_completion_result() {
-        let (directory, snapshot, child) = install_test_process("complete");
-        let result = wait_for_install(
-            Path::new("unused"),
-            &directory,
-            Some(child.id()),
-            Some(child),
-            None,
-            &snapshot,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(result.exit_code, 0);
-        assert_eq!(snapshot.lock().unwrap().message, "正在編譯投影工具…");
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn interrupted_installation_preserves_exit_status_and_allows_retry() {
-        let (directory, snapshot, child) = install_test_process("interrupt");
-        fs::write(directory.join(INSTALL_LAUNCH), b"attempt in progress").unwrap();
-        let detail = wait_for_install(
-            Path::new("unused"),
-            &directory,
-            Some(child.id()),
-            Some(child),
-            None,
-            &snapshot,
-        )
-        .unwrap_err();
-        assert!(detail.contains("11"));
-        assert!(detail.contains("編譯 AirPlay 工具"));
-        assert!(!directory.join(INSTALL_MARKER).exists());
-        assert!(!directory.join(INSTALL_LAUNCH).exists());
-        assert!(!directory.join(INSTALL_RESULT).exists());
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn install_test_child_process() {
-        let Ok(mode) = std::env::var("NEO_AIRPLAY_TEST_INSTALL_MODE") else {
-            return;
-        };
-        let directory = PathBuf::from(std::env::var_os("NEO_AIRPLAY_TEST_INSTALL_DIR").unwrap());
-        fs::write(
-            directory.join(INSTALL_MARKER),
-            std::process::id().to_string(),
-        )
-        .unwrap();
-        write_json_atomic(
-            &directory.join(INSTALL_PROGRESS),
-            &InstallProgress {
-                pid: std::process::id(),
-                stage: "uxplay-build".into(),
-                message: "正在編譯投影工具…".into(),
-            },
-        )
-        .unwrap();
-        if mode == "interrupt" {
-            std::process::exit(11);
-        }
-        thread::sleep(Duration::from_millis(100));
-        write_json_atomic(
-            &directory.join(INSTALL_RESULT),
-            &InstallResult {
-                pid: std::process::id(),
-                exit_code: 0,
-                stage: None,
-                message: None,
-            },
-        )
-        .unwrap();
-    }
-
-    fn install_test_process(mode: &str) -> (PathBuf, Arc<Mutex<DependencySnapshot>>, Child) {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let directory =
-            std::env::temp_dir().join(format!("neo-install-test-{}-{nonce}", std::process::id()));
-        fs::create_dir_all(&directory).unwrap();
-        let snapshot = Arc::new(Mutex::new(DependencySnapshot {
-            status: "installing".into(),
-            message: "waiting".into(),
-            missing: Vec::new(),
-            log_path: String::new(),
-        }));
-        let child = crate::state::background_command(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "dependencies::tests::install_test_child_process",
-                "--nocapture",
-            ])
-            .env("NEO_AIRPLAY_TEST_INSTALL_MODE", mode)
-            .env("NEO_AIRPLAY_TEST_INSTALL_DIR", &directory)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap();
-        (directory, snapshot, child)
-    }
-
-    #[test]
-    fn tasklist_pid_matching_does_not_accept_prefixes() {
-        let output = Output {
-            status: std::process::ExitStatus::default(),
-            stdout: b"\"powershell.exe\",\"1234\",\"Console\"\n".to_vec(),
-            stderr: Vec::new(),
-        };
-        assert!(tasklist_contains_pid(&output, 1234));
-        assert!(!tasklist_contains_pid(&output, 123));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn terminal_paths_are_shell_quoted() {
-        assert_eq!(
-            shell_quote("/tmp/a b/'$(touch injected)'"),
-            "'/tmp/a b/'\\''$(touch injected)'\\'''"
-        );
-    }
-}
+#[path = "../../../desktop-test/backend/unit-tests/dependencies.rs"]
+mod tests;

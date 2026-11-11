@@ -1,7 +1,7 @@
 import { mount } from "@vue/test-utils";
 import { describe, expect, it } from "vitest";
-import SettingsPage from "./SettingsPage.vue";
-import type { ReceiverSettings } from "../types";
+import SettingsPage from "../../../desktop/src/components/SettingsPage.vue";
+import type { ReceiverSettings } from "../../../desktop/src/types";
 
 const settings: ReceiverSettings = {
   receiverName: "Neo AirPlay",
