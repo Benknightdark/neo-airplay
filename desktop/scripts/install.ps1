@@ -833,7 +833,7 @@ function Install-DevelopmentTools {
     & $rustup.Source default stable
     if ($LASTEXITCODE -ne 0) { Stop-Setup "rustup failed to select Rust stable (exit code $LASTEXITCODE)." }
 
-    Install-Node22
+    Install-NodeBinary
     if (-not (Test-VisualStudioCppTools)) {
         $override = '--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended'
         if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') {
@@ -935,17 +935,17 @@ function Install-Bun {
     }
 }
 
-function Install-Node22 {
+function Install-NodeBinary {
     $ErrorActionPreference = 'Continue'
     if ((Get-Command node -ErrorAction SilentlyContinue) -and ((& node --version 2>$null | Out-String).Trim() -eq "v$NodeVersion")) { return }
     $architecture = $env:PROCESSOR_ARCHITECTURE
     if ($env:PROCESSOR_ARCHITEW6432) { $architecture = $env:PROCESSOR_ARCHITEW6432 }
     if ($architecture -eq 'ARM64') {
         $asset = "node-v$NodeVersion-win-arm64.zip"
-        $expectedHash = '33dad22e4cef5ee8f9fbb1b0d037fdacd0e56d12a4580f0d63f68b894deab535'
+        $expectedHash = 'f47968c213105077f64c6510f007632c0ca2574802a0b5067c327c49abe1c468'
     } elseif ($architecture -eq 'AMD64') {
         $asset = "node-v$NodeVersion-win-x64.zip"
-        $expectedHash = '2b0ff57b049cda1bbcea2240eec20467018713c1efe1f7360c2681859b90ed71'
+        $expectedHash = 'ca1bff5d8ead13c9f2ea404a176db46bd430704d5b5113734049fa365e7799e2'
     } else {
         Stop-Setup "Official Node.js $NodeVersion binaries are unavailable for architecture $architecture."
     }

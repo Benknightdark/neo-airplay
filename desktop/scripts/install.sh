@@ -792,13 +792,13 @@ install_node_binary() {
   architecture="$(uname -m)"
   case "$system:$architecture" in
     Linux:x86_64|Linux:amd64)
-      asset="node-v${NODE_VERSION}-linux-x64.tar.xz"; expected_sha="df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de" ;;
+      asset="node-v${NODE_VERSION}-linux-x64.tar.xz"; expected_sha="48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75" ;;
     Linux:aarch64|Linux:arm64)
-      asset="node-v${NODE_VERSION}-linux-arm64.tar.xz"; expected_sha="a44aeb94849a299b22df10b9e622ec2f605c2183501bc40590705131de7c740f" ;;
+      asset="node-v${NODE_VERSION}-linux-arm64.tar.xz"; expected_sha="eb187837a2230d4047161ac0be008584e16b46f726e9c9490ee35dc6b17d9ba8" ;;
     Darwin:x86_64|Darwin:amd64)
-      asset="node-v${NODE_VERSION}-darwin-x64.tar.xz"; expected_sha="ac41874c3352937119cfec39e1a98c578fe58ce8a86d7e785b89a4706015f305" ;;
+      asset="node-v${NODE_VERSION}-darwin-x64.tar.xz"; expected_sha="6965578fd823e72c1b5387f5ab84cb25368f886e02eb8779e6f0fce6b91c27b7" ;;
     Darwin:arm64|Darwin:aarch64)
-      asset="node-v${NODE_VERSION}-darwin-arm64.tar.xz"; expected_sha="72d5d8832b41c9d9646197af614ffd751406ea4d215060eb91b98864e1919a3e" ;;
+      asset="node-v${NODE_VERSION}-darwin-arm64.tar.xz"; expected_sha="1f5ac075be50bed4780ea3be19a007fda95ea4d527d28d76d0b91de47d915115" ;;
     *) fail "Official Node.js ${NODE_VERSION} binaries are unavailable for ${system}/${architecture}." ;;
   esac
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-node.XXXXXX")"

@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": "^22.22.2"
+    "node": "^24.22.2"
   },
   "scripts": {
     "typecheck": "vue-tsc --noEmit --project frontend/tsconfig.json",
@@ -16,7 +16,7 @@
     "test:e2e:ci": "bun run --silent e2e:build && bun run --silent test:e2e"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^24.0.0",
     "@vitejs/plugin-vue": "^6.0.7",
     "@vue/test-utils": "^2.5.1",
     "@wdio/cli": "9.31.3",

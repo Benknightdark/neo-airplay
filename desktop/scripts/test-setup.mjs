@@ -22,6 +22,9 @@ const installerPath = fileURLToPath(new URL("./install.sh", import.meta.url));
 const powershellInstallerPath = fileURLToPath(new URL("./install.ps1", import.meta.url));
 const powershellTestsPath = fileURLToPath(new URL("./test-windows-setup.ps1", import.meta.url));
 const runtimeEntryPath = fileURLToPath(new URL("./prepare-runtime.mjs", import.meta.url));
+const verifierPath = fileURLToPath(new URL("./verify.sh", import.meta.url));
+const powershellVerifierPath = fileURLToPath(new URL("./verify.ps1", import.meta.url));
+const pinnedNodeVersion = readFileSync(new URL("../.node-version", import.meta.url), "utf8").trim();
 const shellChecksUnsupported = process.platform === "win32";
 
 test("Windows installer functions handle updates, repair, elevation and background output", (context) => {
@@ -154,7 +157,7 @@ exec "$@"
     patchelf: "#!/bin/sh\nexit 0\n",
     xz: "#!/bin/sh\nexit 0\n",
     bun: '#!/bin/sh\nprintf "%s\\n" "${FAKE_BUN_VERSION:-1.4.2}"\n',
-    node: '#!/bin/sh\nprintf "%s\\n" "${FAKE_NODE_VERSION:-v22.23.3}"\n',
+    node: '#!/bin/sh\nprintf "%s\\n" "$FAKE_NODE_VERSION"\n',
     sudo: '#!/bin/sh\nexec "$@"\n',
     "apt-get": `#!/bin/sh\nprintf '%s\\n' "$*" >> "$PACKAGE_MANAGER_MARKER"\nexit "\${FAKE_PACKAGE_MANAGER_STATUS:-97}"\n`,
     dnf: `#!/bin/sh\nprintf '%s\\n' "$*" >> "$PACKAGE_MANAGER_MARKER"\nexit "\${FAKE_PACKAGE_MANAGER_STATUS:-97}"\n`,
@@ -198,7 +201,7 @@ exec "$@"
     FAKE_ARCH: "x86_64",
     FAKE_UXPLAY_VERSION: options.uxplayVersion ?? "1.73.7",
     FAKE_BUN_VERSION: options.bunVersion ?? "1.4.2",
-    FAKE_NODE_VERSION: options.nodeVersion ?? "v22.23.3",
+    FAKE_NODE_VERSION: options.nodeVersion ?? `v${pinnedNodeVersion}`,
     SCRCPY_PROBE: options.scrcpyProbe ?? "ok",
     ADB_PROBE: options.adbProbe ?? "ok",
     MISSING_GST_ELEMENT: options.missingGstElement ?? "",
@@ -562,14 +565,14 @@ test("install.sh --check requires an active Avahi service on Linux", { skip: she
   }
 });
 
-test("install.sh --check --development validates Rust stable, Bun 1.4.2, Node 22.23.3, and macOS CLT", { skip: shellChecksUnsupported }, () => {
+test("install.sh --check --development validates Rust stable, Bun 1.4.2, the pinned Node version, and macOS CLT", { skip: shellChecksUnsupported }, () => {
   const scenario = createScenario({ uname: "Darwin" });
   try {
     const result = scenario.runInstaller(["--check", "--development"]);
     assert.equal(result.status, 0, result.stderr || result.stdout);
     assert.match(result.stdout, /Development tools are available/);
     assert.match(result.stdout, /Bun 1\.4\.2/);
-    assert.match(result.stdout, /Node v22\.23\.3/);
+    assert.ok(result.stdout.includes(`Node v${pinnedNodeVersion}`), result.stdout);
     assertReadOnly(scenario);
   } finally {
     scenario.cleanup();
@@ -643,7 +646,7 @@ test("install.sh --check --development rejects unsupported tool versions", { ski
     assert.equal(result.status, 1, result.stderr || result.stdout);
     assert.match(result.stdout, /Rust stable \(rustup, rustc, cargo\)/);
     assert.match(result.stdout, /Bun 1\.4\.2/);
-    assert.match(result.stdout, /Node\.js 22/);
+    assert.ok(result.stdout.includes(`Node.js ${pinnedNodeVersion}`), result.stdout);
     assertReadOnly(scenario);
   } finally {
     scenario.cleanup();
@@ -717,6 +720,154 @@ test("an already-ready normal macOS run does not call Homebrew when no host Home
   }
 });
 
+function createVerificationScenario({ nodeVersion = `v${pinnedNodeVersion}`, localNodeVersion = "v22.23.3", uname = "Darwin", skipSetup = "1" } = {}) {
+  const root = mkdtempSync(join(tmpdir(), "neo-airplay-verify-test-"));
+  const home = join(root, "home");
+  const callerBin = join(root, "caller-bin");
+  const localBin = join(home, ".local", "bin");
+  for (const directory of [callerBin, localBin]) mkdirSync(directory, { recursive: true });
+  symlinkSync(findHostCommand("dirname"), join(callerBin, "dirname"));
+  const commands = [
+    [join(callerBin, "node"), `#!/bin/sh\nprintf '%s\\n' '${nodeVersion}'\n`],
+    [join(localBin, "node"), `#!/bin/sh\nprintf '%s\\n' '${localNodeVersion}'\n`],
+    [join(callerBin, "uname"), `#!/bin/sh\nprintf '%s\\n' '${uname}'\n`],
+  ];
+  for (const directory of [callerBin, localBin]) {
+    commands.push(
+      [join(directory, "bun"), '#!/bin/sh\nprintf "%s\\n" "$*" "$PATH"\nnode --version\n'],
+      [join(directory, "cargo"), "#!/bin/sh\nexit 0\n"],
+    );
+  }
+  for (const [path, contents] of commands) {
+    writeFileSync(path, contents);
+    chmodSync(path, 0o755);
+  }
+  return {
+    callerPath: callerBin,
+    run() {
+      return spawnSync("/bin/bash", [verifierPath], {
+        env: { ...process.env, HOME: home, PATH: callerBin, NEO_AIRPLAY_SKIP_SETUP: skipSetup },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+    },
+    cleanup() { rmSync(root, { recursive: true, force: true }); },
+  };
+}
+
+test("verify.sh preserves the CI toolchain instead of shadowing it with local Node versions", { skip: shellChecksUnsupported }, () => {
+  for (const uname of ["Darwin", "Linux"]) {
+    for (const localNodeVersion of ["v22.23.3", "v26.12.1"]) {
+      const scenario = createVerificationScenario({ localNodeVersion, uname });
+      try {
+        const result = scenario.run();
+        assert.equal(result.status, 0, result.stderr || result.stdout);
+        assert.deepEqual(result.stdout.trim().split("\n"), ["run --silent verify", scenario.callerPath, `v${pinnedNodeVersion}`]);
+      } finally {
+        scenario.cleanup();
+      }
+    }
+  }
+});
+
+test("verify.sh rejects unsupported major versions and Node below the minimum patch", { skip: shellChecksUnsupported }, () => {
+  for (const nodeVersion of ["v22.23.3", "v26.12.1", "v24.22.1"]) {
+    const scenario = createVerificationScenario({ nodeVersion, localNodeVersion: `v${pinnedNodeVersion}` });
+    try {
+      const result = scenario.run();
+      assert.equal(result.status, 1, result.stderr || result.stdout);
+      assert.ok(result.stderr.includes(`Found '${nodeVersion}'`), result.stderr);
+      assert.equal(result.stdout, "", "Bun must not run with an unsupported Node version");
+    } finally {
+      scenario.cleanup();
+    }
+  }
+});
+
+test("verify.sh still prioritizes locally prepared tools when setup is enabled", { skip: shellChecksUnsupported }, () => {
+  const scenario = createVerificationScenario({ nodeVersion: "v22.23.3", localNodeVersion: `v${pinnedNodeVersion}`, skipSetup: "0" });
+  try {
+    const result = scenario.run();
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(result.stdout.trim().split("\n")[2], `v${pinnedNodeVersion}`);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("verify.ps1 preserves the CI path and enforces the supported Node version", (context) => {
+  const root = mkdtempSync(join(tmpdir(), "neo-airplay-powershell-verify-test-"));
+  const wrapperPath = join(root, "verify-wrapper.ps1");
+  const localAppData = join(root, "local-app-data");
+  const userProfile = join(root, "user-profile");
+  const managedNodePath = join(localAppData, "NeoAirPlay", `node-v${pinnedNodeVersion}`);
+  mkdirSync(managedNodePath, { recursive: true });
+  for (const directory of [".cargo", ".bun"]) mkdirSync(join(userProfile, directory, "bin"), { recursive: true });
+  writeFileSync(wrapperPath, `
+$initialPath = if ($env:Path) { $env:Path } else { $env:PATH }
+function global:node { $global:LASTEXITCODE = 0; Write-Output $env:FAKE_NODE_VERSION }
+function global:cargo { $global:LASTEXITCODE = 0 }
+function global:bun {
+    if (($args -join ' ') -ne 'run --silent verify') { throw 'Unexpected Bun arguments' }
+    $resolvedPath = if ($env:Path) { $env:Path } else { $env:PATH }
+    Write-Output ('path-unchanged=' + ($resolvedPath -ceq $initialPath))
+    Write-Output ('verify-path=' + $resolvedPath)
+    $global:LASTEXITCODE = 0
+}
+& $env:VERIFY_SCRIPT_PATH
+`);
+  try {
+    for (const nodeVersion of [`v${pinnedNodeVersion}`, "v22.23.3", "v26.12.1", "v24.22.1"]) {
+      const result = spawnSync(process.platform === "win32" ? "powershell.exe" : "pwsh", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", wrapperPath], {
+        env: {
+          ...process.env,
+          OS: "Windows_NT",
+          NEO_AIRPLAY_SKIP_SETUP: "1",
+          VERIFY_SCRIPT_PATH: powershellVerifierPath,
+          FAKE_NODE_VERSION: nodeVersion,
+          LOCALAPPDATA: localAppData,
+          USERPROFILE: userProfile,
+        },
+        encoding: "utf8",
+        timeout: 15_000,
+        windowsHide: true,
+      });
+      if (result.error?.code === "ENOENT" && process.platform !== "win32") {
+        context.skip("PowerShell is unavailable on this host");
+        return;
+      }
+      if (nodeVersion === `v${pinnedNodeVersion}`) {
+        assert.equal(result.status, 0, result.stderr || result.stdout);
+        assert.match(result.stdout, /^path-unchanged=True\r?\n/, result.stdout);
+        assert.equal(result.stdout.includes(managedNodePath), false, result.stdout);
+      } else {
+        assert.notEqual(result.status, 0, result.stderr || result.stdout);
+        assert.ok(result.stderr.includes(`Found '${nodeVersion}'`), result.stderr);
+        assert.equal(result.stdout, "", "Bun must not run with an unsupported Node version");
+      }
+    }
+
+    const localResult = spawnSync(process.platform === "win32" ? "powershell.exe" : "pwsh", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", wrapperPath], {
+      env: {
+        ...process.env,
+        OS: "Windows_NT",
+        NEO_AIRPLAY_SKIP_SETUP: "0",
+        VERIFY_SCRIPT_PATH: powershellVerifierPath,
+        FAKE_NODE_VERSION: `v${pinnedNodeVersion}`,
+        LOCALAPPDATA: localAppData,
+        USERPROFILE: userProfile,
+      },
+      encoding: "utf8",
+      timeout: 15_000,
+      windowsHide: true,
+    });
+    assert.equal(localResult.status, 0, localResult.stderr || localResult.stdout);
+    assert.ok(localResult.stdout.includes(`verify-path=${managedNodePath};`), localResult.stdout);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("prepare-runtime skips its installer subprocess when setup is disabled", () => {
   const root = mkdtempSync(join(tmpdir(), "neo-airplay-prepare-runtime-test-"));
   const runtimeRoot = join(root, "desktop");
@@ -785,7 +936,7 @@ test("Tauri runner uses the PowerShell setup entry on Windows", () => {
     PATH: "C:\\Windows\\System32",
     USERPROFILE: "C:\\Users\\Tester",
   }, "win32", "C:\\project\\desktop");
-  assert.match(environment.PATH, /NeoAirPlay\\node-v22\.23\.3/);
+  assert.ok(environment.PATH.includes(`NeoAirPlay\\node-v${pinnedNodeVersion}`), environment.PATH);
 });
 
 test("Tauri runner stops when setup fails", () => {
@@ -805,19 +956,22 @@ test("Tauri runner stops when setup fails", () => {
   assert.equal(calls.length, 1, "Tauri must not run after setup fails");
 });
 
-test("Tauri runner respects CI setup skip and an already-completed bootstrap", () => {
-  for (const environment of [
-    { HOME: "/test/home", PATH: "/usr/bin", NEO_AIRPLAY_SKIP_SETUP: "1" },
-    { HOME: "/test/home", PATH: "/usr/bin", NEO_AIRPLAY_SETUP_COMPLETE: "1" },
+test("Tauri runner preserves the caller path and environment when setup is disabled", () => {
+  for (const { platform, environment } of [
+    { platform: "darwin", environment: { HOME: "/test/home", PATH: "/selected-node/bin:/usr/bin" } },
+    { platform: "linux", environment: { HOME: "/test/home", PATH: "/selected-node/bin:/usr/bin" } },
+    { platform: "win32", environment: { USERPROFILE: "C:\\Users\\Tester", PATH: "C:\\selected-node;C:\\Windows\\System32" } },
+    { platform: "win32", environment: { USERPROFILE: "C:\\Users\\Tester", Path: "C:\\selected-node;C:\\Windows\\System32" } },
   ]) {
+    const originalEnvironment = { ...environment, NEO_AIRPLAY_SKIP_SETUP: "1", NEO_AIRPLAY_SETUP_COMPLETE: "1" };
     const calls = [];
     const result = runTauri(["build"], {
-      platform: "linux",
-      environment,
+      platform,
+      environment: Object.freeze(originalEnvironment),
       scriptsDirectory: "/project/desktop/scripts",
       desktopDirectory: "/project/desktop",
-      spawn: (command, args) => {
-        calls.push({ command, args });
+      spawn: (command, args, options) => {
+        calls.push({ command, args, options });
         return { status: 0 };
       },
     });
@@ -825,5 +979,27 @@ test("Tauri runner respects CI setup skip and an already-completed bootstrap", (
     assert.equal(result, 0);
     assert.equal(calls.length, 1);
     assert.equal(calls[0].command, "node");
+    assert.deepEqual(calls[0].options.env, originalEnvironment);
+    assert.deepEqual(originalEnvironment, { ...environment, NEO_AIRPLAY_SKIP_SETUP: "1", NEO_AIRPLAY_SETUP_COMPLETE: "1" });
   }
+});
+
+test("Tauri runner still prioritizes prepared tools after a completed local bootstrap", () => {
+  const environment = Object.freeze({ HOME: "/test/home", PATH: "/usr/bin", NEO_AIRPLAY_SETUP_COMPLETE: "1" });
+  const calls = [];
+  const result = runTauri(["build"], {
+    platform: "linux",
+    environment,
+    scriptsDirectory: "/project/desktop/scripts",
+    desktopDirectory: "/project/desktop",
+    spawn: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { status: 0 };
+    },
+  });
+  assert.equal(result, 0);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, "node");
+  assert.ok(calls[0].options.env.PATH.startsWith("/test/home/.local/bin:"));
+  assert.equal(environment.PATH, "/usr/bin");
 });
