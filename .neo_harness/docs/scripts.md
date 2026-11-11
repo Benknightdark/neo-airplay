@@ -28,7 +28,8 @@
 | `cd desktop && bun run --silent rust:test` | 相容入口，轉接至獨立測試專案執行後端 Rust 單元測試。 |
 | `cd desktop && bun run --silent rust:clippy` | 對所有 Rust targets/features 執行 Clippy，warning 視為錯誤。 |
 | `cd desktop && bun run --silent verify` | 執行應用程式與測試型別檢查、前後端單元測試、安裝流程與版本工具測試、Rust 格式檢查、Clippy 及前端建置。 |
-| `pwsh desktop/scripts/verify.ps1` | 從專案根目錄執行統一驗證入口。 |
+| `bash desktop/scripts/verify.sh` | 從專案根目錄執行 macOS／Linux 統一驗證入口。 |
+| `pwsh desktop/scripts/verify.ps1` | 從專案根目錄執行 Windows 統一驗證入口。 |
 | `cd desktop && bun run --silent build` | 執行型別檢查並建立 Vite production 前端。 |
 | `cd desktop && bun run --silent preview` | 預覽已建置的 Vite production 前端。 |
 | `cd desktop && bun run release` | 自動檢查／準備環境，建置 Release 執行檔但不打包安裝程式。 |

@@ -59,6 +59,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\desktop\scripts\launch.ps1
 (cd desktop-test && bun install --frozen-lockfile --silent)
 ```
 
+執行完整型別、單元測試、Rust 檢查與前端建置：
+
+```sh
+bash desktop/scripts/verify.sh
+```
+
+Windows 請執行：
+
+```powershell
+pwsh desktop/scripts/verify.ps1
+```
+
 執行前端與後端單元測試：
 
 ```sh
