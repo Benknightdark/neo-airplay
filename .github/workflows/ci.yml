@@ -18,6 +18,9 @@ concurrency:
 jobs:
   verify:
     name: verify (${{ matrix.os }})
+    if: >-
+      !contains(github.event.head_commit.message, '/automation/next-version') &&
+      github.head_ref != 'automation/next-version'
     strategy:
       fail-fast: false
       matrix:
