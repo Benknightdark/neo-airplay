@@ -10,6 +10,8 @@ Neo AirPlay 可在 Windows、macOS 與 Linux 電腦上接收 iPhone、iPad 畫�
 
 第一次執行時會先準備所需工具，可能需要網路或電腦管理員協助。
 
+桌面程式的「工具管理」頁可以升級投影工具與平台相依套件，或清除 Neo AirPlay 專用工具後重新安裝。重裝會先停止投影服務，並保留接收器設定、診斷記錄與系統套件。Arch Linux 的 pacman 更新可能同時更新整個系統。
+
 ### macOS 與 Linux
 
 試跑程式：

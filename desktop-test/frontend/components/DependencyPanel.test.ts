@@ -11,6 +11,7 @@ vi.mock("../../../desktop/src/api", () => ({
 
 const ready: DependencySnapshot = {
   status: "ready",
+  operation: null,
   message: "投影工具已就緒。",
   missing: [],
   logPath: "",
@@ -18,6 +19,7 @@ const ready: DependencySnapshot = {
 
 const failed: DependencySnapshot = {
   status: "failed",
+  operation: null,
   message: "部分投影工具尚未安裝。",
   missing: ["scrcpy"],
   logPath: "/tmp/neo-airplay-install.log",
@@ -135,6 +137,7 @@ describe("投影工具準備", () => {
     vi.useFakeTimers();
     vi.mocked(api.getDependencies).mockResolvedValue({
       status: "disabled",
+      operation: null,
       message: "自動安裝已停用。",
       missing: [],
       logPath: "",

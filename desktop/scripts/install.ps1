@@ -2,6 +2,7 @@
 param(
     [switch]$Development,
     [switch]$Check,
+    [switch]$Upgrade,
     [switch]$Gui,
     [switch]$Elevated,
     [string]$EngineDirectory = $env:NEO_AIRPLAY_ENGINE_DIR,
@@ -165,6 +166,7 @@ function Invoke-ElevatedInstaller {
     if ($Gui) { $arguments += '-NonInteractive' }
     $arguments += @('-File', $PSCommandPath)
     if ($Development) { $arguments += '-Development' }
+    if ($Upgrade) { $arguments += '-Upgrade' }
     if ($Gui) { $arguments += '-Gui' }
     $arguments += @('-EngineDirectory', $script:EngineDirectory)
     if ($MarkerFile) { $arguments += @('-MarkerFile', $MarkerFile) }
@@ -696,9 +698,20 @@ function Stage-MsysRuntime {
     $shareTarget = Join-Path $script:EngineDirectory 'share\gstreamer-1.0'
     New-Item -ItemType Directory -Path $script:EngineBin -Force | Out-Null
 
+    if ($Upgrade) {
+        foreach ($path in @($pluginTarget, $shareTarget)) {
+            if (Test-Path -LiteralPath $path -PathType Container) {
+                Remove-Item -LiteralPath $path -Recurse -Force
+            }
+        }
+        foreach ($name in @('gst-inspect-1.0.exe', 'gst-plugin-scanner.exe')) {
+            Remove-Item -LiteralPath (Join-Path $script:EngineBin $name) -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     foreach ($library in (Get-ChildItem -LiteralPath $ucrtBin -Filter '*.dll' -File)) {
         $targetLibrary = Join-Path $script:EngineBin $library.Name
-        if (-not (Test-Path -LiteralPath $targetLibrary -PathType Leaf) -or $library.Name -match '^(av|sw|postproc)') {
+        if ($Upgrade -or -not (Test-Path -LiteralPath $targetLibrary -PathType Leaf) -or $library.Name -match '^(av|sw|postproc)') {
             Copy-Item -LiteralPath $library.FullName -Destination $targetLibrary -Force
         }
     }
@@ -713,22 +726,24 @@ function Stage-MsysRuntime {
         }
     }
     if (Test-Path -LiteralPath $pluginSource -PathType Container) {
+        if ($Upgrade -and (Test-Path -LiteralPath $pluginTarget -PathType Container)) {
+            Remove-Item -LiteralPath $pluginTarget -Recurse -Force
+        }
         New-Item -ItemType Directory -Path $pluginTarget -Force | Out-Null
         Get-ChildItem -LiteralPath $pluginSource -Force | Copy-Item -Destination $pluginTarget -Recurse -Force
     }
     if (Test-Path -LiteralPath $shareSource -PathType Container) {
+        if ($Upgrade -and (Test-Path -LiteralPath $shareTarget -PathType Container)) {
+            Remove-Item -LiteralPath $shareTarget -Recurse -Force
+        }
         New-Item -ItemType Directory -Path $shareTarget -Force | Out-Null
         Get-ChildItem -LiteralPath $shareSource -Force | Copy-Item -Destination $shareTarget -Recurse -Force
-    }
-    $gstCache = Join-Path $script:SetupLocalAppData 'Microsoft\Windows\INetCache\gstreamer-1.0'
-    if (Test-Path -LiteralPath $gstCache -PathType Container) {
-        Remove-Item -Path (Join-Path $gstCache 'registry*') -Force -ErrorAction SilentlyContinue
     }
 }
 
 function Install-UxPlay {
     $existing = Get-EngineToolPath 'uxplay'
-    if ($existing) {
+    if ($existing -and -not $Upgrade) {
         $probe = Invoke-BoundedProbe $existing '-v'
         $versionMatch = [regex]::Match($probe.Output, '(?im)UxPlay version\s+([0-9]+(?:\.[0-9]+)+)')
         if (-not $probe.TimedOut -and $versionMatch.Success -and [Version]$versionMatch.Groups[1].Value -ge [Version]'1.73.7') { return }
@@ -764,7 +779,7 @@ function Install-Scrcpy {
     $scrcpyPath = Join-Path $script:EngineBin 'scrcpy.exe'
     $scrcpyServer = Join-Path $script:EngineBin 'scrcpy-server'
     $adbPath = Join-Path $script:EngineBin 'adb.exe'
-    if ((Test-Path -LiteralPath $scrcpyPath -PathType Leaf) -and
+    if (-not $Upgrade -and (Test-Path -LiteralPath $scrcpyPath -PathType Leaf) -and
         (Test-Path -LiteralPath $adbPath -PathType Leaf) -and
         (Test-Path -LiteralPath $scrcpyServer -PathType Leaf) -and
         (Get-Item -LiteralPath $scrcpyServer -ErrorAction SilentlyContinue).Length -gt 0) {
@@ -1012,7 +1027,7 @@ function Test-WebView2Runtime {
 }
 
 function Test-NeedsElevation([bool]$RuntimeReady, [bool]$DevelopmentReady) {
-    if ($RuntimeReady -and $DevelopmentReady) { return $false }
+    if ($RuntimeReady -and $DevelopmentReady -and -not $Upgrade) { return $false }
     if (-not (Get-WinGetPath)) { return $true }
     if ($Development -and -not $DevelopmentReady) {
         if (-not (Test-VisualStudioCppTools) -or -not (Test-WebView2Runtime) -or -not (Test-VcRedistRuntime)) {
@@ -1092,7 +1107,7 @@ try {
     $runtimeReady = Test-Runtime
     $developmentReady = $true
     if ($Development) { $developmentReady = Test-Development }
-    if ($runtimeReady -and $developmentReady) {
+    if ($runtimeReady -and $developmentReady -and -not $Upgrade) {
         Write-Info 'All requested dependencies are already available.'
     } else {
         if (Test-NeedsElevation $runtimeReady $developmentReady) {
@@ -1103,7 +1118,7 @@ try {
                 exit $elevatedExitCode
             }
         }
-        if (-not $runtimeReady) {
+        if (-not $runtimeReady -or $Upgrade) {
             $null = Ensure-WinGet
             Install-Msys2
             Set-InstalledEnvironment $script:MsysRoot

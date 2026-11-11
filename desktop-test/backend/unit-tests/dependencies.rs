@@ -141,6 +141,7 @@ fn install_test_process(mode: &str) -> (PathBuf, Arc<Mutex<DependencySnapshot>>,
     fs::create_dir_all(&directory).unwrap();
     let snapshot = Arc::new(Mutex::new(DependencySnapshot {
         status: "installing".into(),
+        operation: Some(DependencyOperation::Install),
         message: "waiting".into(),
         missing: Vec::new(),
         log_path: String::new(),
@@ -158,6 +159,102 @@ fn install_test_process(mode: &str) -> (PathBuf, Arc<Mutex<DependencySnapshot>>,
         .spawn()
         .unwrap();
     (directory, snapshot, child)
+}
+
+#[test]
+fn clean_reinstall_clears_only_engine_files_and_the_selected_cache_file() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "neo-clean-tools-test-{}-{nonce}",
+        std::process::id()
+    ));
+    let engine = directory.join("engine");
+    let cache = directory.join("cache/gstreamer/registry.bin");
+    fs::create_dir_all(engine.join("bin")).unwrap();
+    fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    fs::write(engine.join(".GITKEEP"), b"tracked\n").unwrap();
+    fs::write(engine.join(".bundled-0.2.3"), b"seeded\n").unwrap();
+    fs::write(engine.join("bin/uxplay"), b"tool").unwrap();
+    fs::write(&cache, b"registry").unwrap();
+    fs::write(directory.join("cache/keep.txt"), b"other cache").unwrap();
+
+    clear_app_tools(&engine, &cache).unwrap();
+
+    assert!(engine.join(".GITKEEP").is_file());
+    assert!(engine.join(".bundled-0.2.3").is_file());
+    assert!(!engine.join("bin/uxplay").exists());
+    assert!(!cache.exists());
+    assert_eq!(
+        fs::read(directory.join("cache/keep.txt")).unwrap(),
+        b"other cache"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn upgrade_invalidates_only_the_selected_gstreamer_registry() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "neo-upgrade-cache-test-{}-{nonce}",
+        std::process::id()
+    ));
+    let registry = directory.join("cache/gstreamer/registry.bin");
+    fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    fs::write(&registry, b"registry").unwrap();
+    fs::write(directory.join("cache/keep.txt"), b"other cache").unwrap();
+
+    clear_gstreamer_registry(&registry).unwrap();
+
+    assert!(!registry.exists());
+    assert_eq!(
+        fs::read(directory.join("cache/keep.txt")).unwrap(),
+        b"other cache"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn engine_access_is_blocked_while_a_dependency_worker_is_active() {
+    let manager = DependencyManager::new(
+        PathBuf::from("unused"),
+        PathBuf::from("unused-cache"),
+        Path::new("unused"),
+        true,
+    );
+    manager.worker_active.store(true, Ordering::Release);
+    let mut called = false;
+    let result = manager.with_engine_access(|| {
+        called = true;
+        Ok(())
+    });
+    assert!(result.is_err());
+    assert!(!called);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn installer_command_passes_upgrade_mode_without_shell_interpolation() {
+    let command = installer_command(
+        Path::new("installer script.sh"),
+        Path::new("engine directory"),
+        Path::new("marker file"),
+        Path::new("result file"),
+        true,
+    );
+    let arguments = command
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(arguments.last().map(String::as_str), Some("--upgrade"));
+    assert!(arguments
+        .iter()
+        .any(|argument| argument == "engine directory"));
 }
 
 #[test]

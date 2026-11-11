@@ -31,6 +31,7 @@ $script:InstallFailure = $null
 $script:DelegatedToElevated = $false
 $script:passed = 0
 $Check = $false
+$Upgrade = $false
 $Development = $false
 $Elevated = $false
 $Gui = $true
@@ -212,6 +213,26 @@ try {
         Assert-True ($InstallExitCode -eq 0 -and $result.exitCode -eq 0 -and $result.stage -eq 'ready') 'Ready runtime was not accepted'
     }
 
+    Invoke-Scenario 'An explicit upgrade refreshes tools when runtime checks pass' {
+        $script:Upgrade = $true
+        $InstallFailure = $null
+        $InstallExitCode = 0
+        $script:upgradeCalls = [Collections.Generic.List[string]]::new()
+        function Refresh-ProcessPath { }
+        function Test-Runtime { return $true }
+        function Test-NeedsElevation { return $false }
+        function Ensure-WinGet { $script:upgradeCalls.Add('winget') }
+        function Install-Msys2 { $script:upgradeCalls.Add('packages') }
+        function Set-InstalledEnvironment { }
+        function Install-UxPlay { $script:upgradeCalls.Add('uxplay') }
+        function Install-Scrcpy { $script:upgradeCalls.Add('scrcpy') }
+        function Stage-MsysRuntime { $script:upgradeCalls.Add('staging') }
+        . ([scriptblock]::Create($mainEntry.Extent.Text))
+        Assert-True ($InstallExitCode -eq 0) 'A healthy upgrade did not complete'
+        Assert-True ($script:upgradeCalls -join ',' -eq 'winget,packages,uxplay,scrcpy,staging') 'Upgrade skipped a refresh stage'
+        $script:Upgrade = $false
+    }
+
     foreach ($repairSucceeds in @($true, $false)) {
         Invoke-Scenario "Toolchain repair outcome $repairSucceeds" {
             $script:probes = 0
@@ -256,6 +277,7 @@ try {
     }
 
     Invoke-Scenario 'Elevation keeps original-user paths and background log destinations' {
+        $script:Upgrade = $true
         function Test-Administrator { return $false }
         function Start-Process {
             param($FilePath, $ArgumentList, $Verb, $WindowStyle, [switch]$Wait, [switch]$PassThru)
@@ -268,9 +290,11 @@ try {
         Assert-True ($code -eq 5) 'Elevated exit code was lost'
         Assert-True ($script:launchOptions.Verb -eq 'RunAs' -and $script:launchOptions.WindowStyle -eq 'Hidden') 'Elevation must keep UAC and hide its console'
         Assert-True ($script:launchOptions.ArgumentList.Contains('"-NonInteractive"')) 'Hidden elevation must not wait for console input'
+        Assert-True ($script:launchOptions.ArgumentList.Contains((ConvertTo-ProcessArgument '-Upgrade'))) 'Elevation lost the explicit upgrade mode'
         foreach ($value in @($LogFile, $ProgressFile, $ResultFile, $MarkerFile, $script:SetupUserProfile, $script:SetupLocalAppData, $script:SetupUserSid)) {
             Assert-True ($script:launchOptions.ArgumentList.Contains((ConvertTo-ProcessArgument $value))) 'Elevation lost an original-user path or record destination'
         }
+        $script:Upgrade = $false
     }
 
     Invoke-Scenario 'Cancellation produces a readable completion result' {

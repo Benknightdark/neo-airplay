@@ -3,15 +3,17 @@ import { computed, onMounted, ref } from "vue";
 import DashboardPage from "./components/DashboardPage.vue";
 import DiagnosticsPage from "./components/DiagnosticsPage.vue";
 import SettingsPage from "./components/SettingsPage.vue";
+import ToolManagementPage from "./components/ToolManagementPage.vue";
 import DependencyPanel from "./components/DependencyPanel.vue";
 import { useAppState } from "./composables/useAppState";
 
-type PageKey = "overview" | "settings" | "diagnostics";
+type PageKey = "overview" | "settings" | "diagnostics" | "tools";
 
 const pages: { key: PageKey; label: string; icon: string }[] = [
   { key: "overview", label: "總覽", icon: "◫" },
   { key: "settings", label: "設定", icon: "⚙" },
   { key: "diagnostics", label: "診斷記錄", icon: "≡" },
+  { key: "tools", label: "工具管理", icon: "⇧" },
 ];
 
 const activePage = ref<PageKey>("overview");
@@ -90,6 +92,7 @@ onMounted(() => {
         @save="saveSettings"
       />
       <DiagnosticsPage v-else-if="activePage === 'diagnostics' && dashboard" :logs="dashboard.logs" />
+      <ToolManagementPage v-else-if="activePage === 'tools'" />
     </main>
   </div>
 </template>

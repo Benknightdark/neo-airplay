@@ -4,12 +4,12 @@
 
 ## 依賴概況
 
-- `desktop/src/` 是 Vue 3 + TypeScript 介面。`App.vue` 組合總覽、設定及診斷頁；`useAppState` 管理載入狀態、動作與 1.5 秒狀態輪詢。
+- `desktop/src/` 是 Vue 3 + TypeScript 介面。`App.vue` 組合總覽、設定、診斷及工具管理頁；`useAppState` 管理載入狀態、動作與 1.5 秒狀態輪詢。
 - `desktop/src/api.ts` 透過 Tauri `invoke` 呼叫 Rust 命令。前端不直接操作程序、檔案或作業系統啟動設定。
 - `desktop/src-tauri/src/lib.rs` 註冊單一執行個體、命令、登入啟動插件、系統匣與視窗關閉行為，並建立 `AppState`。
 - `desktop/src-tauri/src/models.rs` 定義設定、引擎狀態、Android 裝置、記錄與總覽資料結構。
 - `desktop/src-tauri/src/state.rs` 保存 JSON 設定、每日 JSONL 記錄、列舉 Android 裝置及管理 UxPlay/scrcpy 子程序。
-- `desktop/src-tauri/src/dependencies.rs` 在背景檢查並準備投影工具；`DependencyPanel.vue` 透過獨立 IPC 命令顯示狀態及重試。
+- `desktop/src-tauri/src/dependencies.rs` 在背景檢查、升級及重新安裝投影工具；`DependencyPanel.vue` 顯示啟動檢查狀態，`ToolManagementPage.vue` 顯示維護狀態並發出手動維護命令。
 - `desktop/scripts/install.sh` 與 `install.ps1` 保存共用平台安裝腳本。`setup:runtime` 與 Rust 背景檢查共用這些腳本；Rust 以 `include_str!` 將對應腳本編入正式執行檔。
 - Windows 安裝器以 `install-progress.json` 回報階段，並在完成結果保留可選的階段與錯誤摘要；提權程序接收原使用者路徑與相同記錄目的地。Rust 外部程序與 PowerShell 執行階段安裝命令使用不建立主控台的程序設定，UAC 授權仍由作業系統處理。
 - `desktop/scripts/run-tauri.mjs` 在直接呼叫 Tauri CLI 前執行平台 setup；`launch.sh`／`launch.ps1` 可在首次 checkout、Bun 尚未安裝時先準備環境並執行 Debug、Release 或 bundle。
@@ -20,12 +20,12 @@
 
 | 元件 | 責任 | 證據 |
 | :--- | :--- | :--- |
-| Vue 應用程式 | 顯示總覽、設定及診斷記錄，將使用者動作送至 API 模組。 | `desktop/src/App.vue`、`desktop/src/components/` |
+| Vue 應用程式 | 顯示總覽、設定、診斷記錄及工具管理，將使用者動作送至 API 模組。 | `desktop/src/App.vue`、`desktop/src/components/` |
 | 前端狀態與 IPC | 讀取總覽、呼叫 Tauri commands、顯示錯誤並輪詢引擎程序狀態。 | `desktop/src/composables/useAppState.ts`、`desktop/src/api.ts` |
-| Rust 命令入口 | 限制單一執行個體、註冊 Dashboard、設定與引擎啟停命令；設定登入啟動並建立系統匣。 | `desktop/src-tauri/src/lib.rs` |
+| Rust 命令入口 | 限制單一執行個體、註冊 Dashboard、設定、工具維護與引擎啟停命令；設定登入啟動並建立系統匣。 | `desktop/src-tauri/src/lib.rs` |
 | 模型 | 定義跨 IPC 傳輸的序列化結構、設定預設值及 renderer 選項。 | `desktop/src-tauri/src/models.rs` |
 | 執行狀態、程序與記錄 | 管理設定 JSON、每日 JSONL、ADB 裝置清單及兩個分離的子程序。 | `desktop/src-tauri/src/state.rs` |
-| 依賴準備 | 共用平台安裝腳本、背景檢查與安裝、介面進度與重試。 | `desktop/src-tauri/src/dependencies.rs`、`desktop/scripts/install.sh`、`desktop/scripts/install.ps1`、`desktop/src/components/DependencyPanel.vue` |
+| 依賴準備 | 共用平台安裝腳本、背景檢查、升級及重新安裝；工具維護期間會序列化引擎存取。 | `desktop/src-tauri/src/dependencies.rs`、`desktop/scripts/install.sh`、`desktop/scripts/install.ps1`、`desktop/src/components/DependencyPanel.vue`、`desktop/src/components/ToolManagementPage.vue` |
 | 獨立測試專案 | 使用獨立 Bun 與 Cargo 專案執行前端、後端單元測試及桌面 E2E；測試直接載入桌面程式原始碼。 | `desktop-test/package.json`、`desktop-test/backend/Cargo.toml` |
 | 前端單元測試 | 驗證狀態標籤、時間格式、總覽操作、設定表單與錯誤狀態。 | `desktop-test/frontend/` |
 | Rust 單元測試 | 驗證設定正規化、ADB 輸出解析、UxPlay 參數、renderer allowlist 與引擎程序生命週期；測試 crate 以路徑載入桌面後端模組。 | `desktop-test/backend/`、`desktop/src-tauri/src/` |
@@ -45,6 +45,7 @@
 - 關閉主視窗會隱藏視窗並保留程式；系統匣選單可顯示視窗或結束程式。結束時 Rust state 會停止仍持有的 UxPlay/scrcpy 子程序。
 - 設定與記錄目錄由 Tauri path resolver 提供，分別使用 `app_config_dir()`、`app_log_dir()`。登入啟動由 Tauri autostart plugin 管理，支援值在啟動時同步至作業系統註冊項目。
 - 設定 command 的 transaction mutex 涵蓋 OS 登入啟動變更、設定寫入及失敗復原；state 的設定 mutex 涵蓋暫存檔寫入和記憶體更新。ADB 查詢也會序列化，前端忽略過期輪詢結果和重複動作。
+- 工具維護使用共用鎖阻擋引擎啟動與 ADB 刷新；升級或重裝開始前會停止 AirPlay 和 Android 引擎。升級會清除指定的 GStreamer registry 檔案；重裝另外清除 App 的 `engine/` 內容。兩種操作都保留設定、診斷記錄及系統套件。
 - 預設 renderer 選項依編譯平台提供：Windows 使用 D3D，macOS 使用 osxvideosink/glimagesink，Linux 使用 glimagesink/ximagesink/waylandsink。
 - UxPlay、GStreamer、ADB、scrcpy 及 DNS-SD 服務探索是外部執行環境。正常 App 每次啟動都會在背景檢查並補備缺少的依賴；CI、E2E 及 smoke check 明確停用補備。執行檔只從 `engine/` 目錄啟動；平台安裝腳本仍使用 OS 套件管理器取得系統函式庫及建置工具。
 

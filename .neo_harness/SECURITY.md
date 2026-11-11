@@ -11,6 +11,8 @@
 
 ## 外部程序與網路
 
+- 工具管理的升級與重裝命令只刪除指定的 GStreamer registry 檔案；重裝另刪除目前 App `engine/` 目錄中的內容。兩種操作都不會移除系統套件、接收器設定或診斷記錄。引擎清理會拒絕目錄本身為符號連結的情況，目錄內的符號連結只會移除連結本身。
+
 - Rust 使用 `std::process::Command` 的引數陣列啟動 UxPlay、ADB 與 scrcpy，不經由 shell 組合命令。
 - App 啟動時使用 `fix-path-env` 恢復程序 `PATH`；macOS 與 Linux 會啟動使用者設定的登入 shell 讀取環境，因此 shell 啟動設定屬於信任邊界。
 - Android 投影只可使用剛由 ADB 列舉且狀態為 `device` 的裝置序號。App 不執行 ADB 配對或 TCP/IP 連線命令。

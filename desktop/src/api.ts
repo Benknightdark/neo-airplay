@@ -1,8 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AndroidDevice, DashboardSnapshot, DependencySnapshot, EngineSnapshot, ReceiverSettings } from "./types";
+import type { AndroidDevice, DashboardSnapshot, DependencyAction, DependencySnapshot, EngineSnapshot, ReceiverSettings } from "./types";
 
 export const getDependencies = (): Promise<DependencySnapshot> => invoke("get_dependencies");
 export const installDependencies = (): Promise<DependencySnapshot> => invoke("install_dependencies");
+export const manageDependencies = (action: DependencyAction): Promise<DependencySnapshot> => invoke("manage_dependencies", { action });
 
 export const getDashboard = (): Promise<DashboardSnapshot> => invoke("get_dashboard");
 export const saveSettings = (settings: ReceiverSettings): Promise<ReceiverSettings> => invoke("save_settings", { settings });
