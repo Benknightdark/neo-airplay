@@ -50,7 +50,7 @@
 
 ## 驗證界線
 
-- `.neo_harness/verify.ps1` 呼叫 `desktop` 的 `verify`；前端與後端單元測試命令轉接至 `desktop-test`，其餘流程執行版本工具與安裝流程測試、Rust 格式檢查、Clippy 及 Vite 建置。
+- `desktop/scripts/verify.ps1` 呼叫 `desktop` 的 `verify`；前端與後端單元測試命令轉接至 `desktop-test`，其餘流程執行版本工具與安裝流程測試、Rust 格式檢查、Clippy 及 Vite 建置。
 - `desktop-test` 的 `test:e2e:ci` 建置 `wdio` 測試版本與假引擎，並啟動桌面 E2E。測試會驗證第二次啟動退出並由既有執行個體處理；假執行檔只放在隔離的 E2E profile。Linux CI 以 D-Bus session 和 Xvfb 啟動測試。
 - CI 在 `develop` 更新時對 `ubuntu-24.04`、`windows-latest`、`macos-latest` 執行 verify 與桌面 E2E；若 `develop` 相對 `main` 的完整差異只有版本檔，仍驗證但不建立 promotion PR。其他提交三平台成功後建立或沿用 `develop` 到 `main` 的 PR。
 - Release 版本由 `desktop/scripts/project-version.mjs` 讀取 `desktop/package.json`、`desktop/src-tauri/tauri.conf.json`、`desktop/src-tauri/Cargo.toml` 與 `Cargo.lock`；四處必須一致且採用穩定 `X.Y.Z` 格式。若相同 tag 指向其他提交，CD 建立下一個未使用 patch 版本的 `main` 修正 PR，合併後再執行發布；發布成功後，CD 建立或更新下一個未使用 patch 版本的 `develop` PR。CI/CD 不執行正式 bundle 啟動 smoke check。
