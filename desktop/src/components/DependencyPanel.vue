@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { getDependencies, installDependencies } from "../api";
+import InstallLogViewer from "./InstallLogViewer.vue";
 import type { DependencySnapshot } from "../types";
 
 const emit = defineEmits<{ (event: "busy", value: boolean): void }>();
@@ -78,7 +79,7 @@ onUnmounted(() => {
   <section v-if="installing || error || (snapshot && snapshot.status !== 'disabled')" class="dependency-panel" :class="{ 'dependency-failed': error || snapshot?.status === 'failed' }" aria-label="投影工具準備" data-testid="dependency-panel">
     <p role="status">{{ error || snapshot?.message || "正在檢查並安裝投影工具…" }}</p>
     <template v-if="snapshot?.status === 'failed' || error">
-      <p v-if="snapshot?.logPath" class="dependency-log">安裝記錄：{{ snapshot.logPath }}</p>
+      <InstallLogViewer v-if="snapshot?.logPath" :log-path="snapshot.logPath" />
       <button class="button-secondary" type="button" :disabled="installing" data-testid="dependency-retry" @click="retry">重新檢查並安裝</button>
     </template>
   </section>
@@ -88,5 +89,4 @@ onUnmounted(() => {
 .dependency-panel { margin: 12px 32px 0; padding: 12px 16px; border-radius: 10px; background: #eaf3ee; color: #254c3a; }
 .dependency-panel p { margin: 0 0 8px; }
 .dependency-failed { background: #fff2e6; color: #7a4324; }
-.dependency-log { overflow-wrap: anywhere; font-size: 12px; }
 </style>

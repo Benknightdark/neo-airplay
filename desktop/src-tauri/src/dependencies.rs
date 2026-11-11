@@ -109,6 +109,16 @@ impl DependencyManager {
             .map_err(|_| "無法讀取工具安裝狀態。".into())
     }
 
+    pub fn read_install_log(&self) -> Result<String, String> {
+        fs::read_to_string(self.setup_dir.join(INSTALL_LOG)).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                "尚無安裝記錄。".to_owned()
+            } else {
+                format!("無法讀取安裝記錄：{error}")
+            }
+        })
+    }
+
     pub fn start(&self) -> Result<DependencySnapshot, String> {
         self.begin_operation(DependencyOperation::Install, true, || Ok(()))
     }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { getDependencies, manageDependencies } from "../api";
+import InstallLogViewer from "./InstallLogViewer.vue";
 import type { DependencyAction, DependencySnapshot } from "../types";
 
 const snapshot = ref<DependencySnapshot | null>(null);
@@ -117,7 +118,7 @@ onUnmounted(() => {
       <ul v-if="snapshot?.missing.length" class="tool-missing-list" data-testid="tools-missing">
         <li v-for="dependency in snapshot.missing" :key="dependency">{{ dependency }}</li>
       </ul>
-      <p v-if="snapshot?.logPath" class="tool-log-path">安裝記錄：{{ snapshot.logPath }}</p>
+      <InstallLogViewer v-if="snapshot?.logPath" :log-path="snapshot.logPath" />
       <p v-if="snapshot?.status === 'disabled'" class="tool-disabled-hint">此工作階段已停用工具管理。</p>
     </div>
 
@@ -175,7 +176,7 @@ onUnmounted(() => {
 .tool-operation-label { color: #9aa3b0; font-size: 10px; }
 .tool-status-card p { margin: 8px 0 0; color: #59667b; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
 .tool-missing-list { margin: 8px 0 0; padding-left: 19px; color: #a3444a; font-size: 11px; line-height: 1.7; }
-.tool-status-card .tool-log-path, .tool-status-card .tool-disabled-hint { color: #8a95a5; font-size: 10px; }
+.tool-status-card .tool-disabled-hint { color: #8a95a5; font-size: 10px; }
 .tool-action-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 17px; }
 .tool-action-card {
   padding: 20px 22px; border: 1px solid #e5e9ef; border-radius: 13px; background: #fff;

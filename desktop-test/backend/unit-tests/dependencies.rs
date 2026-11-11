@@ -1,6 +1,45 @@
 use super::*;
 
 #[test]
+fn read_install_log_returns_saved_content() {
+    let config_dir = install_log_test_directory();
+    let setup_dir = config_dir.join("setup");
+    fs::create_dir_all(&setup_dir).unwrap();
+    fs::write(
+        setup_dir.join(INSTALL_LOG),
+        "install started\ninstall finished\n",
+    )
+    .unwrap();
+    let manager = DependencyManager::new(
+        PathBuf::from("unused"),
+        PathBuf::from("unused-cache"),
+        &config_dir,
+        true,
+    );
+
+    assert_eq!(
+        manager.read_install_log().unwrap(),
+        "install started\ninstall finished\n"
+    );
+    fs::remove_dir_all(config_dir).unwrap();
+}
+
+#[test]
+fn read_install_log_reports_when_file_is_missing() {
+    let config_dir = install_log_test_directory();
+    fs::create_dir_all(&config_dir).unwrap();
+    let manager = DependencyManager::new(
+        PathBuf::from("unused"),
+        PathBuf::from("unused-cache"),
+        &config_dir,
+        true,
+    );
+
+    assert_eq!(manager.read_install_log().unwrap_err(), "尚無安裝記錄。");
+    fs::remove_dir_all(config_dir).unwrap();
+}
+
+#[test]
 fn disabled_session_does_not_start_installation() {
     let manager = DependencyManager::new(
         PathBuf::from("unused"),
@@ -129,6 +168,17 @@ fn install_test_child_process() {
         },
     )
     .unwrap();
+}
+
+fn install_log_test_directory() -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "neo-install-log-test-{}-{nonce}",
+        std::process::id()
+    ))
 }
 
 fn install_test_process(mode: &str) -> (PathBuf, Arc<Mutex<DependencySnapshot>>, Child) {

@@ -7,6 +7,7 @@ import DependencyPanel from "../../../desktop/src/components/DependencyPanel.vue
 vi.mock("../../../desktop/src/api", () => ({
   getDependencies: vi.fn(),
   installDependencies: vi.fn(),
+  readInstallLog: vi.fn(),
 }));
 
 const ready: DependencySnapshot = {
@@ -81,6 +82,7 @@ describe("投影工具準備", () => {
 
     await flushPromises();
     expect(wrapper.text()).toContain("/tmp/neo-airplay-install.log");
+    expect(wrapper.get('[data-testid="install-log-open"]').text()).toBe("查看安裝記錄");
     await wrapper.get('[data-testid="dependency-retry"]').trigger("click");
     await flushPromises();
 

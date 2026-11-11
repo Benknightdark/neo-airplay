@@ -7,6 +7,7 @@ import ToolManagementPage from "../../../desktop/src/components/ToolManagementPa
 vi.mock("../../../desktop/src/api", () => ({
   getDependencies: vi.fn(),
   manageDependencies: vi.fn(),
+  readInstallLog: vi.fn(),
 }));
 
 const ready: DependencySnapshot = {
@@ -34,6 +35,7 @@ describe("工具管理頁", () => {
     await flushPromises();
     expect(wrapper.get('[data-testid="tools-status"]').text()).toContain("已就緒");
     expect(wrapper.text()).toContain("/tmp/neo-airplay-install.log");
+    expect(wrapper.get('[data-testid="install-log-open"]').text()).toBe("查看安裝記錄");
 
     await wrapper.get('[data-testid="tools-upgrade"]').trigger("click");
     await flushPromises();

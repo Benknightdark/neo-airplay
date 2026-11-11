@@ -20,6 +20,11 @@ fn get_dependencies(
 }
 
 #[tauri::command]
+fn read_install_log(state: State<'_, dependencies::DependencyManager>) -> Result<String, String> {
+    state.read_install_log()
+}
+
+#[tauri::command]
 fn install_dependencies(
     state: State<'_, dependencies::DependencyManager>,
 ) -> Result<dependencies::DependencySnapshot, String> {
@@ -255,6 +260,7 @@ pub fn run() {
             get_dependencies,
             install_dependencies,
             manage_dependencies,
+            read_install_log,
             save_settings,
             start_airplay,
             stop_airplay,

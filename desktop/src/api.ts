@@ -4,6 +4,7 @@ import type { AndroidDevice, DashboardSnapshot, DependencyAction, DependencySnap
 export const getDependencies = (): Promise<DependencySnapshot> => invoke("get_dependencies");
 export const installDependencies = (): Promise<DependencySnapshot> => invoke("install_dependencies");
 export const manageDependencies = (action: DependencyAction): Promise<DependencySnapshot> => invoke("manage_dependencies", { action });
+export const readInstallLog = (): Promise<string> => invoke("read_install_log");
 
 export const getDashboard = (): Promise<DashboardSnapshot> => invoke("get_dashboard");
 export const saveSettings = (settings: ReceiverSettings): Promise<ReceiverSettings> => invoke("save_settings", { settings });
