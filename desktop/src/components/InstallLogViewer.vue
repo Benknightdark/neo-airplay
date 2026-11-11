@@ -70,13 +70,15 @@ function closeViewer(): void {
 
 <style scoped>
 .install-log-control { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
-.install-log-path { margin: 0; overflow-wrap: anywhere; font-size: 12px; }
-.install-log-open { padding: 6px 10px; font-size: 11px; }
-.install-log-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 20px; background: #11182780; }
-.install-log-dialog { display: flex; flex-direction: column; width: min(100%, 900px); max-height: 85vh; padding: 20px; border-radius: 13px; background: #fff; box-shadow: 0 20px 55px #10182740; }
+.install-log-path { margin: 0; overflow-wrap: anywhere; color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; line-height: 1.7; }
+.install-log-open { min-width: auto; padding: 7px 11px; border-color: var(--phosphor-cyan); color: var(--phosphor-cyan); background: var(--phosphor-cyan-dim); font-size: 11px; }
+.install-log-open:hover { border-color: var(--phosphor-cyan); color: var(--bg-ash); background: var(--phosphor-cyan); }
+.install-log-backdrop { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 20px; background: rgba(3, 5, 7, .85); }
+.install-log-dialog { display: flex; flex-direction: column; width: min(100%, 900px); max-height: 85vh; padding: 22px; border: 1px solid var(--border-rust); border-top: 2px solid var(--phosphor-cyan); border-radius: 3px; background: var(--bg-bunker); box-shadow: 0 24px 80px rgba(0, 0, 0, .65); }
 .install-log-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
-.install-log-heading h2 { margin: 0; color: #2e394d; font-size: 16px; }
-.install-log-message, .install-log-error { margin: 12px 0; color: #667387; font-size: 12px; }
-.install-log-error { color: #a3444a; }
-.install-log-content { width: 100%; min-height: min(62vh, 620px); box-sizing: border-box; padding: 12px; resize: vertical; overflow: auto; border: 1px solid #dfe4eb; border-radius: 8px; background: #f8fafc; color: #263245; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.55; white-space: pre; user-select: text; }
+.install-log-heading h2 { margin: 0; color: var(--text-primary); font-size: 16px; letter-spacing: .05em; }
+.install-log-message, .install-log-error { margin: 12px 0; color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
+.install-log-error { color: var(--crimson-alert); }
+.install-log-content { width: 100%; height: min(62vh, 620px); min-height: 0; box-sizing: border-box; padding: 14px; resize: vertical; overflow: auto; border: 1px solid var(--border-rust); border-radius: 2px; background: var(--bg-ash); color: var(--text-primary); font-family: var(--font-mono); font-size: 12px; line-height: 1.65; white-space: pre; -webkit-user-select: text; user-select: text; }
+.install-log-content:focus-visible { outline: 1px solid var(--phosphor-cyan); outline-offset: 2px; }
 </style>

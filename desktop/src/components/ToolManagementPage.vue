@@ -160,38 +160,41 @@ onUnmounted(() => {
 <style scoped>
 .tools-layout { max-width: 1080px; }
 .tool-status {
-  display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border-radius: 18px;
-  color: #788497; background: #f1f3f6; font-size: 10px; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid var(--border-rust); border-radius: 2px;
+  color: var(--text-muted); background: var(--bg-bunker-elevated); font-size: 11px; white-space: nowrap;
 }
 .tool-status .status-indicator { background: currentColor; }
-.tool-status-installing, .tool-status-checking { color: #a97519; background: #fff5e2; }
-.tool-status-ready { color: #158264; background: #e8f7f1; }
-.tool-status-failed { color: #c44953; background: #fff0f1; }
+.tool-status-installing, .tool-status-checking { color: var(--hazard-amber); background: var(--hazard-amber-dim); }
+.tool-status-ready { color: var(--phosphor-cyan); background: var(--phosphor-cyan-dim); }
+.tool-status-failed { color: var(--crimson-alert); background: var(--crimson-alert-dim); }
 .tool-status-card {
-  margin-bottom: 18px; padding: 17px 19px; border: 1px solid #e5e9ef; border-radius: 12px;
-  background: #fff; box-shadow: 0 5px 20px #1e2c4508;
+  margin-bottom: 20px; padding: 18px 20px; border: 1px solid var(--border-rust); border-left: 3px solid var(--phosphor-cyan); border-radius: 2px;
+  background: var(--bg-bunker); box-shadow: inset 0 1px rgba(255, 255, 255, .025);
 }
-.tool-status-card-failed { border-color: #f2ced0; background: #fff9f9; }
+.tool-status-card-failed { border-left-color: var(--crimson-alert); background: linear-gradient(90deg, var(--crimson-alert-dim), transparent 75%), var(--bg-bunker); }
 .tool-status-card-heading { display: flex; justify-content: space-between; gap: 12px; }
-.tool-operation-label { color: #9aa3b0; font-size: 10px; }
-.tool-status-card p { margin: 8px 0 0; color: #59667b; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
-.tool-missing-list { margin: 8px 0 0; padding-left: 19px; color: #a3444a; font-size: 11px; line-height: 1.7; }
-.tool-status-card .tool-disabled-hint { color: #8a95a5; font-size: 10px; }
+.tool-operation-label { color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; }
+.tool-status-card p { margin: 8px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.tool-status-card :deep(.install-log-control) { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border-rust); }
+.tool-missing-list { margin: 8px 0 0; padding-left: 19px; color: var(--crimson-alert); font-size: 12px; line-height: 1.7; }
+.tool-status-card .tool-disabled-hint { color: var(--text-muted); font-size: 11px; }
 .tool-action-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 17px; }
 .tool-action-card {
-  padding: 20px 22px; border: 1px solid #e5e9ef; border-radius: 13px; background: #fff;
-  box-shadow: 0 5px 20px #1e2c4508;
+  position: relative; padding: 22px; border: 1px solid var(--border-rust); border-top: 2px solid var(--hazard-amber); border-radius: 2px;
+  background: var(--bg-bunker); box-shadow: inset 0 1px rgba(255, 255, 255, .025);
 }
-.tool-action-card h3 { margin: 15px 0 7px; color: #2e394d; font-size: 14px; }
-.tool-action-card p { min-height: 54px; margin: 0 0 17px; color: #737f90; font-size: 11px; line-height: 1.7; }
-.tool-action-icon { display: grid; width: 38px; height: 38px; place-items: center; border-radius: 11px; font-size: 23px; }
-.tool-action-icon-upgrade { color: #456be8; background: #edf1ff; }
-.tool-action-icon-reinstall { color: #a04d52; background: #fff0f1; }
-.tool-package-warning { margin: 13px 0 0; color: #8a95a5; font-size: 10px; line-height: 1.6; }
-.tool-confirmation-backdrop { position: fixed; inset: 0; z-index: 5; display: grid; place-items: center; padding: 20px; background: #11182780; }
-.tool-confirmation { width: min(100%, 470px); padding: 23px; border-radius: 13px; background: #fff; box-shadow: 0 20px 55px #10182740; }
-.tool-confirmation h3 { margin: 0; color: #2e394d; font-size: 16px; }
-.tool-confirmation p { margin: 11px 0 20px; color: #667387; font-size: 12px; line-height: 1.7; }
+.tool-action-card::after { content: "+"; position: absolute; top: 9px; right: 12px; color: var(--text-muted); font-family: var(--font-mono); font-size: 12px; pointer-events: none; }
+.tool-action-card-reinstall { border-top-color: var(--crimson-alert); }
+.tool-action-card h3 { margin: 16px 0 8px; color: var(--text-primary); font-size: 15px; letter-spacing: .03em; }
+.tool-action-card p { min-height: 62px; margin: 0 0 20px; color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
+.tool-action-icon { display: grid; width: 38px; height: 38px; place-items: center; border: 1px solid currentColor; border-radius: 2px; font-size: 23px; }
+.tool-action-icon-upgrade { color: var(--hazard-amber); background: var(--hazard-amber-dim); }
+.tool-action-icon-reinstall { color: var(--crimson-alert); background: var(--crimson-alert-dim); }
+.tool-package-warning { margin: 16px 0 0; padding: 10px 12px; border-left: 2px solid var(--hazard-amber); color: var(--text-secondary); background: var(--hazard-amber-dim); font-size: 11px; line-height: 1.7; }
+.tool-confirmation-backdrop { position: fixed; inset: 0; z-index: 5; display: grid; place-items: center; padding: 20px; background: rgba(3, 5, 7, .85); }
+.tool-confirmation { width: min(100%, 470px); padding: 24px; border: 1px solid var(--border-rust); border-top: 2px solid var(--crimson-alert); border-radius: 3px; background: var(--bg-bunker); box-shadow: 0 24px 80px rgba(0, 0, 0, .65); }
+.tool-confirmation h3 { margin: 0; color: var(--text-primary); font-size: 16px; }
+.tool-confirmation p { margin: 12px 0 22px; color: var(--text-secondary); font-size: 12px; line-height: 1.8; }
 .tool-confirmation-actions { display: flex; justify-content: flex-end; gap: 10px; }
 
 @media (max-width: 700px) {

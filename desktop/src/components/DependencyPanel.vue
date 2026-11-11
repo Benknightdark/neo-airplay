@@ -86,7 +86,11 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.dependency-panel { margin: 12px 32px 0; padding: 12px 16px; border-radius: 10px; background: #eaf3ee; color: #254c3a; }
-.dependency-panel p { margin: 0 0 8px; }
-.dependency-failed { background: #fff2e6; color: #7a4324; }
+.dependency-panel {
+  margin: 16px 0 0; padding: 14px 18px; border: 1px solid var(--border-rust); border-left: 3px solid var(--phosphor-cyan);
+  border-radius: 2px; background: linear-gradient(90deg, var(--phosphor-cyan-dim), transparent 75%), var(--bg-bunker); color: var(--text-primary);
+}
+.dependency-panel p { margin: 0 0 8px; font-size: 12px; line-height: 1.7; }
+.dependency-panel > .button-secondary { margin-top: 12px; }
+.dependency-failed { border-left-color: var(--hazard-amber); background: linear-gradient(90deg, var(--hazard-amber-dim), transparent 75%), var(--bg-bunker); }
 </style>

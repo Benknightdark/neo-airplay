@@ -44,6 +44,7 @@ onMounted(() => {
           class="nav-item"
           :class="{ 'nav-item-active': activePage === page.key }"
           :aria-current="activePage === page.key ? 'page' : undefined"
+          :aria-label="page.label"
           :data-testid="`nav-${page.key}`"
           @click="activePage = page.key"
         >

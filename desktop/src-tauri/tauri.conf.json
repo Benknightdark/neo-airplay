@@ -13,6 +13,7 @@
     "windows": [
       {
         "title": "Neo AirPlay",
+        "theme": "Dark",
         "width": 1280,
         "height": 820,
         "minWidth": 960,
