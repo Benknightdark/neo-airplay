@@ -1,0 +1,14 @@
+{
+  "extends": "../../desktop/tsconfig.json",
+  "compilerOptions": {
+    "composite": false
+  },
+  "include": [
+    "./**/*.ts",
+    "../../desktop/src/**/*.ts",
+    "../../desktop/src/**/*.d.ts",
+    "../../desktop/src/**/*.tsx",
+    "../../desktop/src/**/*.vue"
+  ],
+  "references": []
+}

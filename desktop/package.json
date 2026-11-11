@@ -14,16 +14,16 @@
     "build": "bun run typecheck && vite build",
     "preview": "vite preview",
     "tauri": "bun run scripts/run-tauri.mjs",
-    "test:unit": "node ./node_modules/vitest/vitest.mjs run --reporter=dot",
+    "test:unit": "node scripts/run-desktop-test.mjs test:frontend",
     "test:setup": "node --test --test-reporter=dot scripts/test-setup.mjs",
     "test:version": "node --test --test-reporter=dot scripts/project-version.test.mjs",
     "rust:fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml -- --check",
-    "rust:test": "cargo test --manifest-path src-tauri/Cargo.toml --locked --all-features -q",
+    "rust:test": "node scripts/run-desktop-test.mjs test:backend",
     "rust:clippy": "cargo clippy -q --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features -- -D warnings",
     "verify": "bun run --silent typecheck && bun run --silent test:unit && bun run --silent test:setup && bun run --silent test:version && bun run --silent rust:fmt && bun run --silent rust:test && bun run --silent rust:clippy && bun run --silent build",
-    "e2e:build": "bun run scripts/build-e2e.ts",
-    "test:e2e": "wdio run wdio.conf.ts",
-    "test:e2e:ci": "bun run --silent e2e:build && bun run --silent test:e2e",
+    "e2e:build": "node scripts/run-desktop-test.mjs e2e:build",
+    "test:e2e": "node scripts/run-desktop-test.mjs test:e2e",
+    "test:e2e:ci": "node scripts/run-desktop-test.mjs test:e2e:ci",
     "bundle": "bun run scripts/build-app.ts",
     "smoke:bundle": "bun run scripts/smoke-bundle.mjs"
   },
@@ -34,19 +34,8 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2",
     "@vitejs/plugin-vue": "^6.0.7",
-    "@vue/test-utils": "^2.5.1",
-    "@wdio/cli": "9.31.3",
-    "@wdio/globals": "9.31.3",
-    "@wdio/local-runner": "9.31.3",
-    "@wdio/mocha-framework": "9.31.2",
-    "@wdio/spec-reporter": "9.31.2",
-    "@wdio/tauri-plugin": "^1.5.0",
-    "@wdio/tauri-service": "^1.5.0",
-    "jsdom": "^30.1.2",
     "typescript": "~6.0.3",
     "vite": "^8.0.16",
-    "vitest": "^5.0.3",
-    "vue-tsc": "^3.3.5",
-    "webdriverio": "9.31.9"
+    "vue-tsc": "^3.3.5"
   }
 }

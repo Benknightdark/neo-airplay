@@ -2,8 +2,7 @@
 param()
 
 $ErrorActionPreference = 'Stop'
-$projectRoot = Split-Path -Parent $PSScriptRoot
-$desktopRoot = Join-Path $projectRoot 'desktop'
+$desktopRoot = Split-Path -Parent $PSScriptRoot
 
 if ($env:OS -eq 'Windows_NT') {
     $nodeVersionFile = Join-Path $desktopRoot '.node-version'

@@ -88,10 +88,15 @@ describe("Neo AirPlay 桌面流程", () => {
     await receiverName.setValue("Meeting Room Receiver");
     await expect(receiverName).toHaveValue("Meeting Room Receiver");
     await $(`[data-testid='settings-save']`).click();
+    await expect($(`[data-testid='settings-save']`)).toBeEnabled();
     await expect(receiverName).toHaveValue("Meeting Room Receiver");
 
     await $(`[data-testid='nav-diagnostics']`).click();
     await expect($("[data-testid='diagnostics-page']")).toBeDisplayed();
+
+    await $(`[data-testid='nav-tools']`).click();
+    await expect($("[data-testid='tools-page']")).toBeDisplayed();
+    await expect($("[data-testid='tools-upgrade']")).toBeDisplayed();
 
     await $(`[data-testid='nav-overview']`).click();
     await expect($("[data-testid='dashboard-page']")).toBeDisplayed();

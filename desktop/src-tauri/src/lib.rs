@@ -2,7 +2,7 @@ mod dependencies;
 mod models;
 mod state;
 
-use models::{DashboardSnapshot, ReceiverSettings};
+use models::{DashboardSnapshot, EngineStatus, ReceiverSettings};
 use state::AppState;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -20,10 +20,36 @@ fn get_dependencies(
 }
 
 #[tauri::command]
+fn read_install_log(state: State<'_, dependencies::DependencyManager>) -> Result<String, String> {
+    state.read_install_log()
+}
+
+#[tauri::command]
 fn install_dependencies(
     state: State<'_, dependencies::DependencyManager>,
 ) -> Result<dependencies::DependencySnapshot, String> {
     state.start()
+}
+
+#[tauri::command]
+fn manage_dependencies(
+    app_state: State<'_, AppState>,
+    dependencies: State<'_, dependencies::DependencyManager>,
+    action: dependencies::DependencyAction,
+) -> Result<dependencies::DependencySnapshot, String> {
+    dependencies.manage(action, || {
+        let airplay = app_state.stop_airplay();
+        let android = app_state.stop_android_mirror();
+        let airplay = airplay.map_err(|error| format!("無法停止 AirPlay：{error}"))?;
+        let android = android.map_err(|error| format!("無法停止 Android 投影：{error}"))?;
+        if airplay.status == EngineStatus::Faulted || android.status == EngineStatus::Faulted {
+            return Err(format!(
+                "停止投影服務失敗，工具檔案未移除。{} {}",
+                airplay.message, android.message
+            ));
+        }
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -71,8 +97,11 @@ fn save_settings(
 }
 
 #[tauri::command]
-fn start_airplay(state: State<'_, AppState>) -> Result<models::EngineSnapshot, String> {
-    state.start_airplay()
+fn start_airplay(
+    state: State<'_, AppState>,
+    dependencies: State<'_, dependencies::DependencyManager>,
+) -> Result<models::EngineSnapshot, String> {
+    dependencies.with_engine_access(|| state.start_airplay())
 }
 
 #[tauri::command]
@@ -83,16 +112,18 @@ fn stop_airplay(state: State<'_, AppState>) -> Result<models::EngineSnapshot, St
 #[tauri::command(async)]
 fn refresh_android_devices(
     state: State<'_, AppState>,
+    dependencies: State<'_, dependencies::DependencyManager>,
 ) -> Result<Vec<models::AndroidDevice>, String> {
-    state.refresh_android_devices()
+    dependencies.with_engine_access(|| state.refresh_android_devices())
 }
 
 #[tauri::command]
 fn start_android_mirror(
     state: State<'_, AppState>,
+    dependencies: State<'_, dependencies::DependencyManager>,
     serial: String,
 ) -> Result<models::EngineSnapshot, String> {
-    state.start_android_mirror(&serial)
+    dependencies.with_engine_access(|| state.start_android_mirror(&serial))
 }
 
 #[tauri::command]
@@ -228,6 +259,8 @@ pub fn run() {
             get_dashboard,
             get_dependencies,
             install_dependencies,
+            manage_dependencies,
+            read_install_log,
             save_settings,
             start_airplay,
             stop_airplay,

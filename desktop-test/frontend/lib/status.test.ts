@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { engineLabel, localTime, logLabel } from "./status";
+import { engineLabel, localTime, logLabel } from "../../../desktop/src/lib/status";
 
 describe("狀態顯示文字", () => {
   it("將引擎狀態轉成介面文字", () => {

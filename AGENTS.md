@@ -9,13 +9,13 @@ Neo AirPlay 是以 Tauri 2、Rust、Vue 3、TypeScript 與 Bun 建立的跨平�
 - [已驗證命令清單](.neo_harness/docs/scripts.md)
 - [安全與信任邊界](.neo_harness/SECURITY.md)
 - [程序生命週期與復原](.neo_harness/RELIABILITY.md)
-- Vue 應用程式位於 `desktop/src/`，Rust 命令與服務位於 `desktop/src-tauri/`，單元及 E2E 測試位於 `desktop/src/` 與 `desktop/e2e/`。
+- Vue 應用程式位於 `desktop/src/`，Rust 命令與服務位於 `desktop/src-tauri/`，前端／後端單元測試及桌面 E2E 位於根目錄 `desktop-test/`。
 
 ## 工作規則
 
 1. 開始修改前閱讀相關程式碼與 README；架構描述以目前程式為準，不推定尚未實作的設計。
 2. 保持 Tauri commands、Vue API 模組與 Rust state 的依賴關係清楚。若要改動引擎、外部程序或發佈內容，先查閱架構、安全及可靠性文件。
-3. 修改程式碼、Vue、Rust 或建置設定後執行根目錄 `.neo_harness/verify.ps1`。需要驗證桌面導覽或設定流程時，另外執行 scripts.md 所列的桌面 E2E 命令。
+3. 修改程式碼、Vue、Rust 或建置設定後，macOS／Linux 執行根目錄 `bash desktop/scripts/verify.sh`，Windows 執行 `pwsh desktop/scripts/verify.ps1`。需要驗證桌面導覽或設定流程時，另外執行 scripts.md 所列的桌面 E2E 命令。
 4. GitHub Actions 位於 `.github/workflows/`：CI 在 Windows、macOS、Linux 執行驗證、桌面 E2E、安裝套件建置及正式程式啟動 smoke check。不可將未實際執行的建置或測試描述成通過。文件變更需核對相對連結和命令表格式。
 5. 若檢查失敗，閱讀完整錯誤、修正原因後重跑；無法執行時回報具體原因與未驗證項目。
 

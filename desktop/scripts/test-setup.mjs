@@ -148,7 +148,7 @@ exec "$@"
     rustup: '#!/bin/sh\nif [ "${1:-}" = "component" ]; then printf "rustfmt-x86_64-unknown-linux-gnu\\nclippy-x86_64-unknown-linux-gnu\\n"; fi\nexit 0\n',
     rustc: '#!/bin/sh\nprintf "rustc 1.88.0 (isolated setup test)\\n"\n',
     cargo: '#!/bin/sh\nprintf "cargo 1.88.0 (isolated setup test)\\n"\n',
-    cmake: "#!/bin/sh\nexit 0\n",
+    cmake: '#!/bin/sh\ncase "$*" in *"--install"*) mkdir -p "$NEO_AIRPLAY_ENGINE_DIR/bin"; printf "%s\\n" "#!/bin/sh" "printf \\"UxPlay version 1.73.7\\\\n\\"" > "$NEO_AIRPLAY_ENGINE_DIR/bin/uxplay"; chmod 0755 "$NEO_AIRPLAY_ENGINE_DIR/bin/uxplay" ;; esac\nexit 0\n',
     cc: "#!/bin/sh\nexit 0\n",
     "c++": "#!/bin/sh\nexit 0\n",
     patchelf: "#!/bin/sh\nexit 0\n",
@@ -157,8 +157,9 @@ exec "$@"
     node: '#!/bin/sh\nprintf "%s\\n" "${FAKE_NODE_VERSION:-v22.23.3}"\n',
     sudo: '#!/bin/sh\nexec "$@"\n',
     "apt-get": `#!/bin/sh\nprintf '%s\\n' "$*" >> "$PACKAGE_MANAGER_MARKER"\nexit "\${FAKE_PACKAGE_MANAGER_STATUS:-97}"\n`,
+    dnf: `#!/bin/sh\nprintf '%s\\n' "$*" >> "$PACKAGE_MANAGER_MARKER"\nexit "\${FAKE_PACKAGE_MANAGER_STATUS:-97}"\n`,
     curl: '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "--output" ]; then shift; : > "$1"; fi\n  shift\ndone\nprintf download >> "$SCRCPY_DOWNLOAD_MARKER"\n',
-    sha256sum: '#!/bin/sh\nprintf "%s  %s\\n" "$FAKE_SCRCPY_SHA256" "$1"\n',
+    sha256sum: '#!/bin/sh\ncase "$1" in *uxplay.tar.gz*) printf "168de53ed688f87c4022d79357ce91f9608ad5c53236bff95134d19b88efeb3f  %s\\n" "$1" ;; *) printf "%s  %s\\n" "$FAKE_SCRCPY_SHA256" "$1" ;; esac\n',
     tar: '#!/bin/sh\n[ "${1:-}" = "-xzf" ] || exit 1\nshift\nshift\n[ "${1:-}" = "-C" ] || exit 1\ndestination="$2"\nbundle="$destination/scrcpy-linux-x86_64-v5.0.1"\nmkdir -p "$bundle"\nprintf "#!/bin/sh\\nprintf \\\"scrcpy 5.0.1\\\\n\\\"\\n" > "$bundle/scrcpy"\nprintf "fake scrcpy server\\n" > "$bundle/scrcpy-server"\nprintf "#!/bin/sh\\nprintf \\\"Android Debug Bridge version 1.0.41\\\\n\\\"\\n" > "$bundle/adb"\nchmod 0755 "$bundle/scrcpy" "$bundle/adb"\n',
     brew: `#!/bin/sh\nprintf '%s\\n' "$*" >> "$BREW_MARKER"\nexit 97\n`,
     "xcode-select": '#!/bin/sh\nif [ "${1:-}" = "--install" ]; then printf requested > "$CLT_INSTALL_MARKER"; exit 0; fi\n[ "${CLT_AVAILABLE:-1}" = "1" ]\n',
@@ -580,6 +581,7 @@ test("install.sh does not reinstall runtime packages when only Linux development
     uname: "Linux",
     missingPkgModule: "webkit2gtk-4.1",
     packageManagerStatus: 0,
+    missingCommands: ["dnf"],
   });
   try {
     const result = scenario.runInstaller(["--development"]);
@@ -669,6 +671,33 @@ test("an already-ready normal Linux run avoids all package managers", { skip: sh
     assert.equal(existsSync(scenario.packageManagerMarker), false, "apt-get must not run for a ready installation");
     assert.equal(existsSync(scenario.brewMarker), false, "brew must not run for a ready installation");
     assert.equal(existsSync(join(scenario.home, ".local")), false, "ready fast path should exit before user-bin creation");
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("an explicit upgrade refreshes ready runtime tools and platform packages", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({ uname: "Linux", packageManagerStatus: 0 });
+  try {
+    const result = scenario.runInstaller(["--upgrade"]);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const packageCalls = readFileSync(scenario.packageManagerMarker, "utf8").trim().split("\n");
+    assert.equal(packageCalls[0], "update -qq");
+    assert.match(packageCalls[1], /^install /);
+    assert.ok(readFileSync(scenario.scrcpyDownloadMarker, "utf8").includes("download"));
+    assert.match(readFileSync(join(scenario.engineDirectory, "bin", "uxplay"), "utf8"), /UxPlay version 1\.73\.7/);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("an explicit DNF upgrade refreshes repository metadata before updating packages", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({ uname: "Linux", packageManagerStatus: 0, missingCommands: ["apt-get"] });
+  try {
+    const result = scenario.runInstaller(["--upgrade"]);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const packageCalls = readFileSync(scenario.packageManagerMarker, "utf8").trim().split("\n");
+    assert.match(packageCalls[0], /^-q -y --refresh install /);
   } finally {
     scenario.cleanup();
   }

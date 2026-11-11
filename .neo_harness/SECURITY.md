@@ -11,6 +11,8 @@
 
 ## 外部程序與網路
 
+- 工具管理的升級與重裝命令只刪除指定的 GStreamer registry 檔案；重裝另刪除目前 App `engine/` 目錄中的內容。兩種操作都不會移除系統套件、接收器設定或診斷記錄。引擎清理會拒絕目錄本身為符號連結的情況，目錄內的符號連結只會移除連結本身。
+
 - Rust 使用 `std::process::Command` 的引數陣列啟動 UxPlay、ADB 與 scrcpy，不經由 shell 組合命令。
 - App 啟動時使用 `fix-path-env` 恢復程序 `PATH`；macOS 與 Linux 會啟動使用者設定的登入 shell 讀取環境，因此 shell 啟動設定屬於信任邊界。
 - Android 投影只可使用剛由 ADB 列舉且狀態為 `device` 的裝置序號。App 不執行 ADB 配對或 TCP/IP 連線命令。
@@ -22,7 +24,7 @@
 ## 使用者資料與 E2E
 
 - 設定及每日記錄存放在 Tauri path resolver 提供的使用者應用程式設定與記錄目錄。設定以 JSON 儲存，記錄以 JSONL 附加寫入。
-- WDIO 測試以 `--e2e-profile` 將設定與記錄導向作業系統暫存目錄。此參數只在 Rust `wdio` feature 編譯時啟用；測試能力只由 `tauri.e2e.conf.json` 及 WDIO build script 啟用。
+- WDIO 測試以 `--e2e-profile` 將設定與記錄導向作業系統暫存目錄。此參數只在 Rust `wdio` feature 編譯時啟用；測試能力只由 `desktop-test/e2e/tauri.e2e.conf.json` 及 WDIO build script 啟用。
 - 自動化測試不操作實際投影引擎，不會連接 Android 裝置，也不會更改登入啟動設定。
 
 ## 第三方元件與發佈

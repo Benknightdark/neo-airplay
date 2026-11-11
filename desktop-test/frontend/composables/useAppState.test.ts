@@ -1,11 +1,11 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { defineComponent, h } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import * as api from "../api";
-import type { DashboardSnapshot, EngineSnapshot } from "../types";
-import { useAppState } from "./useAppState";
+import * as api from "../../../desktop/src/api";
+import type { DashboardSnapshot, EngineSnapshot } from "../../../desktop/src/types";
+import { useAppState } from "../../../desktop/src/composables/useAppState";
 
-vi.mock("../api", () => ({
+vi.mock("../../../desktop/src/api", () => ({
   getDependencies: vi.fn(),
   installDependencies: vi.fn(),
   getDashboard: vi.fn(),
