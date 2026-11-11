@@ -46,7 +46,6 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@ecabd13d1c56bd1345c230e542e9144811ad706f # v2.0.0
         with:
           toolchain: stable
-          profile: minimal
           components: rustfmt, clippy
 
       - name: Install Linux desktop dependencies
@@ -98,6 +97,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: desktop/.node-version
+          package-manager-cache: false
 
       - name: Check latest head and pending promotion changes
         id: current-head
