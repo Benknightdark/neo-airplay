@@ -1,6 +1,6 @@
 [package]
 name = "neo-airplay"
-version = "0.2.3"
+version = "0.2.4"
 description = "Cross-platform AirPlay and Android mirroring receiver"
 authors = ["Neo AirPlay contributors"]
 edition = "2021"
