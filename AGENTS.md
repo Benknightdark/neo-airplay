@@ -1,6 +1,6 @@
 # 專案工作入口
 
-Neo AirPlay 是以 Tauri 2、Rust、Vue 3、TypeScript 與 Bun 建立的跨平台 AirPlay 與 Android 投影接收器。介面及操作流程以根目錄 [README.md](README.md) 為準。
+Neo AirPlay 是以 Tauri 2、Rust、Vue 3、TypeScript 與 Bun 建立的跨平台 AirPlay 與 Android 投影接收器。
 
 ## 知識地圖
 
