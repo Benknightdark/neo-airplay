@@ -1,7 +1,13 @@
+use crate::application::{DependencyRuntime, EngineAccessGuard};
+use crate::domain::{
+    first_useful_line, interrupted_install_detail, parse_missing_dependencies, DependencyAction,
+    DependencyOperation, DependencySnapshot, DomainError, DomainResult, InstallProgress,
+    InstallResult, LaunchRecord, RuntimeCheck, SetupOutcome,
+};
 #[cfg(target_os = "windows")]
-use crate::state::background_command;
-use crate::state::{installer_path, run_with_timeout_in_path};
-use serde::{Deserialize, Serialize};
+use crate::infrastructure::process::background_command;
+use crate::infrastructure::process::{installer_path, run_with_timeout_in_path};
+use serde::Serialize;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::panic::AssertUnwindSafe;
@@ -28,43 +34,9 @@ const INSTALL_LAUNCH: &str = "install-launch.json";
 const INSTALL_LOG: &str = "install.log";
 const INSTALL_PROGRESS: &str = "install-progress.json";
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum DependencyAction {
-    Upgrade,
-    Reinstall,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum DependencyOperation {
-    Install,
-    Upgrade,
-    Reinstall,
-}
-
-impl From<DependencyAction> for DependencyOperation {
-    fn from(action: DependencyAction) -> Self {
-        match action {
-            DependencyAction::Upgrade => Self::Upgrade,
-            DependencyAction::Reinstall => Self::Reinstall,
-        }
-    }
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DependencySnapshot {
-    pub status: String,
-    pub operation: Option<DependencyOperation>,
-    pub message: String,
-    pub missing: Vec<String>,
-    pub log_path: String,
-}
-
 pub struct DependencyManager {
     snapshot: Arc<Mutex<DependencySnapshot>>,
-    worker_active: Arc<AtomicBool>,
+    pub(crate) worker_active: Arc<AtomicBool>,
     operation_gate: Arc<Mutex<()>>,
     engine_dir: PathBuf,
     gstreamer_registry_path: PathBuf,
@@ -120,17 +92,14 @@ impl DependencyManager {
     }
 
     pub fn start(&self) -> Result<DependencySnapshot, String> {
-        self.begin_operation(DependencyOperation::Install, true, || Ok(()))
+        self.begin_operation(DependencyOperation::Install, true, &mut || Ok(()))
     }
 
-    pub fn manage<F>(
+    pub fn manage(
         &self,
         action: DependencyAction,
-        prepare: F,
-    ) -> Result<DependencySnapshot, String>
-    where
-        F: FnOnce() -> Result<(), String>,
-    {
+        prepare: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<DependencySnapshot, String> {
         self.begin_operation(action.into(), false, prepare)
     }
 
@@ -148,15 +117,12 @@ impl DependencyManager {
         action()
     }
 
-    fn begin_operation<F>(
+    fn begin_operation(
         &self,
         operation: DependencyOperation,
         return_existing: bool,
-        prepare: F,
-    ) -> Result<DependencySnapshot, String>
-    where
-        F: FnOnce() -> Result<(), String>,
-    {
+        prepare: &mut dyn FnMut() -> Result<(), String>,
+    ) -> Result<DependencySnapshot, String> {
         if !self.enabled {
             if return_existing {
                 return self.snapshot();
@@ -250,6 +216,10 @@ impl DependencyManager {
         self.snapshot()
     }
 
+    /// 當前置步驟或執行緒生成失敗時，寫入失敗日誌、將快照標記為 `failed` 並釋放 `worker_active`。
+    ///
+    /// # 參數
+    /// - `message`: 失敗原因訊息。
     fn fail_operation(&self, message: &str) {
         append_log(&self.setup_dir.join(INSTALL_LOG), message);
         if let Ok(_operation) = self.operation_gate.lock() {
@@ -265,88 +235,85 @@ impl DependencyManager {
     }
 }
 
-struct SetupOutcome {
-    status: String,
-    message: String,
-    missing: Vec<String>,
-}
-
-impl SetupOutcome {
-    fn ready(operation: DependencyOperation) -> Self {
-        Self {
-            status: "ready".into(),
-            message: match operation {
-                DependencyOperation::Install => "投影工具已就緒。".into(),
-                DependencyOperation::Upgrade => "投影工具升級完成。".into(),
-                DependencyOperation::Reinstall => "投影工具重新安裝完成。".into(),
-            },
-            missing: Vec::new(),
+impl EngineAccessGuard for DependencyManager {
+    /// 實作應用層 `EngineAccessGuard` 埠，阻擋維護期間同時操作投影引擎。
+    ///
+    /// # 參數
+    /// - `action`: 無衝突時執行的可變閉包參考。
+    ///
+    /// # 回傳值
+    /// 執行成功回傳 `Ok(())`；工具忙碌中時回傳 `DomainError::dependency_busy`。
+    fn execute_if_available(&self, action: &mut dyn FnMut()) -> DomainResult<()> {
+        let _operation = self
+            .operation_gate
+            .lock()
+            .map_err(|_| DomainError::conflict("工具維護狀態無法讀取。"))?;
+        if self.worker_active.load(Ordering::Acquire) {
+            return Err(DomainError::dependency_busy(
+                "工具正在檢查或維護，請稍候再試。",
+            ));
         }
-    }
-
-    fn failed(message: String, missing: Vec<String>) -> Self {
-        Self {
-            status: "failed".into(),
-            message,
-            missing,
-        }
+        action();
+        Ok(())
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct InstallResult {
-    pid: u32,
-    exit_code: i32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    stage: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
-}
+impl DependencyRuntime for DependencyManager {
+    /// 透過 `DependencyRuntime` 埠查詢目前快照。
+    ///
+    /// # 回傳值
+    /// 回傳 `DependencySnapshot` 或映射後的 `DomainError::storage`。
+    fn snapshot(&self) -> DomainResult<DependencySnapshot> {
+        DependencyManager::snapshot(self).map_err(DomainError::storage)
+    }
 
-impl InstallResult {
-    fn detail(&self) -> String {
-        let mut detail = format!("安裝程序結束代碼 {}", self.exit_code);
-        if let Some(stage) = &self.stage {
-            detail.push_str(&format!("（{}）", stage_label(stage)));
-        }
-        if let Some(message) = self
-            .message
-            .as_deref()
-            .filter(|message| !message.is_empty())
-        {
-            detail.push_str(&format!("：{message}"));
-        }
-        detail
+    /// 透過 `DependencyRuntime` 埠讀取安裝日誌。
+    ///
+    /// # 回傳值
+    /// 回傳安裝日誌內容或 `DomainError::not_found`。
+    fn read_install_log(&self) -> DomainResult<String> {
+        DependencyManager::read_install_log(self).map_err(DomainError::not_found)
+    }
+
+    /// 透過 `DependencyRuntime` 埠啟動自動檢查與安裝。
+    ///
+    /// # 回傳值
+    /// 回傳更新後的 `DependencySnapshot` 或 `DomainError::dependency_busy`。
+    fn start_install(&self) -> DomainResult<DependencySnapshot> {
+        DependencyManager::start(self).map_err(DomainError::dependency_busy)
+    }
+
+    /// 透過 `DependencyRuntime` 埠啟動手動維護作業。
+    ///
+    /// # 參數
+    /// - `action`: 維護動作類型。
+    /// - `prepare`: 前置停止與檢查閉包。
+    ///
+    /// # 回傳值
+    /// 回傳更新後的 `DependencySnapshot` 或 `DomainError::dependency_busy`。
+    fn manage(
+        &self,
+        action: DependencyAction,
+        prepare: &mut dyn FnMut() -> DomainResult<()>,
+    ) -> DomainResult<DependencySnapshot> {
+        DependencyManager::manage(self, action, &mut || {
+            prepare().map_err(|error| error.message)
+        })
+        .map_err(DomainError::dependency_busy)
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct InstallProgress {
-    pid: u32,
-    stage: String,
-    message: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LaunchRecord {
-    owner_pid: u32,
-    worker_pid: Option<u32>,
-    started_at: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeCheck {
-    missing: Vec<String>,
-}
-
-impl RuntimeCheck {
-    fn is_ready(&self) -> bool {
-        self.missing.is_empty()
-    }
-}
-
+/// 在背景執行緒執行的完整檢查、清理、安裝與結果驗證工作流程。
+///
+/// # 參數
+/// - `engine_dir`: 受控管投影工具目錄。
+/// - `gstreamer_registry_path`: macOS GStreamer 快取路徑。
+/// - `setup_dir`: 暫存腳本與安裝追蹤檔案目錄。
+/// - `snapshot`: 用於即時發布狀態進度的共用快照鎖。
+/// - `operation`: 本次執行的依賴作業類型。
+///
+/// # 回傳值
+/// 回傳最終 `SetupOutcome` 或不可恢復的錯誤訊息字串。
 fn run_setup(
     engine_dir: &Path,
     gstreamer_registry_path: &Path,
@@ -389,7 +356,6 @@ fn run_setup(
                         snapshot,
                     )?;
                 } else {
-                    // A just-finished script removes its marker before atomically writing the result.
                     thread::sleep(RESULT_GRACE);
                 }
             }
@@ -443,8 +409,6 @@ fn run_setup(
         clear_gstreamer_registry(gstreamer_registry_path)?;
     }
 
-    // Avoid rewriting a staged script while an installer from an earlier app process may be
-    // reading it. Recovery waits above before refreshing the embedded copy.
     stage_installer(setup_dir)?;
     let runtime = check_runtime(engine_dir, setup_dir)?;
     if runtime.is_ready() && operation == DependencyOperation::Install {
@@ -497,6 +461,13 @@ fn run_setup(
     Ok(SetupOutcome::failed(message, final_check.missing))
 }
 
+/// 在 macOS 上於首次就緒或快取失效時預熱 GStreamer registry 快取，加速後續 UxPlay 啟動。
+///
+/// # 參數
+/// - `engine_dir`: 受控管工具目錄。
+/// - `registry_path`: 目標 GStreamer registry 二進位檔案路徑。
+/// - `setup_dir`: 放置 `install.sh` 的 setup 目錄。
+/// - `snapshot`: 用於更新目前介面安裝提示文字的快照鎖。
 fn warm_gstreamer_registry(
     engine_dir: &Path,
     registry_path: &Path,
@@ -561,22 +532,37 @@ fn warm_gstreamer_registry(
     let _ = (engine_dir, registry_path, setup_dir, snapshot);
 }
 
+/// 將編譯時嵌入二進位檔的平台安裝腳本釋放至 `setup_dir`。
+///
+/// # 參數
+/// - `setup_dir`: 目標腳本存放目錄。
+///
+/// # 回傳值
+/// 成功釋放回傳腳本檔案路徑 `Ok(PathBuf)`；寫入失敗回傳錯誤字串。
 fn stage_installer(setup_dir: &Path) -> Result<PathBuf, String> {
     #[cfg(target_os = "windows")]
     let (path, contents) = (
         setup_dir.join("install.ps1"),
-        include_str!("../../scripts/install.ps1"),
+        include_str!("../../../scripts/install.ps1"),
     );
     #[cfg(not(target_os = "windows"))]
     let (path, contents) = (
         setup_dir.join("install.sh"),
-        include_str!("../../scripts/install.sh"),
+        include_str!("../../../scripts/install.sh"),
     );
 
     fs::write(&path, contents).map_err(|error| format!("無法準備工具安裝程序：{error}"))?;
     Ok(path)
 }
 
+/// 呼叫平台安裝腳本的檢查模式驗證目前工具與執行期環境是否齊備。
+///
+/// # 參數
+/// - `engine_dir`: 待檢查的工具根目錄。
+/// - `setup_dir`: 包含已釋放安裝腳本與 `install.log` 的目錄。
+///
+/// # 回傳值
+/// 回傳包含缺少項目清單的 `RuntimeCheck`；檢查指令無法啟動或逾時則回傳錯誤字串。
 fn check_runtime(engine_dir: &Path, setup_dir: &Path) -> Result<RuntimeCheck, String> {
     let path = installer_path(engine_dir);
     #[cfg(target_os = "windows")]
@@ -628,6 +614,16 @@ fn check_runtime(engine_dir: &Path, setup_dir: &Path) -> Result<RuntimeCheck, St
     Ok(RuntimeCheck { missing })
 }
 
+/// 依作業系統啟動安裝腳本（macOS 透過 AppleScript 開啟 Terminal，其餘平台直接背景執行）並等待其完成。
+///
+/// # 參數
+/// - `setup_dir`: 安裝腳本、日誌、PID 標記與結果檔目錄。
+/// - `engine_dir`: 目標投影工具安裝目錄。
+/// - `snapshot`: 用於即時推送進度提示的快照鎖。
+/// - `force_upgrade`: 是否傳入升級旗標以強制更新現有套件。
+///
+/// # 回傳值
+/// 回傳由腳本寫入的 `InstallResult`；啟動或監控過程失敗則回傳錯誤字串。
 fn install_dependencies(
     setup_dir: &Path,
     engine_dir: &Path,
@@ -686,7 +682,6 @@ fn install_dependencies(
             Ok(output) => {
                 let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
                 append_log(&log_path, &format!("Terminal 安裝啟動失敗：{detail}"));
-                // Terminal may have accepted the command before osascript failed.
                 let _ = wait_for_install(engine_dir, setup_dir, None, None, Some(launch), snapshot);
                 return read_install_result(&result_path)?.ok_or_else(|| {
                     if detail.is_empty() {
@@ -754,8 +749,19 @@ fn install_dependencies(
     }
 }
 
+/// 建構 Windows PowerShell 非互動式安裝命令。
+///
+/// # 參數
+/// - `script`: `install.ps1` 腳本檔案路徑。
+/// - `engine_dir`: 目標工具安裝目錄。
+/// - `marker`: PID 標記檔案路徑。
+/// - `result`: 結果輸出 JSON 檔案路徑。
+/// - `force_upgrade`: 是否附帶 `-Upgrade` 旗標。
+///
+/// # 回傳值
+/// 回傳設定完成參數的 Windows `Command`。
 #[cfg(target_os = "windows")]
-fn installer_command(
+pub(crate) fn installer_command(
     script: &Path,
     engine_dir: &Path,
     marker: &Path,
@@ -789,8 +795,19 @@ fn installer_command(
     command
 }
 
+/// 建構 Linux Bash 安裝命令。
+///
+/// # 參數
+/// - `script`: `install.sh` 腳本檔案路徑。
+/// - `engine_dir`: 目標工具安裝目錄。
+/// - `marker`: PID 標記檔案路徑。
+/// - `result`: 結果輸出 JSON 檔案路徑。
+/// - `force_upgrade`: 是否附帶 `--upgrade` 旗標。
+///
+/// # 回傳值
+/// 回傳設定完成參數的 Linux `Command`。
 #[cfg(target_os = "linux")]
-fn installer_command(
+pub(crate) fn installer_command(
     script: &Path,
     engine_dir: &Path,
     marker: &Path,
@@ -812,7 +829,19 @@ fn installer_command(
     command
 }
 
-fn wait_for_install(
+/// 持續輪詢安裝進度檔、子程序狀態、PID 標記與結果檔，直到安裝產出結果或確認中斷。
+///
+/// # 參數
+/// - `engine_dir`: 投影工具目錄。
+/// - `setup_dir`: 追蹤檔案（`install.pid`、`install-result.json`、`install-progress.json`）所在目錄。
+/// - `expected_pid`: 已知的既有安裝程序 PID（若有）。
+/// - `child`: 直接產生的背景安裝子程序句柄（macOS 透過 Terminal 啟動時為 `None`）。
+/// - `launch`: 本次或上一次啟動紀錄。
+/// - `snapshot`: 用於即時更新 UI 進度提示的快照鎖。
+///
+/// # 回傳值
+/// 成功讀到結果檔回傳 `Ok(Some(InstallResult))`；程序意外結束或無法確認狀態時回傳錯誤字串。
+pub(crate) fn wait_for_install(
     engine_dir: &Path,
     setup_dir: &Path,
     mut expected_pid: Option<u32>,
@@ -862,8 +891,6 @@ fn wait_for_install(
         if let Some(result) = read_install_result(&result_path)? {
             remove_if_exists(&marker_path);
             if let Some(mut process) = child.take() {
-                // An elevated installer may finish before its waiting launcher exits.
-                // Reap it without blocking the completed installation's UI state.
                 if let Err(error) = thread::Builder::new()
                     .name("neo-airplay-installer-reaper".into())
                     .spawn(move || {
@@ -878,8 +905,6 @@ fn wait_for_install(
             }
             return Ok(Some(result));
         }
-        // Reap a directly owned child before probing its PID. On Unix a zombie still
-        // answers kill -0 until try_wait collects its exit status.
         let mut unknown_pid = None;
         if let Some(pid) = read_install_marker(&marker_path)? {
             expected_pid = Some(pid);
@@ -943,6 +968,13 @@ fn wait_for_install(
     }
 }
 
+/// 讀取並驗證安裝進度 JSON 檔案。
+///
+/// # 參數
+/// - `path`: `install-progress.json` 檔案路徑。
+///
+/// # 回傳值
+/// 檔案不存在回傳 `Ok(None)`；有效進度回傳 `Ok(Some(InstallProgress))`；格式或讀取異常回傳錯誤字串。
 fn read_install_progress(path: &Path) -> Result<Option<InstallProgress>, String> {
     match fs::read(path) {
         Ok(contents) => {
@@ -955,43 +987,13 @@ fn read_install_progress(path: &Path) -> Result<Option<InstallProgress>, String>
     }
 }
 
-fn interrupted_install_detail(
-    pid: Option<u32>,
-    status: Option<std::process::ExitStatus>,
-    progress: Option<&InstallProgress>,
-) -> String {
-    let mut detail = pid
-        .map(|pid| format!("安裝程序 {pid} 已結束，但沒有寫入完成結果。"))
-        .unwrap_or_else(|| "安裝程序未寫入完成結果。".into());
-    if let Some(status) = status {
-        detail.push_str(&format!("程序退出狀態：{status}。"));
-    }
-    if let Some(progress) = progress {
-        detail.push_str(&format!("最後階段：{}。", stage_label(&progress.stage)));
-    }
-    detail
-}
-
-fn stage_label(stage: &str) -> &str {
-    match stage {
-        "checking" => "檢查投影工具",
-        "authorizing" => "系統授權",
-        "msys2" => "安裝建置工具",
-        "updating" => "更新工具套件",
-        "packages" => "安裝工具套件",
-        "toolchain" => "驗證編譯工具",
-        "repairing" => "修復編譯工具",
-        "uxplay-download" => "下載 AirPlay 工具",
-        "uxplay-build" => "編譯 AirPlay 工具",
-        "uxplay-install" => "安裝 AirPlay 工具",
-        "scrcpy-download" => "下載 Android 工具",
-        "staging" => "整理工具檔案",
-        "verifying" => "驗證投影工具",
-        "ready" => "準備完成",
-        _ => "工具安裝",
-    }
-}
-
+/// 讀取安裝程序 PID 標記檔案。
+///
+/// # 參數
+/// - `path`: `install.pid` 檔案路徑。
+///
+/// # 回傳值
+/// 檔案不存在回傳 `Ok(None)`；有效非零 PID 回傳 `Ok(Some(u32))`；內容無效或讀取失敗回傳錯誤字串。
 fn read_install_marker(path: &Path) -> Result<Option<u32>, String> {
     match fs::read_to_string(path) {
         Ok(value) => value
@@ -1006,6 +1008,13 @@ fn read_install_marker(path: &Path) -> Result<Option<u32>, String> {
     }
 }
 
+/// 讀取安裝結果 JSON 檔案。
+///
+/// # 參數
+/// - `path`: `install-result.json` 檔案路徑。
+///
+/// # 回傳值
+/// 檔案不存在回傳 `Ok(None)`；有效結果回傳 `Ok(Some(InstallResult))`；格式或 PID 無效回傳錯誤字串。
 fn read_install_result(path: &Path) -> Result<Option<InstallResult>, String> {
     match fs::read(path) {
         Ok(contents) => {
@@ -1021,6 +1030,13 @@ fn read_install_result(path: &Path) -> Result<Option<InstallResult>, String> {
     }
 }
 
+/// 讀取上一次或當前啟動的安裝紀錄檔案。
+///
+/// # 參數
+/// - `path`: `install-launch.json` 檔案路徑。
+///
+/// # 回傳值
+/// 檔案不存在回傳 `Ok(None)`；讀取或反序列化成功回傳 `Ok(Some(LaunchRecord))`；失敗回傳錯誤字串。
 fn read_launch_record(path: &Path) -> Result<Option<LaunchRecord>, String> {
     match fs::read(path) {
         Ok(contents) => serde_json::from_slice(&contents)
@@ -1031,13 +1047,25 @@ fn read_launch_record(path: &Path) -> Result<Option<LaunchRecord>, String> {
     }
 }
 
+/// 外部行程存活探測結果。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProcessPresence {
+    /// 確認行程仍在作業系統中執行。
     Alive,
+    /// 確認行程已不存在。
     Dead,
+    /// 因權限或探測逾時無法確定行程狀態。
     Unknown,
 }
 
+/// 依作業系統檢查指定 PID 的安裝程序是否仍在執行。
+///
+/// # 參數
+/// - `pid`: 欲探測的作業系統行程識別碼。
+/// - `_engine_dir`: 投影工具目錄（Windows 上用於組裝 `tasklist.exe` 查詢環境 PATH）。
+///
+/// # 回傳值
+/// 回傳 `ProcessPresence::Alive`、`Dead` 或 `Unknown`。
 fn process_presence(pid: u32, _engine_dir: &Path) -> ProcessPresence {
     if pid == 0 {
         return ProcessPresence::Dead;
@@ -1087,8 +1115,16 @@ fn process_presence(pid: u32, _engine_dir: &Path) -> ProcessPresence {
     }
 }
 
+/// 解析 Windows `tasklist.exe /FO CSV /NH` 輸出，判斷目標 PID 是否仍在執行清單中。
+///
+/// # 參數
+/// - `output`: `tasklist.exe` 指令輸出。
+/// - `pid`: 目標行程識別碼。
+///
+/// # 回傳值
+/// 若 CSV 第二欄精確吻合 `pid` 則回傳 `true`。
 #[cfg(any(target_os = "windows", test))]
-fn tasklist_contains_pid(output: &Output, pid: u32) -> bool {
+pub(crate) fn tasklist_contains_pid(output: &Output, pid: u32) -> bool {
     String::from_utf8_lossy(&output.stdout).lines().any(|line| {
         line.split(',')
             .nth(1)
@@ -1097,11 +1133,26 @@ fn tasklist_contains_pid(output: &Output, pid: u32) -> bool {
     })
 }
 
+/// 判斷啟動紀錄是否仍落在 `LAUNCH_GRACE` 寬限視窗內，用於等待尚未寫入 PID 標記的提權程序。
+///
+/// # 參數
+/// - `record`: 上一次寫入的 `LaunchRecord`。
+///
+/// # 回傳值
+/// 若距今小於 `LAUNCH_GRACE` 秒則回傳 `true`。
 fn launch_is_recent(record: &LaunchRecord) -> bool {
     unix_time_seconds().saturating_sub(record.started_at) < LAUNCH_GRACE.as_secs()
 }
 
-fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<(), String> {
+/// 以暫存檔寫入並更名的方式原子性將資料序列化為 JSON 檔案。
+///
+/// # 參數
+/// - `path`: 目標 JSON 檔案路徑。
+/// - `value`: 實作 `Serialize` 的資料結構參考。
+///
+/// # 回傳值
+/// 成功回傳 `Ok(())`；序列化、寫入或更名失敗時回傳錯誤字串。
+pub(crate) fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<(), String> {
     let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
     let temporary_path = path.with_extension(format!("tmp-{}", std::process::id()));
     fs::write(&temporary_path, bytes).map_err(|error| error.to_string())?;
@@ -1111,6 +1162,10 @@ fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<(), String> 
     })
 }
 
+/// 若目標檔案存在則盡力移除，忽略不存在或其他刪除錯誤（用於清理非關鍵標記檔）。
+///
+/// # 參數
+/// - `path`: 欲清理的檔案路徑。
 fn remove_if_exists(path: &Path) {
     match fs::remove_file(path) {
         Ok(()) => {}
@@ -1119,18 +1174,43 @@ fn remove_if_exists(path: &Path) {
     }
 }
 
-fn clear_app_tools(engine_dir: &Path, gstreamer_registry_path: &Path) -> Result<(), String> {
+/// 重新安裝前清除應用程式專用工具目錄內容與 GStreamer 快取檔案。
+///
+/// # 參數
+/// - `engine_dir`: 應用程式管理的投影工具目錄。
+/// - `gstreamer_registry_path`: GStreamer registry 快取檔案路徑。
+///
+/// # 回傳值
+/// 成功清除回傳 `Ok(())`；遇到符號連結目錄或刪除失敗則回傳錯誤字串。
+pub(crate) fn clear_app_tools(
+    engine_dir: &Path,
+    gstreamer_registry_path: &Path,
+) -> Result<(), String> {
     clear_engine_directory(engine_dir)?;
     clear_gstreamer_registry(gstreamer_registry_path)
 }
 
-fn clear_gstreamer_registry(path: &Path) -> Result<(), String> {
+/// 移除指定的 GStreamer registry 快取檔案（若路徑非空）。
+///
+/// # 參數
+/// - `path`: GStreamer registry 快取檔案路徑。
+///
+/// # 回傳值
+/// 成功移除或檔案本不存在回傳 `Ok(())`；刪除失敗回傳錯誤字串。
+pub(crate) fn clear_gstreamer_registry(path: &Path) -> Result<(), String> {
     if !path.as_os_str().is_empty() {
         remove_file_if_exists(path)?;
     }
     Ok(())
 }
 
+/// 安全清空工具目錄下的可重建項目，但保留 `.GITKEEP` 與 `.bundled-*` 標記檔並拒絕符號連結。
+///
+/// # 參數
+/// - `path`: 工具目錄路徑。
+///
+/// # 回傳值
+/// 清理成功回傳 `Ok(())`；目錄無效或遭遇系統權限錯誤回傳錯誤字串。
 fn clear_engine_directory(path: &Path) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|error| format!("無法建立工具目錄：{error}"))?;
     let metadata =
@@ -1162,6 +1242,13 @@ fn clear_engine_directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 刪除單一檔案並對「找不到檔案」視為成功，其餘 I/O 錯誤轉為可讀訊息。
+///
+/// # 參數
+/// - `path`: 欲移除的檔案路徑。
+///
+/// # 回傳值
+/// 成功或檔案不存在回傳 `Ok(())`；其他刪除失敗回傳錯誤字串。
 fn remove_file_if_exists(path: &Path) -> Result<(), String> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -1170,12 +1257,24 @@ fn remove_file_if_exists(path: &Path) -> Result<(), String> {
     }
 }
 
+/// 將單行診斷或腳本輸出附加寫入安裝日誌檔尾端。
+///
+/// # 參數
+/// - `path`: 安裝日誌檔案（`install.log`）路徑。
+/// - `message`: 欲附加的文字內容。
 fn append_log(path: &Path, message: &str) {
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "{message}");
     }
 }
 
+/// 合併外部程序輸出的 `stdout` 與非空 `stderr` 為單一 UTF-8 字串。
+///
+/// # 參數
+/// - `output`: 外部程序的 `Output` 結構參考。
+///
+/// # 回傳值
+/// 回傳合併後的文字內容。
 fn combined_output(output: &Output) -> String {
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1188,23 +1287,11 @@ fn combined_output(output: &Output) -> String {
     text
 }
 
-fn parse_missing_dependencies(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("-").map(str::trim))
-        .filter(|line| !line.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-fn first_useful_line(output: &str) -> Option<String> {
-    output
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with("Missing runtime dependencies:"))
-        .map(str::to_owned)
-}
-
+/// 更新共用依賴狀態快照為 `installing` 並刷新介面顯示訊息。
+///
+/// # 參數
+/// - `snapshot`: 受互斥鎖保護的共用 `DependencySnapshot`。
+/// - `message`: 最新的階段提示文字。
 fn publish_installing(snapshot: &Arc<Mutex<DependencySnapshot>>, message: &str) {
     if let Ok(mut snapshot) = snapshot.lock() {
         snapshot.status = "installing".into();
@@ -1212,6 +1299,10 @@ fn publish_installing(snapshot: &Arc<Mutex<DependencySnapshot>>, message: &str) 
     }
 }
 
+/// 取得目前的 Unix 時間戳記（單位：秒）。
+///
+/// # 回傳值
+/// 回傳自 Unix 紀元以來的秒數；若系統時間異常則回傳 `0`。
 fn unix_time_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1219,11 +1310,18 @@ fn unix_time_seconds() -> u64 {
         .as_secs()
 }
 
+/// 在 macOS 下為 shell 命令參數加上單引號跳脫保護，防止空白或特殊字元被 Shell 誤解析。
+///
+/// # 參數
+/// - `value`: 欲跳脫的原始字串（例如路徑）。
+///
+/// # 回傳值
+/// 回傳經過單引號跳脫包覆的安全字串。
 #[cfg(target_os = "macos")]
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
-#[path = "../../../desktop-test/backend/unit-tests/dependencies.rs"]
+#[path = "../../../../desktop-test/backend/unit-tests/dependencies.rs"]
 mod tests;

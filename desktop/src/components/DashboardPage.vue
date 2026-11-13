@@ -1,71 +1,87 @@
 <script setup lang="ts">
+/**
+ * @file 接收器總覽儀表板頁面元件，提供 AirPlay 與 Android 雙投影引擎啟動、停止及裝置選擇控制。
+ */
 import { computed, ref, watch } from "vue";
-import type { DashboardSnapshot } from "../types";
-import { engineLabel } from "../lib/status";
+import {
+  airplayButtonLabel,
+  airplayHint,
+  diagnoseUnavailableDevices,
+  engineLabel,
+  filterReadyDevices,
+  isAirplayActive,
+  resolveSelectedSerial,
+  type DashboardSnapshot,
+} from "../domain";
 
+/** 元件接收的唯讀 Props。 */
 const props = defineProps<{
+  /** 來自後端的儀表板完整狀態快照。 */
   dashboard: DashboardSnapshot;
+  /** 指示全域是否正處於操作忙碌鎖定狀態。 */
   busy: boolean;
 }>();
 
+/** 元件對父層發出的控制動作事件。 */
 const emit = defineEmits<{
+  /** 使用者點擊「開始接收」以啟動 AirPlay 接收器。 */
   (event: "start-airplay"): void;
+  /** 使用者點擊停止或取消啟動 AirPlay 接收器。 */
   (event: "stop-airplay"): void;
+  /** 使用者點擊重新整理 Android 裝置清單。 */
   (event: "refresh-devices"): void;
+  /** 使用者選定裝置並點擊「開始投影」時觸發，攜帶裝置 ADB 序號。 */
   (event: "start-android", serial: string): void;
+  /** 使用者點擊「停止投影」以停止 Android 投影。 */
   (event: "stop-android"): void;
 }>();
 
+/** 目前下拉選單選取中的 Android 裝置序號。 */
 const selectedSerial = ref("");
-const availableDevices = computed(() => props.dashboard.devices.filter((device) => device.status === "ready"));
-const selectedDevice = computed(() => availableDevices.value.find((device) => device.serial === selectedSerial.value));
-const airplayActive = computed(() => ["starting", "running", "stopping"].includes(props.dashboard.airplay.status));
-const airplayButtonLabel = computed(() => {
-  if (props.dashboard.airplay.status === "starting") return "取消啟動";
-  if (props.dashboard.airplay.status === "stopping") return "正在停止…";
-  return "停止接收";
-});
-const airplayHint = computed(() => {
-  if (props.dashboard.airplay.status === "starting") {
-    return "正在等待 Bonjour 廣播；接收器出現在 iPhone 清單後即可連線。";
-  }
-  if (props.dashboard.airplay.status === "running") {
-    return `請從 iPhone 的螢幕鏡像清單選擇「${props.dashboard.settings.receiverName}」。`;
-  }
-  return "需要安裝 UxPlay 與影音執行環境";
-});
-const unavailableDeviceHint = computed(() => {
-  const devices = props.dashboard.devices;
+/** 僅包含狀態為 `ready` 的可用 Android 裝置清單。 */
+const availableDevices = computed(() => filterReadyDevices(props.dashboard.devices));
+/** 目前選取序號對應的可用裝置物件（若無效則為 `undefined`）。 */
+const selectedDevice = computed(() =>
+  availableDevices.value.find((device) => device.serial === selectedSerial.value),
+);
+/** AirPlay 目前是否處於啟動中、運行中或停止中。 */
+const airplayActive = computed(() => isAirplayActive(props.dashboard.airplay.status));
+/** 依據 AirPlay 作用中狀態產生的停止按鈕文字。 */
+const buttonLabel = computed(() => airplayButtonLabel(props.dashboard.airplay.status));
+/** 依據 AirPlay 狀態與接收器名稱產生的操作引導提示。 */
+const airplayStatusHint = computed(() =>
+  airplayHint(props.dashboard.airplay.status, props.dashboard.settings.receiverName),
+);
+/** 當沒有可用 Android 裝置時顯示的診斷與排障指引文字。 */
+const unavailableDeviceHint = computed(() =>
+  diagnoseUnavailableDevices(props.dashboard.devices),
+);
 
-  if (devices.every((device) => device.status === "unauthorized")) {
-    return "找到未授權的裝置。請在 Android 裝置上確認並允許此電腦的偵錯連線。";
-  }
+watch(
+  availableDevices,
+  (devices) => {
+    selectedSerial.value = resolveSelectedSerial(devices, selectedSerial.value);
+  },
+  { immediate: true },
+);
 
-  if (devices.every((device) => device.status === "offline")) {
-    return "裝置目前離線，請確認手機已連線並重新整理裝置清單。";
-  }
-
-  if (devices.every((device) => device.status === "unknown")) {
-    return "無法辨識裝置狀態，請重新整理裝置清單或檢查 ADB 連線。";
-  }
-
-  return "找到裝置，但目前沒有可用裝置。請確認裝置連線或偵錯授權後重新整理。";
-});
-
-watch(availableDevices, (devices) => {
-  if (!devices.some((device) => device.serial === selectedSerial.value)) {
-    selectedSerial.value = devices[0]?.serial ?? "";
-  }
-}, { immediate: true });
-
+/**
+ * 依據目前 AirPlay 狀態決定發出啟動或停止事件（處於 `stopping` 時忽略點擊）。
+ */
 function toggleAirplay(): void {
-  if (props.dashboard.airplay.status === "running" || props.dashboard.airplay.status === "starting") {
+  if (
+    props.dashboard.airplay.status === "running" ||
+    props.dashboard.airplay.status === "starting"
+  ) {
     emit("stop-airplay");
   } else if (props.dashboard.airplay.status !== "stopping") {
     emit("start-airplay");
   }
 }
 
+/**
+ * 依據目前 Android 投影狀態決定發出停止事件或以目前選取序號啟動投影。
+ */
 function toggleAndroid(): void {
   if (props.dashboard.android.status === "running") {
     emit("stop-android");
@@ -112,8 +128,8 @@ function toggleAndroid(): void {
             data-testid="airplay-start"
             @click="toggleAirplay"
           >開始接收</button>
-          <button v-else class="button-secondary" type="button" :disabled="busy || dashboard.airplay.status === 'stopping'" data-testid="airplay-stop" @click="toggleAirplay">{{ airplayButtonLabel }}</button>
-          <span class="action-hint">{{ airplayHint }}</span>
+          <button v-else class="button-secondary" type="button" :disabled="busy || dashboard.airplay.status === 'stopping'" data-testid="airplay-stop" @click="toggleAirplay">{{ buttonLabel }}</button>
+          <span class="action-hint">{{ airplayStatusHint }}</span>
         </div>
       </article>
 
@@ -157,6 +173,5 @@ function toggleAndroid(): void {
         </div>
       </article>
     </div>
-
   </section>
 </template>

@@ -1,13 +1,16 @@
-#[cfg(target_os = "macos")]
-use super::macos_library_paths;
-use super::{
-    airplay_arguments, bonjour_instance_matches, finish_pipe, load_settings, parse_adb_devices,
-    read_pipe, renderer_argument, write_settings, AppLogger, AppState, DiscoveryEvent,
-    EngineController, EngineKind, AIRPLAY_READY_TIMEOUT, MAX_CAPTURED_PROCESS_OUTPUT_BYTES,
+//! 後端基礎設施層狀態管理、設定檔讀寫與子程序控制單元測試集合。
+
+use crate::domain::{
+    bonjour_instance_matches, parse_adb_devices, renderer_argument, AndroidDeviceStatus,
+    EngineKind, EngineSnapshot, EngineStatus, ReceiverSettings, AIRPLAY_READY_TIMEOUT,
 };
+use crate::infrastructure::persistence::{load_settings, write_settings, AppLogger};
+#[cfg(target_os = "macos")]
+use crate::infrastructure::process::macos_library_paths;
 #[cfg(unix)]
-use super::{find_executable, is_executable_file};
-use crate::models::{AndroidDeviceStatus, EngineSnapshot, EngineStatus, ReceiverSettings};
+use crate::infrastructure::process::{find_executable, is_executable_file};
+use crate::infrastructure::process::{finish_pipe, read_pipe, MAX_CAPTURED_PROCESS_OUTPUT_BYTES};
+use crate::infrastructure::state::{AppState, DiscoveryEvent, EngineController};
 #[cfg(target_os = "macos")]
 use std::ffi::OsStr;
 use std::fs;
@@ -19,6 +22,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
+/// 驗證 macOS `DYLD_LIBRARY_PATH` 只包含內建 `lib`、基礎 Homebrew 目錄與既有環境路徑。
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_library_path_uses_only_base_homebrew_directories() {
@@ -35,6 +39,7 @@ fn macos_library_path_uses_only_base_homebrew_directories() {
     );
 }
 
+/// 驗證 `parse_adb_devices` 能正確解析已就緒、未授權與離線等不同狀態的 Android 裝置。
 #[test]
 fn parses_android_devices_and_states() {
     let devices = parse_adb_devices(
@@ -47,6 +52,7 @@ fn parses_android_devices_and_states() {
     assert_eq!(devices[2].status, AndroidDeviceStatus::Offline);
 }
 
+/// 驗證 ADB daemon 啟動與標題資訊列會被正確略過。
 #[test]
 fn ignores_adb_server_messages() {
     assert!(
@@ -54,6 +60,7 @@ fn ignores_adb_server_messages() {
     );
 }
 
+/// 驗證僅完全符合接收器實例名稱的 Bonjour `Add` 事件會視為就緒。
 #[test]
 fn matches_only_added_airplay_services_with_the_configured_instance_name() {
     let matching = "11:23:10.123 Add 2 4 local. _airplay._tcp. Neo AirPlay";
@@ -68,6 +75,7 @@ fn matches_only_added_airplay_services_with_the_configured_instance_name() {
     assert!(!bonjour_instance_matches("Browse complete", "Neo AirPlay"));
 }
 
+/// 驗證收到 Bonjour 就緒事件時 AirPlay 狀態會由 `Starting` 轉換為 `Running`。
 #[test]
 fn bonjour_ready_event_moves_airplay_from_starting_to_running() {
     let directory = test_directory("airplay-ready-event");
@@ -99,6 +107,7 @@ fn bonjour_ready_event_moves_airplay_from_starting_to_running() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+/// 驗證超過 `AIRPLAY_READY_TIMEOUT` 仍未找到 Bonjour 廣播時 AirPlay 會進入 `Faulted` 失敗狀態。
 #[test]
 fn missing_bonjour_service_times_out_and_faults_airplay_start() {
     let directory = test_directory("airplay-ready-timeout");
@@ -132,6 +141,7 @@ fn missing_bonjour_service_times_out_and_faults_airplay_start() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+/// 驗證含特殊符號的接收器名稱會保留在獨立的 `-n` 命令列參數元素中而不被 Shell 切割。
 #[test]
 fn keeps_receiver_name_in_a_separate_argument() {
     let settings = ReceiverSettings {
@@ -155,9 +165,10 @@ fn keeps_receiver_name_in_a_separate_argument() {
         "-vs".to_owned(),
         "osxvideosink".to_owned(),
     ]);
-    assert_eq!(airplay_arguments(&settings), expected);
+    assert_eq!(settings.airplay_arguments(), expected);
 }
 
+/// 驗證視訊渲染器參數僅接受白名單內的合法項目，未知選項會回傳 `None`。
 #[test]
 fn renderer_names_are_allowlisted() {
     assert_eq!(renderer_argument("D3D11"), Some("d3d11videosink"));
@@ -168,6 +179,7 @@ fn renderer_names_are_allowlisted() {
     assert_eq!(renderer_argument("arbitrary"), None);
 }
 
+/// 驗證設定透過 JSON 寫入與載入後可完整往返還原。
 #[test]
 fn settings_roundtrip_through_json_file() {
     let directory = test_directory("settings");
@@ -186,6 +198,7 @@ fn settings_roundtrip_through_json_file() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+/// 驗證多執行緒並發寫入設定時，記憶體快取與磁碟 `settings.json` 檔案仍保持最終一致。
 #[test]
 fn concurrent_settings_saves_keep_memory_and_disk_in_sync() {
     const WORKERS: usize = 8;
@@ -230,6 +243,7 @@ fn concurrent_settings_saves_keep_memory_and_disk_in_sync() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+/// 驗證 Unix 平台缺少執行權限的檔案不會通過 `is_executable_file` 檢查。
 #[cfg(unix)]
 #[test]
 fn executable_check_rejects_files_without_execute_permission() {
@@ -246,6 +260,7 @@ fn executable_check_rejects_files_without_execute_permission() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+/// 驗證執行檔搜尋只會檢查受控管 `engine` 目錄，不會意外拾取外部同級目錄的可執行檔。
 #[cfg(unix)]
 #[test]
 fn executable_lookup_uses_only_the_engine_directory() {
@@ -273,6 +288,7 @@ fn executable_lookup_uses_only_the_engine_directory() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+/// 驗證管道輸出超過 1 MiB 上限時，`finish_pipe` 會安全拒絕並回傳容量超限錯誤。
 #[test]
 fn process_output_capture_rejects_overflow_after_draining_pipe() {
     let output = vec![b'x'; MAX_CAPTURED_PROCESS_OUTPUT_BYTES + 1];
@@ -280,6 +296,7 @@ fn process_output_capture_rejects_overflow_after_draining_pipe() {
     assert_eq!(result.unwrap_err(), "外部程序輸出超過 1 MiB 上限。");
 }
 
+/// 驗證正在執行中的 Android 引擎不會被後續 ADB 重新整理失敗狀態覆蓋。
 #[test]
 fn adb_refresh_error_does_not_hide_a_running_engine() {
     let directory = test_directory("running-engine");
@@ -295,7 +312,7 @@ fn adb_refresh_error_does_not_hide_a_running_engine() {
     let child = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
-            "state::tests::engine_test_child_process",
+            "infrastructure::state::tests::engine_test_child_process",
             "--nocapture",
         ])
         .env("NEO_AIRPLAY_HOLD_ENGINE_TEST_CHILD", "1")
@@ -322,6 +339,7 @@ fn adb_refresh_error_does_not_hide_a_running_engine() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+/// 作為 `adb_refresh_error_does_not_hide_a_running_engine` 測試使用的存活子程序替身（由環境變數觸發休眠）。
 #[test]
 fn engine_test_child_process() {
     if std::env::var_os("NEO_AIRPLAY_HOLD_ENGINE_TEST_CHILD").is_some() {
@@ -329,18 +347,20 @@ fn engine_test_child_process() {
     }
 }
 
+/// 驗證 Windows `background_command` 建立的子程序不具備主控台視窗且雙輸出管道可安全擷取。
 #[cfg(target_os = "windows")]
 #[test]
 fn background_child_has_no_console_and_both_pipes_are_captured() {
-    let output = super::background_command(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "state::tests::background_console_probe",
-            "--nocapture",
-        ])
-        .env("NEO_AIRPLAY_TEST_BACKGROUND_CONSOLE", "1")
-        .output()
-        .unwrap();
+    let output =
+        crate::infrastructure::process::background_command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "infrastructure::state::tests::background_console_probe",
+                "--nocapture",
+            ])
+            .env("NEO_AIRPLAY_TEST_BACKGROUND_CONSOLE", "1")
+            .output()
+            .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -350,6 +370,7 @@ fn background_child_has_no_console_and_both_pipes_are_captured() {
     assert!(output.stderr.len() >= 128 * 1024);
 }
 
+/// Windows 子程序探針：確認無主控台視窗句柄並寫入大量 `stdout`/`stderr` 資料測試無死鎖排空。
 #[cfg(target_os = "windows")]
 #[test]
 fn background_console_probe() {
@@ -369,6 +390,13 @@ fn background_console_probe() {
     }
 }
 
+/// 建立含 PID 與奈秒亂數的隔離暫存測試目錄路徑。
+///
+/// # 參數
+/// - `name`: 測試識別前綴字串。
+///
+/// # 回傳值
+/// 回傳位於系統暫存目錄下的唯一測試目錄 `PathBuf`。
 fn test_directory(name: &str) -> PathBuf {
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

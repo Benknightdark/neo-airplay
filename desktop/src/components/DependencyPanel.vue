@@ -1,82 +1,37 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
-import { getDependencies, installDependencies } from "../api";
+/**
+ * @file 投影依賴準備狀態提示橫幅元件，負責呈現自動安裝進度、失敗日誌檢視入口與手動重試按鈕。
+ */
+import { computed } from "vue";
+import { useDependencyState } from "../composables/useDependencyState";
+import { shouldDisplayDependencyPanel } from "../domain";
 import InstallLogViewer from "./InstallLogViewer.vue";
-import type { DependencySnapshot } from "../types";
 
-const emit = defineEmits<{ (event: "busy", value: boolean): void }>();
-const snapshot = ref<DependencySnapshot | null>(null);
-const error = ref("");
-const requesting = ref(false);
-const installing = computed(() => requesting.value || snapshot.value?.status === "checking" || snapshot.value?.status === "installing");
-let timer: number | undefined;
-let disposed = false;
-let polling = false;
-let requestGeneration = 0;
+/** 對父層發出的忙碌狀態變更事件，用於於背景安裝期間停用投影啟動控制。 */
+const emit = defineEmits<{
+  /** 當檢查或背景安裝切換為忙碌／閒置時發出布林值。 */
+  (event: "busy", value: boolean): void;
+}>();
 
-function stopPolling(): void {
-  if (timer !== undefined) {
-    window.clearInterval(timer);
-    timer = undefined;
-  }
-}
-
-async function refresh(): Promise<void> {
-  if (disposed || polling || requesting.value) return;
-  polling = true;
-  const generation = requestGeneration;
-  try {
-    const next = await getDependencies();
-    if (disposed || generation !== requestGeneration) return;
-    snapshot.value = next;
-    error.value = "";
-    emit("busy", installing.value);
-    if (next.status === "disabled") stopPolling();
-  } catch (reason) {
-    if (!disposed && generation === requestGeneration) {
-      error.value = reason instanceof Error ? reason.message : String(reason);
-      emit("busy", installing.value);
-    }
-  } finally {
-    polling = false;
-  }
-}
-
-async function retry(): Promise<void> {
-  if (disposed || installing.value) return;
-  const generation = ++requestGeneration;
-  requesting.value = true;
-  error.value = "";
-  emit("busy", true);
-  try {
-    const next = await installDependencies();
-    if (disposed || generation !== requestGeneration) return;
-    snapshot.value = next;
-    if (next.status === "disabled") stopPolling();
-  } catch (reason) {
-    if (!disposed && generation === requestGeneration) {
-      error.value = reason instanceof Error ? reason.message : String(reason);
-    }
-  } finally {
-    if (!disposed && generation === requestGeneration) {
-      requesting.value = false;
-      emit("busy", installing.value);
-    }
-  }
-}
-
-onMounted(() => {
-  void refresh();
-  timer = window.setInterval(() => void refresh(), 1500);
+/** 訂閱依賴工具狀態並將忙碌變化轉發至父元件。 */
+const { snapshot, error, installing, retry } = useDependencyState({
+  onBusyChange: (value) => emit("busy", value),
 });
-onUnmounted(() => {
-  disposed = true;
-  stopPolling();
-});
+
+/** 判斷目前是否應在介面上呈現此依賴狀態橫幅。 */
+const visible = computed(() =>
+  shouldDisplayDependencyPanel(snapshot.value, installing.value, error.value),
+);
 </script>
 
 <template>
-  <section v-if="installing || error || (snapshot && snapshot.status !== 'disabled')" class="dependency-panel" :class="{ 'dependency-failed': error || snapshot?.status === 'failed' }" aria-label="投影工具準備" data-testid="dependency-panel">
+  <section
+    v-if="visible"
+    class="dependency-panel"
+    :class="{ 'dependency-failed': error || snapshot?.status === 'failed' }"
+    aria-label="投影工具準備"
+    data-testid="dependency-panel"
+  >
     <p role="status">{{ error || snapshot?.message || "正在檢查並安裝投影工具…" }}</p>
     <template v-if="snapshot?.status === 'failed' || error">
       <InstallLogViewer v-if="snapshot?.logPath" :log-path="snapshot.logPath" />

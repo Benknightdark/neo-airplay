@@ -1,41 +1,17 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import { readInstallLog } from "../api";
+/**
+ * @file 工具安裝記錄檢視元件，提供目前日誌檔路徑顯示與彈出式純文字閱讀視窗。
+ */
+import { useInstallLogViewer } from "../composables/useInstallLogViewer";
 
-defineProps<{ logPath: string }>();
+/** 元件接收的唯讀 Props。 */
+defineProps<{
+  /** 工具安裝日誌檔在本機磁碟的完整路徑，顯示於按鈕旁供使用者定位。 */
+  logPath: string;
+}>();
 
-const isOpen = ref(false);
-const loading = ref(false);
-const content = ref("");
-const error = ref("");
-let requestGeneration = 0;
-
-async function openViewer(): Promise<void> {
-  if (loading.value) return;
-
-  const generation = ++requestGeneration;
-  isOpen.value = true;
-  loading.value = true;
-  content.value = "";
-  error.value = "";
-
-  try {
-    const log = await readInstallLog();
-    if (generation !== requestGeneration) return;
-    content.value = log;
-  } catch (reason) {
-    if (generation !== requestGeneration) return;
-    error.value = reason instanceof Error ? reason.message : String(reason);
-  } finally {
-    if (generation === requestGeneration) loading.value = false;
-  }
-}
-
-function closeViewer(): void {
-  requestGeneration += 1;
-  isOpen.value = false;
-  loading.value = false;
-}
+/** 取得安裝記錄彈窗的開關、載入狀態、文字內容與控制函式。 */
+const { isOpen, loading, content, error, openViewer, closeViewer } = useInstallLogViewer();
 </script>
 
 <template>
