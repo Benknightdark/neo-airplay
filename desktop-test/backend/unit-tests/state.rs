@@ -5,11 +5,13 @@ use crate::domain::{
     EngineKind, EngineSnapshot, EngineStatus, ReceiverSettings, AIRPLAY_READY_TIMEOUT,
 };
 use crate::infrastructure::persistence::{load_settings, write_settings, AppLogger};
+#[cfg(unix)]
+use crate::infrastructure::process::find_executable;
 #[cfg(target_os = "macos")]
 use crate::infrastructure::process::macos_library_paths;
-#[cfg(unix)]
-use crate::infrastructure::process::{find_executable, is_executable_file};
-use crate::infrastructure::process::{finish_pipe, read_pipe, MAX_CAPTURED_PROCESS_OUTPUT_BYTES};
+use crate::infrastructure::process::{
+    finish_pipe, is_executable_file, read_pipe, MAX_CAPTURED_PROCESS_OUTPUT_BYTES,
+};
 use crate::infrastructure::state::{AppState, DiscoveryEvent, EngineController};
 #[cfg(target_os = "macos")]
 use std::ffi::OsStr;
@@ -257,6 +259,25 @@ fn executable_check_rejects_files_without_execute_permission() {
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o600)).unwrap();
 
     assert!(!is_executable_file(&executable));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+/// 驗證不存在的路徑與目錄不會通過 `is_executable_file` 檢查，且非 Unix 平台接受常規檔案。
+#[test]
+fn executable_check_rejects_missing_paths_and_directories() {
+    let directory = test_directory("executable-metadata-check");
+    fs::create_dir_all(&directory).unwrap();
+
+    assert!(!is_executable_file(&directory));
+    assert!(!is_executable_file(&directory.join("missing-binary")));
+
+    #[cfg(not(unix))]
+    {
+        let regular_file = directory.join("uxplay.exe");
+        fs::write(&regular_file, b"windows executable").unwrap();
+        assert!(is_executable_file(&regular_file));
+    }
+
     fs::remove_dir_all(directory).unwrap();
 }
 

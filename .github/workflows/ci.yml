@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - develop
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,8 +20,12 @@ jobs:
   verify:
     name: verify (${{ matrix.os }})
     if: >-
-      !contains(github.event.head_commit.message, '/automation/next-version') &&
-      github.head_ref != 'automation/next-version'
+      github.event_name == 'workflow_dispatch' ||
+      (
+        !contains(github.event.head_commit.message, '/automation/next-version') &&
+        !startsWith(github.event.head_commit.message, 'chore(release): bump version to ') &&
+        !startsWith(github.event.head_commit.message, 'Bump develop version to ')
+      )
     strategy:
       fail-fast: false
       matrix:
@@ -85,11 +90,15 @@ jobs:
       - name: Run desktop E2E tests with a virtual display
         if: runner.os == 'Linux'
         working-directory: desktop
-        run: dbus-run-session -- xvfb-run --auto-servernum bun run --silent test:e2e:ci
+        env:
+          WEBKIT_DISABLE_DMABUF_RENDERER: "1"
+          LIBGL_ALWAYS_SOFTWARE: "1"
+        run: dbus-run-session -- xvfb-run --auto-servernum --server-args="-screen 0 1440x900x24" bun run --silent test:e2e:ci
 
   create-promotion-pr:
     name: Create or reuse develop to main PR
     needs: verify
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -123,8 +132,24 @@ jobs:
           fi
 
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          ahead_commits="$(git rev-list --count "origin/main..${GITHUB_SHA}")"
+          if [[ "$ahead_commits" == "0" ]]; then
+            echo "has_pending_changes=false" >> "$GITHUB_OUTPUT"
+            echo "is_version_only=false" >> "$GITHUB_OUTPUT"
+            echo "develop has no commits ahead of main; skipping promotion PR."
+            exit 0
+          fi
+
           merge_base="$(git merge-base origin/main "$GITHUB_SHA")"
           mapfile -d '' changed_paths < <(git diff --name-only -z "$merge_base" "$GITHUB_SHA")
+          if (( ${#changed_paths[@]} == 0 )); then
+            echo "has_pending_changes=false" >> "$GITHUB_OUTPUT"
+            echo "is_version_only=false" >> "$GITHUB_OUTPUT"
+            echo "develop matches main tree content; skipping promotion PR."
+            exit 0
+          fi
+
+          echo "has_pending_changes=true" >> "$GITHUB_OUTPUT"
           is_version_only="$(node desktop/scripts/project-version.mjs is-version-only "${changed_paths[@]}")"
           echo "is_version_only=$is_version_only" >> "$GITHUB_OUTPUT"
           if [[ "$is_version_only" == "true" ]]; then
@@ -132,7 +157,10 @@ jobs:
           fi
 
       - name: Create a PR if one is not already open
-        if: steps.current-head.outputs.is_current == 'true' && steps.current-head.outputs.is_version_only != 'true'
+        if: >-
+          steps.current-head.outputs.is_current == 'true' &&
+          steps.current-head.outputs.has_pending_changes == 'true' &&
+          steps.current-head.outputs.is_version_only != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

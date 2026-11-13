@@ -119,22 +119,17 @@ pub fn installer_path(engine_dir: &Path) -> OsString {
 /// # 回傳值
 /// 若為可執行的常規檔案則回傳 `true`，否則回傳 `false`。
 pub fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = path.metadata() else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+    path.metadata().is_ok_and(|metadata| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            metadata.is_file()
+        }
+    })
 }
 
 /// 依作業系統慣例展開候選執行檔名稱（Windows 優先嘗試 `.exe` 副檔名）。

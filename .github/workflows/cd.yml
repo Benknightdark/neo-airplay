@@ -13,6 +13,10 @@ permissions:
 env:
   NEO_AIRPLAY_SKIP_SETUP: "1"
 
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   prepare-release:
     name: Validate release version
@@ -45,7 +49,7 @@ jobs:
           set -euo pipefail
 
           version="$(node desktop/scripts/project-version.mjs read)"
-          git fetch --tags --force
+          git fetch --tags --force origin
           tag="v${version}"
           echo "value=$version" >> "$GITHUB_OUTPUT"
           echo "correction_required=false" >> "$GITHUB_OUTPUT"
@@ -121,7 +125,7 @@ jobs:
             git push --force-with-lease="refs/heads/$branch:" origin "HEAD:refs/heads/$branch"
           fi
 
-          pr_number="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$GITHUB_REPOSITORY_OWNER:$branch" \
+          pr_number="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" \
             --base main --state open --json number --jq '.[0].number // empty')"
           title="Bump release version to ${CORRECTION_VERSION}"
           body="Release tag v${RELEASE_VERSION} already points to another commit. This PR advances the four project version sources to ${CORRECTION_VERSION}; CD will publish after this PR is merged."
@@ -175,7 +179,7 @@ jobs:
           sudo apt-get install -qq --no-install-recommends \
             build-essential curl file libayatana-appindicator3-dev libfuse2t64 \
             libgtk-3-dev libssl-dev libwebkit2gtk-4.1-dev libxdo-dev \
-            librsvg2-dev rpm
+            librsvg2-dev patchelf rpm
 
       - name: Install frontend dependencies
         working-directory: desktop
@@ -183,6 +187,8 @@ jobs:
 
       - name: Build installers
         working-directory: desktop
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
         run: bun run --silent bundle
 
       - name: Upload installer files
@@ -304,7 +310,7 @@ jobs:
             git push --force-with-lease="refs/heads/$branch:" origin "HEAD:refs/heads/$branch"
           fi
 
-          pr_number="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$GITHUB_REPOSITORY_OWNER:$branch" \
+          pr_number="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" \
             --base develop --state open --json number --jq '.[0].number // empty')"
           title="Bump develop version to ${next_version}"
           body="Release v${RELEASE_VERSION} succeeded. This PR advances the four project version sources to the next unused patch version, ${next_version}."
