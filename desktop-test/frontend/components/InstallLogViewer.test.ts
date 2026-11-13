@@ -1,31 +1,45 @@
+/**
+ * @file InstallLogViewer.test.ts
+ * @description 驗證 `InstallLogViewer` 元件在記錄載入、唯讀呈現、重新開啟與錯誤提示上的單元測試。
+ */
+
 import { flushPromises, mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import * as api from "../../../desktop/src/api";
+import { describe, expect, it, vi } from "vitest";
+import type { DependencyGateway } from "../../../desktop/src/application";
 import InstallLogViewer from "../../../desktop/src/components/InstallLogViewer.vue";
+import { DEPENDENCY_GATEWAY_KEY } from "../../../desktop/src/presentation/di";
+import { deferred } from "../fixtures/async";
+import { createFakeDependencyGateway } from "../fixtures/fake-gateways";
 
-vi.mock("../../../desktop/src/api", () => ({
-  readInstallLog: vi.fn(),
-}));
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
+/**
+ * 掛載注入模擬 `DependencyGateway` 的 `InstallLogViewer` 測試元件。
+ *
+ * @param gateway 模擬的投影工具依賴 Gateway。
+ * @returns `@vue/test-utils` 的元件掛載包裝器。
+ */
+function mountViewer(gateway: DependencyGateway) {
+  return mount(InstallLogViewer, {
+    props: { logPath: "/tmp/neo-airplay-install.log" },
+    global: {
+      provide: {
+        [DEPENDENCY_GATEWAY_KEY as symbol]: gateway,
+      },
+    },
   });
-  return { promise, resolve };
 }
 
+/** 驗證 `InstallLogViewer` 對話框互動與記錄載入流程。 */
 describe("安裝記錄檢視器", () => {
-  beforeEach(() => vi.resetAllMocks());
-
+  /** 驗證載入中狀態、唯讀文字區域內容呈現以及關閉後重開會再次向後端讀取。 */
   it("開啟並顯示可選取的安裝記錄，關閉後可以重新開啟", async () => {
     const firstRequest = deferred<string>();
-    vi.mocked(api.readInstallLog)
-      .mockReturnValueOnce(firstRequest.promise)
-      .mockResolvedValueOnce("install started\ninstall finished\n");
-    const wrapper = mount(InstallLogViewer, {
-      props: { logPath: "/tmp/neo-airplay-install.log" },
+    const gateway = createFakeDependencyGateway({
+      readInstallLog: vi
+        .fn()
+        .mockReturnValueOnce(firstRequest.promise)
+        .mockResolvedValueOnce("install started\ninstall finished\n"),
     });
+    const wrapper = mountViewer(gateway);
 
     expect(wrapper.text()).toContain("/tmp/neo-airplay-install.log");
     await wrapper.get('[data-testid="install-log-open"]').trigger("click");
@@ -36,21 +50,22 @@ describe("安裝記錄檢視器", () => {
     const content = wrapper.get<HTMLTextAreaElement>('[data-testid="install-log-content"]');
     expect(content.element.value).toBe("install started\ninstall finished\n");
     expect(content.element.readOnly).toBe(true);
-    expect(api.readInstallLog).toHaveBeenCalledOnce();
+    expect(gateway.readInstallLog).toHaveBeenCalledOnce();
 
     await wrapper.get('[data-testid="install-log-close"]').trigger("click");
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
     await wrapper.get('[data-testid="install-log-open"]').trigger("click");
     await flushPromises();
-    expect(api.readInstallLog).toHaveBeenCalledTimes(2);
+    expect(gateway.readInstallLog).toHaveBeenCalledTimes(2);
     wrapper.unmount();
   });
 
+  /** 驗證讀取記錄失敗時於對話框內呈現 `role="alert"` 錯誤訊息並保留關閉按鈕。 */
   it("讀取失敗時在視窗內顯示錯誤", async () => {
-    vi.mocked(api.readInstallLog).mockRejectedValue(new Error("尚無安裝記錄。"));
-    const wrapper = mount(InstallLogViewer, {
-      props: { logPath: "/tmp/neo-airplay-install.log" },
+    const gateway = createFakeDependencyGateway({
+      readInstallLog: vi.fn().mockRejectedValue(new Error("尚無安裝記錄。")),
     });
+    const wrapper = mountViewer(gateway);
 
     await wrapper.get('[data-testid="install-log-open"]').trigger("click");
     await flushPromises();

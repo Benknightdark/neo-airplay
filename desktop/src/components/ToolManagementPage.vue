@@ -1,99 +1,38 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
-import { getDependencies, manageDependencies } from "../api";
+/**
+ * @file 投影工具與相依套件管理頁面元件，提供工具升級、危險操作的雙重確認重裝及安裝日誌檢視。
+ */
+import { computed, ref } from "vue";
+import { useDependencyState } from "../composables/useDependencyState";
+import { dependencyOperationLabel, dependencyStatusLabel } from "../domain";
 import InstallLogViewer from "./InstallLogViewer.vue";
-import type { DependencyAction, DependencySnapshot } from "../types";
 
-const snapshot = ref<DependencySnapshot | null>(null);
-const error = ref("");
-const requesting = ref(false);
+/** 控制清除並重新安裝確認對話框是否開啟。 */
 const confirmingReinstall = ref(false);
-const busy = computed(() => requesting.value || snapshot.value?.status === "checking" || snapshot.value?.status === "installing");
-const unavailable = computed(() => !snapshot.value || snapshot.value.status === "disabled");
-const operationLabel = computed(() => {
-  switch (snapshot.value?.operation) {
-    case "upgrade": return "升級工具";
-    case "reinstall": return "清除並重新安裝";
-    case "install": return "準備工具";
-    default: return "工具狀態";
-  }
-});
-const statusLabel = computed(() => {
-  switch (snapshot.value?.status) {
-    case "checking": return "檢查中";
-    case "installing": return "處理中";
-    case "ready": return "已就緒";
-    case "failed": return "需要處理";
-    case "disabled": return "已停用";
-    default: return "讀取中";
-  }
-});
+/** 取得目前依賴工具狀態、忙碌鎖定狀態及維護操作方法。 */
+const { snapshot, error, installing, unavailable, runAction } = useDependencyState();
 
-let timer: number | undefined;
-let disposed = false;
-let polling = false;
-let requestGeneration = 0;
+/** 依據目前背景作業類型轉換的繁體中文操作名稱。 */
+const operationLabel = computed(() => dependencyOperationLabel(snapshot.value?.operation));
+/** 依據目前依賴狀態轉換的繁體中文狀態標籤。 */
+const statusLabel = computed(() => dependencyStatusLabel(snapshot.value?.status));
 
-function stopPolling(): void {
-  if (timer !== undefined) {
-    window.clearInterval(timer);
-    timer = undefined;
-  }
-}
-
-async function refresh(): Promise<void> {
-  if (disposed || polling || requesting.value) return;
-  polling = true;
-  const generation = requestGeneration;
-  try {
-    const next = await getDependencies();
-    if (disposed || generation !== requestGeneration) return;
-    snapshot.value = next;
-    error.value = "";
-    if (next.status === "disabled") stopPolling();
-  } catch (reason) {
-    if (!disposed && generation === requestGeneration) {
-      error.value = reason instanceof Error ? reason.message : String(reason);
-    }
-  } finally {
-    polling = false;
-  }
-}
-
-async function runAction(action: DependencyAction): Promise<void> {
-  if (disposed || busy.value || unavailable.value) return;
-  const generation = ++requestGeneration;
-  requesting.value = true;
-  error.value = "";
-  try {
-    snapshot.value = await manageDependencies(action);
-  } catch (reason) {
-    if (!disposed && generation === requestGeneration) {
-      error.value = reason instanceof Error ? reason.message : String(reason);
-    }
-  } finally {
-    if (!disposed && generation === requestGeneration) requesting.value = false;
-  }
-}
-
+/**
+ * 僅在工具未忙碌且功能可用時開啟「清除並重新安裝」二次確認對話框。
+ */
 function requestReinstall(): void {
-  if (!busy.value && !unavailable.value) confirmingReinstall.value = true;
+  if (!installing.value && !unavailable.value) confirmingReinstall.value = true;
 }
 
+/**
+ * 關閉確認對話框並觸發清除重新安裝維護流程。
+ *
+ * @returns 維護請求提交完成後解析的 `Promise<void>`。
+ */
 async function confirmReinstall(): Promise<void> {
   confirmingReinstall.value = false;
   await runAction("reinstall");
 }
-
-onMounted(() => {
-  void refresh();
-  timer = window.setInterval(() => void refresh(), 1500);
-});
-
-onUnmounted(() => {
-  disposed = true;
-  stopPolling();
-});
 </script>
 
 <template>
@@ -127,8 +66,8 @@ onUnmounted(() => {
         <div class="tool-action-icon tool-action-icon-upgrade" aria-hidden="true">↻</div>
         <h3>升級工具</h3>
         <p>更新 UxPlay、GStreamer、ADB 與 scrcpy，並更新平台套件管理器中的相依套件。</p>
-        <button class="button-primary" type="button" :disabled="busy || unavailable" data-testid="tools-upgrade" @click="runAction('upgrade')">
-          {{ busy && snapshot?.operation === 'upgrade' ? '正在升級…' : '升級工具' }}
+        <button class="button-primary" type="button" :disabled="installing || unavailable" data-testid="tools-upgrade" @click="runAction('upgrade')">
+          {{ installing && snapshot?.operation === 'upgrade' ? '正在升級…' : '升級工具' }}
         </button>
       </article>
 
@@ -136,7 +75,7 @@ onUnmounted(() => {
         <div class="tool-action-icon tool-action-icon-reinstall" aria-hidden="true">⟳</div>
         <h3>清除並重新安裝</h3>
         <p>先停止投影，再清除 Neo AirPlay 專用工具與快取並重新安裝。設定、診斷記錄及系統套件會保留。</p>
-        <button class="button-secondary" type="button" :disabled="busy || unavailable" data-testid="tools-reinstall" @click="requestReinstall">
+        <button class="button-secondary" type="button" :disabled="installing || unavailable" data-testid="tools-reinstall" @click="requestReinstall">
           清除並重新安裝
         </button>
       </article>

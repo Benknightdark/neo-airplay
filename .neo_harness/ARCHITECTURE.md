@@ -2,17 +2,22 @@
 
 本文件依目前程式碼、設定與 [README.md](../README.md) 記錄桌面應用程式架構與驗證界線。
 
-## 元件與依賴邊界
+## 元件與依賴邊界（Clean Architecture）
+
+前後端均採 `Domain` ← `Application` ← `Infrastructure` / `Presentation` 向內依賴分層：`Domain` 與 `Application` 層不直接依賴框架（Vue / Tauri）或外部 I/O（檔案系統、子程序）。
 
 | 元件 | 職責與依賴限制 | 證據 |
 | :--- | :--- | :--- |
-| Vue 前端介面 | 呈現總覽、設定、診斷記錄、啟動依賴檢查與工具管理頁；透過 `useAppState` 以 1.5 秒輪詢狀態，不直接操作程序或檔案。 | `desktop/src/App.vue`、`desktop/src/components/`、`desktop/src/composables/useAppState.ts` |
-| 前端 IPC 層 | 封裝所有對 Rust 端的 Tauri `invoke` 呼叫。 | `desktop/src/api.ts`、`desktop/src-tauri/capabilities/default.json` |
-| Rust 命令與模型 | 註冊單一執行個體、登入啟動（`autostart`）、系統匣、視窗關閉隱藏及 IPC 命令；定義序列化模型與平台預設 renderer（Windows：D3D；macOS：osxvideosink/glimagesink；Linux：glimagesink/ximagesink/waylandsink）。 | `desktop/src-tauri/src/lib.rs`、`desktop/src-tauri/src/models.rs` |
-| 狀態與引擎控制 | 管理 `settings.json`、每日 JSONL 記錄、ADB 裝置列舉，並以兩個獨立 `EngineController` 管理 UxPlay 與 scrcpy 子程序。 | `desktop/src-tauri/src/state.rs` |
-| 依賴與環境腳本 | 背景檢查、升級與重裝投影工具（Rust 以 `include_str!` 內嵌 `install.sh`／`install.ps1`）；`run-tauri.mjs` 與 `launch.sh`／`launch.ps1` 在建置或啟動前自動準備環境。 | `desktop/src-tauri/src/dependencies.rs`、`desktop/scripts/` |
+| 前端 Domain 層 | 定義純 TypeScript 實體、值物件規則、狀態轉換、`Result<T>` 與錯誤正規化，零 Vue / Tauri 依賴。 | `desktop/src/domain/` |
+| 前端 Application 層 | 定義 `ReceiverGateway`、`DependencyGateway` Port 介面與 CQRS Use Cases，僅依賴 `domain/`。 | `desktop/src/application/` |
+| 前端 Infrastructure 層 | 以 Tauri `invoke` 封裝（`api.ts`）實作前端 Gateway 介面。 | `desktop/src/infrastructure/tauri/`、`desktop/src/api.ts`、`desktop/src-tauri/capabilities/default.json` |
+| 前端 Presentation 層 | Vue SFCs 與 Composables（`useAppState`、`useDependencyState`、`useInstallLogViewer`），透過 `presentation/di.ts` 解析用例；保留 `types.ts`、`lib/status.ts` 相容轉出。 | `desktop/src/App.vue`、`desktop/src/components/`、`desktop/src/composables/`、`desktop/src/presentation/di.ts` |
+| 後端 Domain 層 | 定義 `ReceiverName`、`VideoRenderer`、`ReceiverSettings`、`EngineKind`、`AndroidDevice`、`DependencySnapshot`、`AppLogEntry` 與 `DomainError`，不依賴 `tauri` 或 I/O。 | `desktop/src-tauri/src/domain/` |
+| 後端 Application 層 | 定義 `ReceiverRuntime`、`DependencyRuntime`、`SettingsRepository`、`AutostartGateway`、`LogRepository`、`EngineAccessGuard` 等 Port Traits 與 Command/Query 用例（含 `SaveSettingsUseCase` 交易與回滾）。 | `desktop/src-tauri/src/application/` |
+| 後端 Infrastructure 層 | 實作 `settings.json` 原子讀寫、每日 JSONL 記錄、`AppState`／`EngineController` 雙引擎控制、ADB 列舉、與 `DependencyManager` 背景工具檢查／安裝。 | `desktop/src-tauri/src/infrastructure/`、`desktop/scripts/` |
+| 後端 Presentation 層 | 註冊單一執行個體、`autostart`、系統匣、視窗關閉隱藏及薄型 `#[tauri::command]` 入口；組裝 `AppState` 與 `DependencyManager` 注入應用層。 | `desktop/src-tauri/src/lib.rs`、`desktop/src-tauri/src/presentation/` |
 | 本機引擎目錄 | 僅 `.GITKEEP` 入版控；Debug 直接使用 `desktop/engine/`，Release 將打包資源寫入使用者資料目錄的 `engine/` 後執行。 | `desktop/engine/` |
-| 獨立測試專案 | 直接載入 `desktop` 原始碼，執行前端 Vitest、後端 Rust 單元測試，以及帶 `wdio` feature 與假引擎的 WebdriverIO 桌面 E2E。 | `desktop-test/package.json`、`desktop-test/frontend/`、`desktop-test/backend/`、`desktop-test/e2e/` |
+| 獨立測試專案 | 直接載入 `desktop` 與 `src-tauri` 模組，執行架構向內依賴檢查、Domain/Application/Infrastructure/Presentation 分層單元測試，以及帶 `wdio` feature 與假引擎的 WebdriverIO 桌面 E2E。 | `desktop-test/package.json`、`desktop-test/frontend/`、`desktop-test/backend/`、`desktop-test/e2e/` |
 | CI / CD 工作流程 | CI 驗證 `develop` 提交並維護 `develop -> main` PR；CD 在 `main` PR 合併後驗證四處版本與 tag、打包三平台安裝檔並發布 Release。 | `.github/workflows/ci.yml`、`.github/workflows/cd.yml`、`desktop/scripts/project-version.mjs` |
 
 ## 核心架構不變量
