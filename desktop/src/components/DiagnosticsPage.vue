@@ -1,14 +1,26 @@
 <script setup lang="ts">
+/**
+ * @file 診斷記錄檢視頁面元件，提供依日誌嚴重等級篩選並以最新在前的順序呈現系統活動紀錄。
+ */
 import { computed, ref } from "vue";
-import type { AppLogEntry, LogLevel } from "../types";
-import { localTime, logLabel } from "../lib/status";
+import {
+  filterAndReverseLogs,
+  localTime,
+  logLabel,
+  type AppLogEntry,
+  type LogFilter,
+} from "../domain";
 
-const props = defineProps<{ logs: AppLogEntry[] }>();
-const filter = ref<"all" | LogLevel>("all");
-const filteredLogs = computed(() => {
-  const entries = filter.value === "all" ? props.logs : props.logs.filter((entry) => entry.level === filter.value);
-  return [...entries].reverse();
-});
+/** 元件接收的唯讀 Props。 */
+const props = defineProps<{
+  /** 後端回傳的近期應用程式診斷日誌清單。 */
+  logs: AppLogEntry[];
+}>();
+
+/** 使用者選擇的日誌等級篩選條件（預設顯示全部）。 */
+const filter = ref<LogFilter>("all");
+/** 依目前篩選條件過濾並反轉為新紀錄置頂的日誌列表。 */
+const filteredLogs = computed(() => filterAndReverseLogs(props.logs, filter.value));
 </script>
 
 <template>
