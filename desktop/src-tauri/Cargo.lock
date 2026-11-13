@@ -2298,7 +2298,7 @@ dependencies = [
 
 [[package]]
 name = "neo-airplay"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "chrono",
  "fix-path-env",
