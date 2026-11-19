@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 readonly UXPLAY_VERSION="1.73.7"
 readonly UXPLAY_COMMIT="df67c212a433cf6dda3676dd40c097900d24e645"
@@ -13,6 +14,12 @@ readonly SCRCPY_SHA256="9f969d30cc574816077edecda65719c1c70b0aee1df1ba5fa00779ac
 readonly SCRCPY_LINUX_URL="https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/scrcpy-linux-x86_64-v${SCRCPY_VERSION}.tar.gz"
 readonly SCRCPY_MACOS_ARM64_SHA256="33611e51977a8289e2e124b220f727895181ef2eb9060e0987a4dc2db9cf0d6b"
 readonly SCRCPY_MACOS_X86_64_SHA256="31a5467a9e907f162b093267cbbab1276b15c6e709c2ea8159566a8d165beb50"
+readonly HOMEBREW_INSTALL_COMMIT="eaa2af62ca1d5349c9743f82b1b0c4e5d365fb2d"
+readonly HOMEBREW_INSTALL_SHA256="8fd2f1a5287a7c2e3d7362924c677edcc04c5a0e16448c77132d056bc88cf1ed"
+readonly HOMEBREW_INSTALL_URL="https://raw.githubusercontent.com/Homebrew/install/${HOMEBREW_INSTALL_COMMIT}/install.sh"
+readonly RUSTUP_VERSION="1.29.3"
+readonly RUSTUP_LINUX_X64_SHA256="b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55"
+readonly RUSTUP_LINUX_ARM64_SHA256="9f608c142e0e38a78957d0661ba1dfaf0b6fb37184cfaa4b9a0aa57af6184282"
 
 development=0
 check_only=0
@@ -23,6 +30,8 @@ engine_dir="${NEO_AIRPLAY_ENGINE_DIR:-}"
 registry_path=""
 marker_file=""
 result_file=""
+cleanup_paths=()
+run_install_lifecycle=0
 
 while (($#)); do
   argument="$1"
@@ -49,15 +58,26 @@ while (($#)); do
   shift
 done
 
+log() { printf '%s\n' "$*"; }
+fail() { printf 'Setup failed: %s\n' "$*" >&2; exit 1; }
+
 if [[ -z "$engine_dir" ]]; then
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   engine_dir="${script_dir}/../engine"
 fi
-engine_dir="$(cd "$engine_dir" 2>/dev/null && pwd || printf '%s' "$engine_dir")"
+raw_engine_dir="${engine_dir%/}"
+[[ -n "$raw_engine_dir" ]] || raw_engine_dir="/"
+[[ ! -L "$raw_engine_dir" ]] || fail "Engine directory must not be a symbolic link: ${raw_engine_dir}"
+if [[ -e "$raw_engine_dir" && ! -d "$raw_engine_dir" ]]; then
+  fail "Engine path must be a directory: ${raw_engine_dir}"
+fi
+engine_dir="$(cd "$raw_engine_dir" 2>/dev/null && pwd || printf '%s' "$raw_engine_dir")"
+[[ ! -L "$engine_dir" ]] || fail "Engine directory must not be a symbolic link: ${engine_dir}"
 engine_bin="${engine_dir}/bin"
-
-log() { printf '%s\n' "$*"; }
-fail() { printf 'Setup failed: %s\n' "$*" >&2; exit 1; }
+[[ ! -L "$engine_bin" ]] || fail "Engine bin directory must not be a symbolic link: ${engine_bin}"
+if [[ -n "$registry_path" ]]; then
+  [[ ! -L "${registry_path%/}" ]] || fail "Registry path must not be a symbolic link: ${registry_path}"
+fi
 
 load_node_version() {
   [[ -r "$NODE_VERSION_FILE" ]] || fail "Node.js version file is unavailable: ${NODE_VERSION_FILE}"
@@ -67,12 +87,22 @@ load_node_version() {
 
 user_bin="${HOME}/.local/bin"
 export NEO_AIRPLAY_ENGINE_DIR="$engine_dir"
-export PATH="${engine_bin}:${engine_dir}/android/platform-tools:${engine_dir}/android:${engine_dir}:${user_bin}:${HOME}/.cargo/bin:${HOME}/.bun/bin:${PATH:-}"
+export PATH="${user_bin}:${HOME}/.cargo/bin:${HOME}/.bun/bin:${PATH:-}"
+
+cleanup_registered_paths() {
+  local path
+  if ((${#cleanup_paths[@]} > 0)); then
+    for path in "${cleanup_paths[@]}"; do
+      [[ -n "$path" ]] && rm -rf -- "$path"
+    done
+  fi
+}
 
 write_result() {
   local status="$1" temporary
   [[ -n "$result_file" ]] || return 0
-  temporary="${result_file}.tmp.$$"
+  [[ ! -L "$result_file" ]] || return 1
+  temporary="$(mktemp "${result_file}.tmp.XXXXXX")"
   if printf '{"pid":%d,"exitCode":%d}\n' "$$" "$status" > "$temporary"; then
     mv -f -- "$temporary" "$result_file"
   else
@@ -83,9 +113,63 @@ write_result() {
 on_exit() {
   local status=$?
   trap - EXIT
-  if [[ -n "$marker_file" ]]; then rm -f -- "$marker_file"; fi
-  write_result "$status"
+  cleanup_registered_paths
+  if ((run_install_lifecycle)); then
+    if [[ -n "$marker_file" && ! -L "$marker_file" ]]; then rm -f -- "$marker_file"; fi
+    write_result "$status"
+  fi
   exit "$status"
+}
+trap on_exit EXIT
+
+sha256_file() {
+  local file_path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file_path" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file_path" | awk '{print $1}'
+  else
+    fail "Neither sha256sum nor shasum is available for checksum verification."
+  fi
+}
+
+download_verified() {
+  local url="$1" destination="$2" expected_sha="$3" label="$4" actual_sha
+  [[ "$url" == https://* ]] || fail "Refusing non-HTTPS download URL for ${label}."
+  [[ "$expected_sha" =~ ^[0-9a-fA-F]{64}$ ]] || fail "Invalid SHA-256 checksum configured for ${label}."
+  expected_sha="$(printf '%s\n' "$expected_sha" | awk '{print tolower($1)}')"
+  if ! curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-error --location --max-redirs 5 --connect-timeout 30 --max-time 600 "$url" --output "$destination"; then
+    rm -f -- "$destination"
+    fail "Failed to download ${label}."
+  fi
+  actual_sha="$(sha256_file "$destination" | awk '{print tolower($1)}')"
+  if [[ "$actual_sha" != "$expected_sha" ]]; then
+    rm -f -- "$destination"
+    fail "${label} SHA-256 checksum verification failed."
+  fi
+}
+
+stage_file_atomic() {
+  local source_path="$1" target_path="$2" mode="$3" allow_source_symlink="${4:-0}" target_dir temp_file
+  if ((allow_source_symlink)); then
+    [[ -f "$source_path" ]] || fail "Required source file is unavailable: ${source_path}"
+  else
+    [[ -f "$source_path" && ! -L "$source_path" ]] || fail "Refusing unsafe or symbolic-link source file: ${source_path}"
+  fi
+  target_dir="$(dirname "$target_path")"
+  mkdir -p "$target_dir"
+  [[ ! -L "$target_dir" ]] || fail "Target directory must not be a symbolic link: ${target_dir}"
+  [[ ! -L "$target_path" ]] || fail "Refusing to overwrite symbolic link: ${target_path}"
+  temp_file="$(mktemp "${target_dir}/.stage.tmp.XXXXXX")"
+  cleanup_paths+=("$temp_file")
+  if ((allow_source_symlink)); then
+    cp -L -- "$source_path" "$temp_file"
+  else
+    cp -p -- "$source_path" "$temp_file"
+  fi
+  [[ -f "$temp_file" && ! -L "$temp_file" ]] || fail "Staged file is not a regular file: ${target_path}"
+  chmod "$mode" "$temp_file"
+  mv -f -- "$temp_file" "$target_path"
 }
 
 missing=()
@@ -102,7 +186,7 @@ check_command() {
 runtime_executable() {
   local command_name="$1"
   local candidate="${engine_bin}/${command_name}"
-  [[ -x "$candidate" ]] && printf '%s\n' "$candidate"
+  [[ -f "$candidate" && ! -L "$candidate" && -x "$candidate" ]] && printf '%s\n' "$candidate"
 }
 
 setup_macos_library_path() {
@@ -154,6 +238,7 @@ check_gstreamer() {
       missing+=("GStreamer plugin scan (could not create a temporary registry)")
       return 1
     fi
+    cleanup_paths+=("$registry_directory")
     plugin_directory="${registry_directory}/plugins"
     if ! mkdir -p "$plugin_directory"; then
       missing+=("GStreamer plugin scan (could not create an isolated plugin path)")
@@ -162,7 +247,7 @@ check_gstreamer() {
     fi
     for plugin_file in "${plugin_files[@]}"; do
       plugin_source="${engine_dir}/lib/gstreamer-1.0/${plugin_file}"
-      if [[ ! -f "$plugin_source" ]]; then
+      if [[ ! -f "$plugin_source" || -L "$plugin_source" ]]; then
         missing+=("GStreamer plugin ${plugin_file}")
       elif ! ln -s "$plugin_source" "${plugin_directory}/${plugin_file}"; then
         missing+=("GStreamer plugin ${plugin_file} (could not prepare isolated scan)")
@@ -273,7 +358,7 @@ check_runtime() {
   [[ -n "$bounded_timeout" ]] || missing+=("GNU timeout utility for bounded runtime probes")
   check_uxplay || true
   check_version_probe scrcpy --version scrcpy || true
-  [[ -s "${engine_bin}/scrcpy-server" ]] || missing+=("scrcpy server (scrcpy-server)")
+  [[ -f "${engine_bin}/scrcpy-server" && ! -L "${engine_bin}/scrcpy-server" && -s "${engine_bin}/scrcpy-server" ]] || missing+=("scrcpy server (scrcpy-server)")
   check_version_probe adb version adb || true
   check_gstreamer || true
   if [[ "$(uname -s)" == "Linux" ]]; then
@@ -342,11 +427,14 @@ check_development() {
 }
 
 persist_development_path() {
-  local config_dir env_file temporary line profile fish_file
+  local config_dir env_file temporary line profile fish_file fish_dir
   config_dir="${HOME}/.config/neo-airplay"
   env_file="${config_dir}/env.sh"
-  temporary="${env_file}.tmp.$$"
   mkdir -p "$config_dir"
+  [[ ! -L "$config_dir" ]] || fail "Configuration directory must not be a symbolic link: ${config_dir}"
+  [[ ! -L "$env_file" ]] || fail "Environment file must not be a symbolic link: ${env_file}"
+  temporary="$(mktemp "${env_file}.tmp.XXXXXX")"
+  cleanup_paths+=("$temporary")
   cat > "$temporary" <<'EOF'
 case ":${PATH:-}:" in *":${HOME}/.local/bin:"*) ;; *) export PATH="${HOME}/.local/bin${PATH:+:${PATH}}" ;; esac
 case ":${PATH:-}:" in *":${HOME}/.cargo/bin:"*) ;; *) export PATH="${HOME}/.cargo/bin${PATH:+:${PATH}}" ;; esac
@@ -361,11 +449,17 @@ EOF
     fi
   done
   fish_file="${HOME}/.config/fish/conf.d/neo-airplay.fish"
-  mkdir -p "$(dirname "$fish_file")"
+  fish_dir="$(dirname "$fish_file")"
+  mkdir -p "$fish_dir"
+  [[ ! -L "$fish_dir" && ! -L "$fish_file" ]] || fail "Fish config path must not be a symbolic link: ${fish_file}"
   if [[ ! -f "$fish_file" ]]; then
-    cat > "$fish_file" <<'EOF'
+    temporary="$(mktemp "${fish_file}.tmp.XXXXXX")"
+    cleanup_paths+=("$temporary")
+    cat > "$temporary" <<'EOF'
 fish_add_path --path $HOME/.local/bin $HOME/.cargo/bin $HOME/.bun/bin
 EOF
+    chmod 0644 "$temporary"
+    mv -f -- "$temporary" "$fish_file"
   fi
   export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${HOME}/.bun/bin:${PATH:-}"
 }
@@ -379,7 +473,9 @@ if ((warm_registry)); then
   [[ -x "$local_gst_inspect" ]] || fail "GStreamer gst-inspect-1.0 is unavailable."
   [[ -x "$local_timeout" ]] || fail "GNU timeout utility is unavailable."
 
-  mkdir -p "$(dirname "$registry_path")"
+  registry_parent="$(dirname "$registry_path")"
+  mkdir -p "$registry_parent"
+  [[ ! -L "$registry_parent" && ! -L "$registry_path" ]] || fail "GStreamer registry path must not be a symbolic link."
   if [[ -s "$registry_path" ]]; then
     log "GStreamer registry cache already exists."
     exit 0
@@ -425,15 +521,24 @@ if ((check_only)); then
   exit "$runtime_status"
 fi
 
-trap on_exit EXIT
+run_install_lifecycle=1
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 if [[ -n "$marker_file" ]]; then
-  mkdir -p "$(dirname "$marker_file")"
-  printf '%d\n' "$$" > "$marker_file"
+  marker_dir="$(dirname "$marker_file")"
+  mkdir -p "$marker_dir"
+  [[ ! -L "$marker_dir" && ! -L "$marker_file" ]] || fail "Marker file path must not be a symbolic link: ${marker_file}"
+  temp_marker="$(mktemp "${marker_file}.tmp.XXXXXX")"
+  cleanup_paths+=("$temp_marker")
+  printf '%d\n' "$$" > "$temp_marker"
+  mv -f -- "$temp_marker" "$marker_file"
 fi
-if [[ -n "$result_file" ]]; then mkdir -p "$(dirname "$result_file")"; fi
+if [[ -n "$result_file" ]]; then
+  result_dir="$(dirname "$result_file")"
+  mkdir -p "$result_dir"
+  [[ ! -L "$result_dir" && ! -L "$result_file" ]] || fail "Result file path must not be a symbolic link: ${result_file}"
+fi
 
 runtime_ready=0
 development_ready=0
@@ -460,8 +565,8 @@ run_privileged() {
 }
 
 install_uxplay_source() {
-  local archive work_dir source_dir actual_sha version_output version_number
-  if ((upgrade == 0)) && [[ -x "${engine_bin}/uxplay" ]]; then
+  local archive work_dir version_output version_number
+  if ((upgrade == 0)) && [[ -f "${engine_bin}/uxplay" && ! -L "${engine_bin}/uxplay" && -x "${engine_bin}/uxplay" ]]; then
     version_output="$("${engine_bin}/uxplay" -v 2>&1 || true)"
     version_number="$(printf '%s\n' "$version_output" | sed -nE 's/.*UxPlay version ([0-9]+(\.[0-9]+)+).*/\1/p' | head -n 1 || true)"
     if [[ -n "$version_number" ]] && awk -v actual="$version_number" -v minimum="$UXPLAY_VERSION" 'BEGIN { split(actual, a, "."); split(minimum, b, "."); for (i=1; i<=3; i++) { if ((a[i]+0) > (b[i]+0)) exit 0; if ((a[i]+0) < (b[i]+0)) exit 1 } exit 0 }'; then
@@ -469,21 +574,15 @@ install_uxplay_source() {
     fi
   fi
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-uxplay.XXXXXX")"
+  cleanup_paths+=("$work_dir")
   archive="${work_dir}/uxplay.tar.gz"
-  curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "$UXPLAY_URL" --output "$archive"
-  if command -v sha256sum >/dev/null 2>&1; then
-    actual_sha="$(sha256sum "$archive" | awk '{print $1}')"
-  else
-    actual_sha="$(shasum -a 256 "$archive" | awk '{print $1}')"
-  fi
-  [[ "$actual_sha" == "$UXPLAY_SHA256" ]] || fail "UxPlay source archive checksum did not match the pinned release."
+  download_verified "$UXPLAY_URL" "$archive" "$UXPLAY_SHA256" "UxPlay source archive"
   mkdir -p "${work_dir}/source"
   tar -xzf "$archive" -C "${work_dir}/source" --strip-components=1
   cmake -S "${work_dir}/source" -B "${work_dir}/build" -DCMAKE_INSTALL_PREFIX="$engine_dir"
   cmake --build "${work_dir}/build" --parallel
   cmake --install "${work_dir}/build"
-  rm -rf "$work_dir"
-  export PATH="${engine_bin}:${PATH}"
+  rm -rf -- "$work_dir"
 }
 
 external_runtime_executable() {
@@ -504,19 +603,17 @@ external_runtime_executable() {
 stage_runtime_tool() {
   local command_name="$1" source_path="${2:-}" target_path
   target_path="${engine_bin}/${command_name}"
-  if [[ -x "$target_path" ]] && ((upgrade == 0)); then return 0; fi
+  if [[ -f "$target_path" && ! -L "$target_path" && -x "$target_path" ]] && ((upgrade == 0)); then return 0; fi
   if ((upgrade)); then
     if [[ "$source_path" == "${engine_dir}/"* ]]; then source_path=""; fi
     if [[ -z "$source_path" ]]; then
       source_path="$(external_runtime_executable "$command_name" || true)"
     fi
   fi
-  if [[ -x "$target_path" && -z "$source_path" ]]; then return 0; fi
+  if [[ -f "$target_path" && ! -L "$target_path" && -x "$target_path" && -z "$source_path" ]]; then return 0; fi
   if [[ -z "$source_path" ]]; then source_path="$(command -v "$command_name" 2>/dev/null || true)"; fi
   [[ -n "$source_path" && -x "$source_path" ]] || fail "Required runtime tool is not available for staging: ${command_name}."
-  mkdir -p "$engine_bin"
-  cp -L "$source_path" "$target_path"
-  chmod 0755 "$target_path"
+  stage_file_atomic "$source_path" "$target_path" 0755 1
 }
 
 stage_runtime_tools() {
@@ -536,21 +633,21 @@ stage_runtime_tools() {
     stage_runtime_tool timeout "$(command -v timeout 2>/dev/null || true)"
   fi
   stage_gstreamer_plugins
-  if [[ ! -s "${engine_bin}/scrcpy-server" ]]; then
+  if [[ ! -f "${engine_bin}/scrcpy-server" || -L "${engine_bin}/scrcpy-server" || ! -s "${engine_bin}/scrcpy-server" ]]; then
     scrcpy_server="$(dirname "$(command -v scrcpy)")/scrcpy-server"
-    if [[ -s "$scrcpy_server" ]]; then cp -L "$scrcpy_server" "${engine_bin}/scrcpy-server"; fi
+    if [[ -s "$scrcpy_server" ]]; then stage_file_atomic "$scrcpy_server" "${engine_bin}/scrcpy-server" 0644 1; fi
     for scrcpy_server in /usr/share/scrcpy/scrcpy-server /usr/lib/scrcpy/scrcpy-server /usr/lib64/scrcpy/scrcpy-server; do
-      if [[ -s "$scrcpy_server" ]]; then cp -L "$scrcpy_server" "${engine_bin}/scrcpy-server"; break; fi
+      if [[ -s "$scrcpy_server" ]]; then stage_file_atomic "$scrcpy_server" "${engine_bin}/scrcpy-server" 0644 1; break; fi
     done
     if [[ ! -s "${engine_bin}/scrcpy-server" ]] && command -v brew >/dev/null 2>&1; then
       scrcpy_prefix="$(brew --prefix scrcpy 2>/dev/null || true)"
       if [[ -n "$scrcpy_prefix" ]]; then
         scrcpy_server="${scrcpy_prefix}/share/scrcpy/scrcpy-server"
-        if [[ -s "$scrcpy_server" ]]; then cp -L "$scrcpy_server" "${engine_bin}/scrcpy-server"; fi
+        if [[ -s "$scrcpy_server" ]]; then stage_file_atomic "$scrcpy_server" "${engine_bin}/scrcpy-server" 0644 1; fi
       fi
     fi
   fi
-  if [[ ! -s "${engine_bin}/scrcpy-server" ]]; then
+  if [[ ! -f "${engine_bin}/scrcpy-server" || -L "${engine_bin}/scrcpy-server" || ! -s "${engine_bin}/scrcpy-server" ]]; then
     fail "The scrcpy server binary could not be staged in ${engine_bin}."
   fi
 }
@@ -576,6 +673,7 @@ copy_tree_dereference_links() {
 stage_gstreamer_plugins() {
   local plugins_source scanner_source plugins_target
   plugins_target="${engine_dir}/lib/gstreamer-1.0"
+  [[ ! -L "${engine_dir}/lib" && ! -L "$plugins_target" ]] || fail "GStreamer plugin target directory must not be a symbolic link."
   if [[ "$(uname -s)" == "Darwin" ]]; then
     local gstreamer_prefix
     gstreamer_prefix="$(brew --prefix gstreamer)"
@@ -602,11 +700,16 @@ stage_gstreamer_plugins() {
     cp -a "${plugins_source}/." "$plugins_target/"
   fi
   [[ -x "$scanner_source" ]] || fail "GStreamer plugin scanner is unavailable for staging."
-  cp -L "$scanner_source" "${engine_bin}/gst-plugin-scanner"
-  chmod 0755 "${engine_bin}/gst-plugin-scanner"
+  stage_file_atomic "$scanner_source" "${engine_bin}/gst-plugin-scanner" 0755 1
 }
 
 ensure_homebrew() {
+  local work_dir installer_script
+  if [[ -x /opt/homebrew/bin/brew ]]; then
+    eval "$(/opt/homebrew/bin/brew shellenv)"
+  elif [[ -x /usr/local/bin/brew ]]; then
+    eval "$(/usr/local/bin/brew shellenv)"
+  fi
   export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:${PATH:-}"
   if command -v brew >/dev/null 2>&1; then
     eval "$(brew shellenv)"
@@ -615,8 +718,13 @@ ensure_homebrew() {
   fi
   [[ -t 0 && -t 1 ]] || fail "Homebrew is missing. Run this installer from Terminal so the official Homebrew installer can request any required authorization."
   command -v curl >/dev/null 2>&1 || fail "curl is required to install Homebrew from its official source."
-  log "Installing Homebrew from the official installer."
-  /bin/bash -c "$(/usr/bin/curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  log "Installing Homebrew from the pinned official installer."
+  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-homebrew.XXXXXX")"
+  cleanup_paths+=("$work_dir")
+  installer_script="${work_dir}/install.sh"
+  download_verified "$HOMEBREW_INSTALL_URL" "$installer_script" "$HOMEBREW_INSTALL_SHA256" "Homebrew installer"
+  /bin/bash "$installer_script"
+  rm -rf -- "$work_dir"
   export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:${PATH:-}"
   if ! command -v brew >/dev/null 2>&1; then
     [[ -x /opt/homebrew/bin/brew ]] && export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:${PATH}"
@@ -664,7 +772,7 @@ install_macos_runtime() {
 
 scrcpy_bundle_ready() {
   local scrcpy_output adb_output
-  [[ -x "${engine_bin}/scrcpy" && -x "${engine_bin}/adb" && -s "${engine_bin}/scrcpy-server" && -n "$bounded_timeout" ]] || return 1
+  [[ -f "${engine_bin}/scrcpy" && ! -L "${engine_bin}/scrcpy" && -x "${engine_bin}/scrcpy" && -f "${engine_bin}/adb" && ! -L "${engine_bin}/adb" && -x "${engine_bin}/adb" && -f "${engine_bin}/scrcpy-server" && ! -L "${engine_bin}/scrcpy-server" && -s "${engine_bin}/scrcpy-server" && -n "$bounded_timeout" ]] || return 1
   if ! scrcpy_output="$("$bounded_timeout" --kill-after=2s 10s "${engine_bin}/scrcpy" --version 2>&1)" || [[ -z "$scrcpy_output" ]]; then
     return 1
   fi
@@ -674,7 +782,7 @@ scrcpy_bundle_ready() {
 }
 
 install_scrcpy_macos() {
-  local architecture asset expected_sha work_dir archive extract_dir bundle binary server adb actual_sha
+  local architecture asset expected_sha work_dir archive extract_dir bundle binary server adb
   architecture="$(uname -m)"
   case "$architecture" in
     arm64|aarch64)
@@ -687,16 +795,11 @@ install_scrcpy_macos() {
   esac
   if ((upgrade == 0)) && scrcpy_bundle_ready; then return; fi
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-scrcpy.XXXXXX")"
+  cleanup_paths+=("$work_dir")
   archive="${work_dir}/${asset}"
   extract_dir="${work_dir}/extract"
   mkdir -p "$extract_dir"
-  curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/${asset}" --output "$archive"
-  if command -v shasum >/dev/null 2>&1; then
-    actual_sha="$(shasum -a 256 "$archive" | awk '{print $1}')"
-  else
-    actual_sha="$(sha256sum "$archive" | awk '{print $1}')"
-  fi
-  [[ "$actual_sha" == "$expected_sha" ]] || fail "The official macOS scrcpy archive SHA-256 verification failed."
+  download_verified "https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/${asset}" "$archive" "$expected_sha" "Official macOS scrcpy archive"
   tar -xzf "$archive" -C "$extract_dir"
   bundle="$(find "$extract_dir" -type d -name "scrcpy-macos-*-v${SCRCPY_VERSION}" -print -quit)"
   [[ -n "$bundle" ]] || fail "The official macOS scrcpy archive did not contain its distribution directory."
@@ -704,44 +807,33 @@ install_scrcpy_macos() {
   server="${bundle}/scrcpy-server"
   adb="${bundle}/adb"
   [[ -x "$binary" && -f "$server" && -x "$adb" ]] || fail "The official macOS scrcpy archive is missing required executables."
-  mkdir -p "$engine_bin"
-  cp -L "$binary" "${engine_bin}/scrcpy"
-  cp -L "$server" "${engine_bin}/scrcpy-server"
-  cp -L "$adb" "${engine_bin}/adb"
-  chmod 0755 "${engine_bin}/scrcpy" "${engine_bin}/scrcpy-server" "${engine_bin}/adb"
-  rm -rf "$work_dir"
+  stage_file_atomic "$binary" "${engine_bin}/scrcpy" 0755 0
+  stage_file_atomic "$server" "${engine_bin}/scrcpy-server" 0644 0
+  stage_file_atomic "$adb" "${engine_bin}/adb" 0755 0
+  rm -rf -- "$work_dir"
 }
 
 install_scrcpy_linux() {
-  local architecture work_dir archive actual_sha extract_dir binary server target_dir
+  local architecture work_dir archive extract_dir binary server adb
   if ((upgrade == 0)) && scrcpy_bundle_ready; then return; fi
   architecture="$(uname -m)"
   if [[ "$architecture" == x86_64 || "$architecture" == amd64 ]]; then
     work_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-scrcpy.XXXXXX")"
+    cleanup_paths+=("$work_dir")
     archive="${work_dir}/scrcpy.tar.gz"
     extract_dir="${work_dir}/extract"
     mkdir -p "$extract_dir"
-    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "$SCRCPY_LINUX_URL" --output "$archive"
-    if command -v sha256sum >/dev/null 2>&1; then
-      actual_sha="$(sha256sum "$archive" | awk '{print $1}')"
-    else
-      actual_sha="$(shasum -a 256 "$archive" | awk '{print $1}')"
-    fi
-    [[ "$actual_sha" == "$SCRCPY_SHA256" ]] || fail "scrcpy source archive checksum did not match the pinned official release."
+    download_verified "$SCRCPY_LINUX_URL" "$archive" "$SCRCPY_SHA256" "scrcpy source archive"
     tar -xzf "$archive" -C "$extract_dir"
     binary="$(find "$extract_dir" -type f -name scrcpy -perm -u+x -print -quit)"
     server="$(find "$extract_dir" -type f -name scrcpy-server -print -quit)"
     [[ -n "$binary" && -n "$server" ]] || fail "The official scrcpy release archive did not contain its client and server binaries."
-    target_dir="$engine_bin"
-    mkdir -p "$target_dir"
-    cp -L "$binary" "${target_dir}/scrcpy"
-    cp -L "$server" "${target_dir}/scrcpy-server"
-    local adb
     adb="$(find "$extract_dir" -type f -name adb -perm -u+x -print -quit)"
     [[ -n "$adb" ]] || fail "The official scrcpy release archive did not contain its ADB executable."
-    cp -L "$adb" "${target_dir}/adb"
-    chmod 0755 "${target_dir}/scrcpy" "${target_dir}/scrcpy-server" "${target_dir}/adb"
-    rm -rf "$work_dir"
+    stage_file_atomic "$binary" "${engine_bin}/scrcpy" 0755 0
+    stage_file_atomic "$server" "${engine_bin}/scrcpy-server" 0644 0
+    stage_file_atomic "$adb" "${engine_bin}/adb" 0755 0
+    rm -rf -- "$work_dir"
     return
   fi
   command -v scrcpy >/dev/null 2>&1 || fail "The official static scrcpy release currently supports Linux x86_64 only, and no scrcpy package is available for ${architecture}."
@@ -764,28 +856,23 @@ install_bun_binary() {
     *) fail "Official Bun ${BUN_VERSION} binaries are unavailable for ${system}/${architecture}." ;;
   esac
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-bun.XXXXXX")"
+  cleanup_paths+=("$work_dir")
   archive="${work_dir}/${asset}"
   extracted="${work_dir}/extract"
   mkdir -p "$extracted"
-  curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/${asset}" --output "$archive"
-  if command -v sha256sum >/dev/null 2>&1; then
-    actual_sha="$(sha256sum "$archive" | awk '{print $1}')"
-  else
-    actual_sha="$(shasum -a 256 "$archive" | awk '{print $1}')"
-  fi
-  [[ "$actual_sha" == "$expected_sha" ]] || fail "Bun ${BUN_VERSION} archive checksum verification failed."
+  download_verified "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/${asset}" "$archive" "$expected_sha" "Bun ${BUN_VERSION} archive"
   unzip -q "$archive" -d "$extracted"
   executable="$(find "$extracted" -type f -name bun -print -quit)"
   [[ -n "$executable" ]] || fail "Official Bun archive is missing its executable."
   target_dir="${HOME}/.bun/bin"
   mkdir -p "$target_dir"
-  install -m 0755 "$executable" "${target_dir}/bun"
-  rm -rf "$work_dir"
+  stage_file_atomic "$executable" "${target_dir}/bun" 0755 0
+  rm -rf -- "$work_dir"
   export PATH="${target_dir}:${PATH}"
 }
 
 install_node_binary() {
-  local system architecture asset expected_sha work_dir archive extracted node_root node_dir actual_sha
+  local system architecture asset expected_sha work_dir archive extracted node_root node_dir
   load_node_version
   if [[ "$(node --version 2>/dev/null || true)" == "v${NODE_VERSION}" ]]; then return; fi
   system="$(uname -s)"
@@ -802,26 +889,22 @@ install_node_binary() {
     *) fail "Official Node.js ${NODE_VERSION} binaries are unavailable for ${system}/${architecture}." ;;
   esac
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-node.XXXXXX")"
+  cleanup_paths+=("$work_dir")
   archive="${work_dir}/${asset}"
   extracted="${work_dir}/extract"
   mkdir -p "$extracted"
-  curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location "https://nodejs.org/dist/v${NODE_VERSION}/${asset}" --output "$archive"
-  if command -v sha256sum >/dev/null 2>&1; then
-    actual_sha="$(sha256sum "$archive" | awk '{print $1}')"
-  else
-    actual_sha="$(shasum -a 256 "$archive" | awk '{print $1}')"
-  fi
-  [[ "$actual_sha" == "$expected_sha" ]] || fail "Node.js ${NODE_VERSION} archive checksum verification failed."
+  download_verified "https://nodejs.org/dist/v${NODE_VERSION}/${asset}" "$archive" "$expected_sha" "Node.js ${NODE_VERSION} archive"
   tar -xJf "$archive" -C "$extracted"
   node_root="$(find "$extracted" -mindepth 1 -maxdepth 1 -type d -name "node-v${NODE_VERSION}-*" -print -quit)"
-  [[ -n "$node_root" && -x "${node_root}/bin/node" ]] || fail "Official Node.js archive did not contain its node binary."
+  [[ -n "$node_root" && -x "${node_root}/bin/node" && ! -L "${node_root}/bin/node" ]] || fail "Official Node.js archive did not contain its node binary."
   node_dir="${HOME}/.local/lib/neo-airplay/node-v${NODE_VERSION}"
   mkdir -p "$node_dir" "$user_bin"
+  [[ ! -L "$node_dir" && ! -L "$user_bin" ]] || fail "Node.js installation target must not be a symbolic link."
   cp -a "${node_root}/." "$node_dir/"
   ln -sf "${node_dir}/bin/node" "${user_bin}/node"
   ln -sf "${node_dir}/bin/npm" "${user_bin}/npm"
   ln -sf "${node_dir}/bin/npx" "${user_bin}/npx"
-  rm -rf "$work_dir"
+  rm -rf -- "$work_dir"
   export PATH="${user_bin}:${PATH}"
 }
 
@@ -874,8 +957,7 @@ linux_packages() {
       ;;
     dnf)
       if [[ "$architecture" != x86_64 && "$architecture" != amd64 ]] && ! dnf repoquery --quiet scrcpy >/dev/null 2>&1; then
-        run_privileged dnf -q -y install dnf-plugins-core
-        run_privileged dnf -q -y copr enable zeno/scrcpy
+        fail "Official DNF repositories do not provide scrcpy for ${architecture}. Install scrcpy manually from a trusted source before retrying."
       fi
       if ((upgrade)); then dnf_arguments+=(--refresh); fi
       run_privileged dnf -q -y "${dnf_arguments[@]}" install "${runtime_packages[@]}" "${build_packages[@]}"
@@ -937,12 +1019,24 @@ install_development_tools() {
 }
 
 install_linux_dev_tools() {
-  local temp_dir rust_script rustup_command
+  local temp_dir rust_installer rustup_command rustup_target rustup_sha architecture
   temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-devtools.XXXXXX")"
+  cleanup_paths+=("$temp_dir")
   if ! command -v rustup >/dev/null 2>&1; then
-    rust_script="${temp_dir}/rustup-init.sh"
-    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location https://sh.rustup.rs --output "$rust_script"
-    sh "$rust_script" -y --no-modify-path --profile minimal --default-toolchain stable
+    architecture="$(uname -m)"
+    case "$architecture" in
+      x86_64|amd64)
+        rustup_target="x86_64-unknown-linux-gnu"
+        rustup_sha="$RUSTUP_LINUX_X64_SHA256" ;;
+      aarch64|arm64)
+        rustup_target="aarch64-unknown-linux-gnu"
+        rustup_sha="$RUSTUP_LINUX_ARM64_SHA256" ;;
+      *) fail "Official rustup ${RUSTUP_VERSION} binaries are unavailable for Linux/${architecture}." ;;
+    esac
+    rust_installer="${temp_dir}/rustup-init"
+    download_verified "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${rustup_target}/rustup-init" "$rust_installer" "$rustup_sha" "Rustup ${RUSTUP_VERSION} installer"
+    chmod 0700 "$rust_installer"
+    "$rust_installer" -y --no-modify-path --profile minimal --default-toolchain stable
   fi
   rustup_command="$(command -v rustup 2>/dev/null || true)"
   [[ -n "$rustup_command" ]] || fail "Rustup was installed but could not be found on PATH."

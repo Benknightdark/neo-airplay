@@ -1,6 +1,6 @@
 //! 應用程式診斷日誌型別與環狀緩衝區維護工具。
 
-use chrono::{DateTime, Local};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
@@ -23,8 +23,8 @@ pub enum LogLevel {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppLogEntry {
-    /// 紀錄產生的本地時間戳記。
-    pub timestamp: DateTime<Local>,
+    /// 紀錄產生的 RFC 3339 時間戳記。
+    pub timestamp: Timestamp,
     /// 日誌嚴重等級。
     pub level: LogLevel,
     /// 經過換行正規化與空白修剪的日誌內容。
@@ -42,7 +42,7 @@ impl AppLogEntry {
     /// 回傳正規化後的 `AppLogEntry` 實例。
     pub fn new(level: LogLevel, message: &str) -> Self {
         Self {
-            timestamp: Local::now(),
+            timestamp: Timestamp::now(),
             level,
             message: message.replace(['\r', '\n'], " ").trim().to_owned(),
         }

@@ -69,6 +69,10 @@ jobs:
         working-directory: desktop
         run: bun install --frozen-lockfile --silent
 
+      - name: Audit frontend dependencies
+        working-directory: desktop
+        run: bun audit
+
       - name: Install desktop test dependencies
         working-directory: desktop-test
         run: bun install --frozen-lockfile --silent

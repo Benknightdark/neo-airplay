@@ -1,18 +1,22 @@
 //! 外部執行檔搜尋、環境變數組裝與具逾時及輸出大小上限保護的跨平台程序執行工具。
 
 use std::ffi::{OsStr, OsString};
-use std::io::Read;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Error, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// 單一外部程序管道允許擷取的最大輸出位元組數（1 MiB），防止記憶體耗盡。
 pub const MAX_CAPTURED_PROCESS_OUTPUT_BYTES: usize = 1024 * 1024;
 /// 同步短程指令（如 `adb devices`）的預設等待逾時時間。
 pub const PROCESS_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// 在受控管 `engine_dir` 的優先目錄順序中尋找可執行檔，不直接依賴全域 PATH 搜尋。
+static TEMP_FILE_NONCE: AtomicU64 = AtomicU64::new(0);
+
+/// 在受控管 `engine_dir` 的優先目錄順序中尋找可執行檔，不直接依賴全域 PATH 搜尋，且拒絕任何符號連結。
 ///
 /// # 參數
 /// - `engine_dir`: 應用程式管理的工具根目錄。
@@ -20,20 +24,18 @@ pub const PROCESS_TIMEOUT: Duration = Duration::from_secs(15);
 /// - `android`: 若為 `true`，會額外優先搜尋 `android` 與 `android/platform-tools` 子目錄。
 ///
 /// # 回傳值
-/// 找到具執行權限的檔案時回傳 `Some(PathBuf)`，否則回傳 `None`。
+/// 找到位於受控管實體目錄內的具執行權限常規檔案時回傳 `Some(PathBuf)`，否則回傳 `None`。
 pub fn find_executable(engine_dir: &Path, name: &str, android: bool) -> Option<PathBuf> {
-    let engine_dirs = if android {
-        vec![
-            engine_dir.join("android"),
-            engine_dir.join("android/platform-tools"),
-            engine_dir.join("bin"),
-            engine_dir.to_owned(),
-        ]
+    let subdirs: &[&[&str]] = if android {
+        &[&["android"], &["android", "platform-tools"], &["bin"], &[]]
     } else {
-        vec![engine_dir.join("bin"), engine_dir.to_owned()]
+        &[&["bin"], &[]]
     };
     let names = executable_names(name);
-    for directory in engine_dirs {
+    for components in subdirs {
+        let Some(directory) = safe_engine_subdir(engine_dir, components) else {
+            continue;
+        };
         for candidate_name in &names {
             let candidate = directory.join(candidate_name);
             if is_executable_file(&candidate) {
@@ -42,6 +44,33 @@ pub fn find_executable(engine_dir: &Path, name: &str, android: bool) -> Option<P
         }
     }
     None
+}
+
+/// 驗證目標路徑是否為非符號連結的實體目錄。
+///
+/// # 參數
+/// - `path`: 待檢查的目錄路徑。
+///
+/// # 回傳值
+/// 路徑存在且為常規目錄（非符號連結）時回傳 `true`。
+pub fn is_real_directory(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+}
+
+/// 逐層驗證 `engine_dir` 及其子目錄鏈皆為非符號連結的實體目錄。
+fn safe_engine_subdir(engine_dir: &Path, components: &[&str]) -> Option<PathBuf> {
+    if !is_real_directory(engine_dir) {
+        return None;
+    }
+    let mut current = engine_dir.to_path_buf();
+    for component in components {
+        current = current.join(component);
+        if !is_real_directory(&current) {
+            return None;
+        }
+    }
+    Some(current)
 }
 
 /// 建構僅包含內建投影工具目錄的 `PATH` 環境變數字串。
@@ -94,40 +123,303 @@ pub fn macos_library_paths(engine_dir: &Path, inherited: Option<&OsStr>) -> Vec<
     paths
 }
 
-/// 建構供依賴檢查與安裝腳本使用的擴充 `PATH`，將內建工具目錄置於系統 `PATH` 之前。
+/// 檢查路徑是否為符號連結；若目標不存在則視為通過。
 ///
 /// # 參數
-/// - `engine_dir`: 應用程式管理的工具根目錄。
+/// - `path`: 待檢查的檔案或目錄路徑。
 ///
 /// # 回傳值
-/// 回傳合併後的 `PATH` `OsString`。
-pub fn installer_path(engine_dir: &Path) -> OsString {
-    let mut paths = std::env::split_paths(&resolved_path(engine_dir)).collect::<Vec<_>>();
-    paths.extend(
-        std::env::var_os("PATH")
-            .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-            .unwrap_or_default(),
-    );
-    std::env::join_paths(paths).unwrap_or_else(|_| resolved_path(engine_dir))
+/// 非符號連結或尚不存在時回傳 `Ok(())`；若為符號連結或檢查失敗回傳 `std::io::Error`。
+pub fn reject_symlink_path(path: &Path) -> std::io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(Error::new(
+            ErrorKind::InvalidInput,
+            "目標路徑不可為符號連結。",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
-/// 檢查指定路徑是否為存在且具執行權限（於 Unix）的常規檔案。
+/// 確保目標目錄存在且本身非符號連結；在 Unix 上可選擇強制限制僅擁有者讀寫執行（`0700`）。
+///
+/// # 參數
+/// - `path`: 目標目錄路徑。
+/// - `owner_only_unix`: 若為 `true`，於 Unix 系統套用 `0o700` 權限。
+///
+/// # 回傳值
+/// 成功時回傳 `Ok(())`；若為符號連結、非目錄或 I/O 失敗則回傳 `std::io::Error`。
+pub fn ensure_safe_directory(path: &Path, owner_only_unix: bool) -> std::io::Result<()> {
+    #[cfg(not(unix))]
+    let _ = owner_only_unix;
+
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "目錄路徑不可為符號連結或非資料夾。",
+                ));
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            fs::create_dir_all(path)?;
+            let metadata = fs::symlink_metadata(path)?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "目錄路徑不可為符號連結或非資料夾。",
+                ));
+            }
+        }
+        Err(error) => return Err(error),
+    }
+
+    #[cfg(unix)]
+    if owner_only_unix {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+
+    Ok(())
+}
+
+/// 使用 `create_new` 唯一暫存檔與原子更名寫入檔案，拒絕追蹤或覆寫符號連結。
+///
+/// # 參數
+/// - `path`: 目標檔案路徑。
+/// - `contents`: 欲寫入的原始位元組內容。
+/// - `unix_mode`: Unix 平台上套用的檔案權限模式（如 `0o600` 或 `0o700`）。
+///
+/// # 回傳值
+/// 成功寫入與置換回傳 `Ok(())`；遇到符號連結或 I/O 失敗回傳 `std::io::Error`。
+pub fn write_file_atomic_secure(
+    path: &Path,
+    contents: &[u8],
+    unix_mode: u32,
+) -> std::io::Result<()> {
+    stage_temp_file_atomic(path, unix_mode, None, |file| file.write_all(contents))
+}
+
+/// 以有界限的方式讀取非符號連結常規檔案內容，避免記憶體耗盡與符號連結越界讀取。
+///
+/// # 參數
+/// - `path`: 欲讀取的檔案路徑。
+/// - `max_bytes`: 允許讀取的最大位元組數。
+///
+/// # 回傳值
+/// 回傳完整位元組向量；若為符號連結、非一般檔案或超過上限則回傳 `std::io::Error`。
+pub fn read_bounded_regular_file(path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "目標檔案不可為符號連結或非一般檔案。",
+        ));
+    }
+    if metadata.len() > max_bytes {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("檔案大小超過 {max_bytes} 位元組上限。"),
+        ));
+    }
+    let file = File::open(path)?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    let limit = max_bytes.saturating_add(1);
+    file.take(limit).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("檔案大小超過 {max_bytes} 位元組上限。"),
+        ));
+    }
+    Ok(bytes)
+}
+
+/// 在正式版本首次啟動時安全地將隨附引擎目錄複製至使用者資料目錄並寫入版本標記，
+/// 略過任何來源符號連結且拒絕目標路徑中的符號連結。
+///
+/// # 參數
+/// - `bundled_engine`: 應用程式套件隨附的來源 `engine` 目錄。
+/// - `engine_dir`: 目標本機投影工具根目錄。
+/// - `version`: 用於 `.bundled-<version>` 標記檔的版本字串。
+///
+/// # 回傳值
+/// 完成複製或無需複製回傳 `Ok(())`；遇到不安全符號連結或 I/O 失敗回傳 `std::io::Error`。
+pub fn seed_bundled_engine_in_dir(
+    bundled_engine: &Path,
+    engine_dir: &Path,
+    version: &str,
+) -> std::io::Result<()> {
+    match fs::symlink_metadata(bundled_engine) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "隨附引擎來源目錄路徑不安全。",
+                ));
+            }
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+
+    ensure_safe_directory(engine_dir, false)?;
+    let marker = engine_dir.join(format!(".bundled-{version}"));
+    match fs::symlink_metadata(&marker) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "隨附引擎版本標記檔路徑不安全。",
+                ));
+            }
+            return Ok(());
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    copy_directory_safely(bundled_engine, engine_dir)?;
+    write_file_atomic_secure(&marker, b"seeded\n", 0o600)
+}
+
+fn copy_directory_safely(source: &Path, destination: &Path) -> std::io::Result<()> {
+    ensure_safe_directory(destination, false)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let metadata = fs::symlink_metadata(&source_path)?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            copy_directory_safely(&source_path, &destination_path)?;
+        } else if metadata.is_file() {
+            let permissions = metadata.permissions();
+            stage_temp_file_atomic(&destination_path, 0o600, Some(permissions), |out_file| {
+                let mut in_file = File::open(&source_path)?;
+                std::io::copy(&mut in_file, out_file)?;
+                Ok(())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn open_exclusive_temp_file(
+    parent: &Path,
+    prefix: &str,
+    unix_mode: u32,
+) -> std::io::Result<(PathBuf, File)> {
+    #[cfg(not(unix))]
+    let _ = unix_mode;
+
+    let safe_prefix: String = prefix
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    for _ in 0..16 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let nonce = TEMP_FILE_NONCE.fetch_add(1, Ordering::Relaxed);
+        let temp_path = parent.join(format!(
+            ".{safe_prefix}.{}.{nanos}.{nonce}.tmp",
+            std::process::id()
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(unix_mode);
+        }
+        match options.open(&temp_path) {
+            Ok(file) => return Ok((temp_path, file)),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(Error::new(
+        ErrorKind::AlreadyExists,
+        "無法建立唯一暫存檔案。",
+    ))
+}
+
+fn stage_temp_file_atomic(
+    path: &Path,
+    unix_mode: u32,
+    permissions: Option<fs::Permissions>,
+    write_body: impl FnOnce(&mut File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    reject_symlink_path(path)?;
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        Some(_) => Path::new("."),
+        None => {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "無法解析目標檔案上層目錄。",
+            ))
+        }
+    };
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("tmp");
+    let (temp_path, mut file) = open_exclusive_temp_file(parent, file_name, unix_mode)?;
+    let result = (|| {
+        write_body(&mut file)?;
+        file.flush()?;
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(fs::Permissions::from_mode(unix_mode))?;
+            }
+        }
+        drop(file);
+        reject_symlink_path(path)?;
+        fs::rename(&temp_path, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result
+}
+
+/// 檢查指定路徑是否為存在且非符號連結、具執行權限（於 Unix）的常規檔案。
 ///
 /// # 參數
 /// - `path`: 待檢查的檔案路徑。
 ///
 /// # 回傳值
-/// 若為可執行的常規檔案則回傳 `true`，否則回傳 `false`。
+/// 若為可執行的常規檔案（非符號連結）則回傳 `true`，否則回傳 `false`。
 pub fn is_executable_file(path: &Path) -> bool {
-    path.metadata().is_ok_and(|metadata| {
+    fs::symlink_metadata(path).is_ok_and(|metadata| {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return false;
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            metadata.permissions().mode() & 0o111 != 0
         }
         #[cfg(not(unix))]
         {
-            metadata.is_file()
+            true
         }
     })
 }

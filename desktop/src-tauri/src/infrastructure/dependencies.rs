@@ -6,10 +6,15 @@ use crate::domain::{
 };
 #[cfg(target_os = "windows")]
 use crate::infrastructure::process::background_command;
-use crate::infrastructure::process::{installer_path, run_with_timeout_in_path};
+use crate::infrastructure::process::{
+    ensure_safe_directory, read_bounded_regular_file, reject_symlink_path,
+    run_with_timeout_in_path, write_file_atomic_secure,
+};
 use serde::Serialize;
+#[cfg(any(target_os = "windows", test))]
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Output};
@@ -27,6 +32,9 @@ const PROCESS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const RESULT_GRACE: Duration = Duration::from_secs(5);
 const LAUNCH_GRACE: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+const MAX_INSTALL_LOG_READ_BYTES: usize = 1024 * 1024;
+const MAX_INSTALL_LOG_FILE_BYTES: u64 = 5 * 1024 * 1024;
+const MAX_INSTALL_METADATA_BYTES: u64 = 64 * 1024;
 
 const INSTALL_MARKER: &str = "install.pid";
 const INSTALL_RESULT: &str = "install-result.json";
@@ -82,13 +90,10 @@ impl DependencyManager {
     }
 
     pub fn read_install_log(&self) -> Result<String, String> {
-        fs::read_to_string(self.setup_dir.join(INSTALL_LOG)).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                "尚無安裝記錄。".to_owned()
-            } else {
-                format!("無法讀取安裝記錄：{error}")
-            }
-        })
+        read_log_tail(
+            &self.setup_dir.join(INSTALL_LOG),
+            MAX_INSTALL_LOG_READ_BYTES,
+        )
     }
 
     pub fn start(&self) -> Result<DependencySnapshot, String> {
@@ -321,7 +326,10 @@ fn run_setup(
     snapshot: &Arc<Mutex<DependencySnapshot>>,
     operation: DependencyOperation,
 ) -> Result<SetupOutcome, String> {
-    fs::create_dir_all(setup_dir).map_err(|error| format!("無法建立安裝記錄目錄：{error}"))?;
+    ensure_safe_directory(setup_dir, true)
+        .map_err(|error| format!("無法建立安裝記錄目錄：{error}"))?;
+    ensure_safe_directory(engine_dir, false)
+        .map_err(|error| format!("無法建立或驗證工具目錄：{error}"))?;
 
     let marker_path = setup_dir.join(INSTALL_MARKER);
     let result_path = setup_dir.join(INSTALL_RESULT);
@@ -412,6 +420,7 @@ fn run_setup(
     stage_installer(setup_dir)?;
     let runtime = check_runtime(engine_dir, setup_dir)?;
     if runtime.is_ready() && operation == DependencyOperation::Install {
+        stage_installer(setup_dir)?;
         warm_gstreamer_registry(engine_dir, gstreamer_registry_path, setup_dir, snapshot);
         remove_if_exists(&launch_path);
         return Ok(SetupOutcome::ready(operation));
@@ -432,6 +441,7 @@ fn run_setup(
     };
     publish_installing(snapshot, &message);
 
+    stage_installer(setup_dir)?;
     let result = install_dependencies(
         setup_dir,
         engine_dir,
@@ -442,6 +452,7 @@ fn run_setup(
     let installer_succeeded = result.as_ref().is_ok_and(|result| result.exit_code == 0);
     if final_check.is_ready() && (operation == DependencyOperation::Install || installer_succeeded)
     {
+        stage_installer(setup_dir)?;
         warm_gstreamer_registry(engine_dir, gstreamer_registry_path, setup_dir, snapshot);
         remove_if_exists(&launch_path);
         return Ok(SetupOutcome::ready(operation));
@@ -495,7 +506,7 @@ fn warm_gstreamer_registry(
             Path::new("/bin/bash"),
             &args,
             GSTREAMER_REGISTRY_WARMUP_TIMEOUT,
-            Some(installer_path(engine_dir).as_os_str()),
+            None,
         );
         match output {
             Ok(output) => {
@@ -532,26 +543,31 @@ fn warm_gstreamer_registry(
     let _ = (engine_dir, registry_path, setup_dir, snapshot);
 }
 
-/// 將編譯時嵌入二進位檔的平台安裝腳本釋放至 `setup_dir`。
+/// 將編譯時嵌入二進位檔的平台安裝腳本安全釋放至受保護的 `setup_dir`（原子寫入並拒絕符號連結）。
 ///
 /// # 參數
 /// - `setup_dir`: 目標腳本存放目錄。
 ///
 /// # 回傳值
-/// 成功釋放回傳腳本檔案路徑 `Ok(PathBuf)`；寫入失敗回傳錯誤字串。
-fn stage_installer(setup_dir: &Path) -> Result<PathBuf, String> {
+/// 成功釋放回傳腳本檔案路徑 `Ok(PathBuf)`；遇到符號連結或寫入失敗回傳錯誤字串。
+pub(crate) fn stage_installer(setup_dir: &Path) -> Result<PathBuf, String> {
+    ensure_safe_directory(setup_dir, true)
+        .map_err(|error| format!("無法準備工具安裝目錄：{error}"))?;
     #[cfg(target_os = "windows")]
-    let (path, contents) = (
+    let (path, contents, mode) = (
         setup_dir.join("install.ps1"),
         include_str!("../../../scripts/install.ps1"),
+        0o600,
     );
     #[cfg(not(target_os = "windows"))]
-    let (path, contents) = (
+    let (path, contents, mode) = (
         setup_dir.join("install.sh"),
         include_str!("../../../scripts/install.sh"),
+        0o700,
     );
 
-    fs::write(&path, contents).map_err(|error| format!("無法準備工具安裝程序：{error}"))?;
+    write_file_atomic_secure(&path, contents.as_bytes(), mode)
+        .map_err(|error| format!("無法準備工具安裝程序：{error}"))?;
     Ok(path)
 }
 
@@ -564,10 +580,9 @@ fn stage_installer(setup_dir: &Path) -> Result<PathBuf, String> {
 /// # 回傳值
 /// 回傳包含缺少項目清單的 `RuntimeCheck`；檢查指令無法啟動或逾時則回傳錯誤字串。
 fn check_runtime(engine_dir: &Path, setup_dir: &Path) -> Result<RuntimeCheck, String> {
-    let path = installer_path(engine_dir);
     #[cfg(target_os = "windows")]
     let (executable, args) = (
-        PathBuf::from("powershell.exe"),
+        windows_powershell_executable(),
         vec![
             "-NoProfile".into(),
             "-ExecutionPolicy".into(),
@@ -591,12 +606,11 @@ fn check_runtime(engine_dir: &Path, setup_dir: &Path) -> Result<RuntimeCheck, St
     );
 
     let output =
-        run_with_timeout_in_path(&executable, &args, CHECK_TIMEOUT, Some(path.as_os_str()))
-            .map_err(|error| {
-                let detail = format!("工具依賴檢查無法完成：{error}");
-                append_log(&setup_dir.join(INSTALL_LOG), &detail);
-                detail
-            })?;
+        run_with_timeout_in_path(&executable, &args, CHECK_TIMEOUT, None).map_err(|error| {
+            let detail = format!("工具依賴檢查無法完成：{error}");
+            append_log(&setup_dir.join(INSTALL_LOG), &detail);
+            detail
+        })?;
     let output_text = combined_output(&output);
     if !output_text.trim().is_empty() {
         append_log(&setup_dir.join(INSTALL_LOG), output_text.trim());
@@ -634,6 +648,7 @@ fn install_dependencies(
     let marker_path = setup_dir.join(INSTALL_MARKER);
     let result_path = setup_dir.join(INSTALL_RESULT);
     let launch_path = setup_dir.join(INSTALL_LAUNCH);
+    rotate_install_log_if_oversized(&log_path)?;
     remove_if_exists(&marker_path);
     remove_if_exists(&result_path);
     remove_if_exists(&setup_dir.join(INSTALL_PROGRESS));
@@ -646,14 +661,33 @@ fn install_dependencies(
 
     #[cfg(target_os = "macos")]
     {
+        struct LaunchScriptCleanup<'a>(&'a Path);
+        impl Drop for LaunchScriptCleanup<'_> {
+            fn drop(&mut self) {
+                remove_if_exists(self.0);
+            }
+        }
+
         let script = setup_dir.join("install.sh");
         let launch_script = setup_dir.join("launch.sh");
+        for path in [
+            script.as_path(),
+            launch_script.as_path(),
+            log_path.as_path(),
+            engine_dir,
+            marker_path.as_path(),
+            result_path.as_path(),
+        ] {
+            validate_terminal_path(path)?;
+        }
         let upgrade_argument = if force_upgrade { " --upgrade" } else { "" };
-        fs::write(
-            &launch_script,
-            format!("#!/bin/bash\nset -u\nexec > >(tee -a \"$2\") 2>&1\nexec /bin/bash \"$1\" --gui --engine-dir \"$3\" --marker-file \"$4\" --result-file \"$5\"{upgrade_argument}\n"),
-        )
-        .map_err(|error| format!("無法準備終端安裝程序：{error}"))?;
+        let launch_contents = format!(
+            "#!/bin/bash\nset -euo pipefail\nif [ -L \"$1\" ] || [ -L \"$2\" ]; then\n  printf 'Refusing symlinked installer or log target.\\n' >&2\n  exit 1\nfi\nexec > >(tee -a \"$2\") 2>&1\nexec /bin/bash \"$1\" --gui --engine-dir \"$3\" --marker-file \"$4\" --result-file \"$5\"{upgrade_argument}\n"
+        );
+        write_file_atomic_secure(&launch_script, launch_contents.as_bytes(), 0o700)
+            .map_err(|error| format!("無法準備終端安裝程序：{error}"))?;
+        let _cleanup_launch_script = LaunchScriptCleanup(&launch_script);
+
         let command_line = [
             Path::new("/bin/bash"),
             launch_script.as_path(),
@@ -667,15 +701,12 @@ fn install_dependencies(
         .map(|path| shell_quote(&path.to_string_lossy()))
         .collect::<Vec<_>>()
         .join(" ");
-        let applescript = format!(
-            "tell application \"Terminal\" to do script \"{}\"",
-            command_line.replace('\\', "\\\\").replace('"', "\\\"")
-        );
+        let osascript_args = macos_terminal_osascript_args(&command_line)?;
         let output = run_with_timeout_in_path(
             Path::new("/usr/bin/osascript"),
-            &["-e".into(), applescript],
+            &osascript_args,
             Duration::from_secs(30),
-            Some(installer_path(engine_dir).as_os_str()),
+            None,
         );
         match output {
             Ok(output) if output.status.success() => {}
@@ -711,9 +742,16 @@ fn install_dependencies(
         } else {
             "install.sh"
         });
-        let log = OpenOptions::new()
-            .create(true)
-            .append(true)
+        reject_symlink_path(&log_path)
+            .map_err(|error| format!("安裝記錄檔案路徑不安全：{error}"))?;
+        let mut log_options = OpenOptions::new();
+        log_options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            log_options.mode(0o600);
+        }
+        let log = log_options
             .open(&log_path)
             .map_err(|error| format!("無法建立安裝記錄：{error}"))?;
         let mut command = installer_command(
@@ -724,7 +762,6 @@ fn install_dependencies(
             force_upgrade,
         );
         command
-            .env("PATH", installer_path(engine_dir))
             .stdin(Stdio::null())
             .stdout(Stdio::from(
                 log.try_clone()
@@ -768,7 +805,7 @@ pub(crate) fn installer_command(
     result: &Path,
     force_upgrade: bool,
 ) -> Command {
-    let mut command = background_command("powershell.exe");
+    let mut command = background_command(windows_powershell_executable());
     command.args([
         "-NoProfile",
         "-NonInteractive",
@@ -976,7 +1013,7 @@ pub(crate) fn wait_for_install(
 /// # 回傳值
 /// 檔案不存在回傳 `Ok(None)`；有效進度回傳 `Ok(Some(InstallProgress))`；格式或讀取異常回傳錯誤字串。
 fn read_install_progress(path: &Path) -> Result<Option<InstallProgress>, String> {
-    match fs::read(path) {
+    match read_bounded_regular_file(path, MAX_INSTALL_METADATA_BYTES) {
         Ok(contents) => {
             let progress: InstallProgress = serde_json::from_slice(&contents)
                 .map_err(|error| format!("安裝階段記錄格式無效：{error}"))?;
@@ -995,14 +1032,19 @@ fn read_install_progress(path: &Path) -> Result<Option<InstallProgress>, String>
 /// # 回傳值
 /// 檔案不存在回傳 `Ok(None)`；有效非零 PID 回傳 `Ok(Some(u32))`；內容無效或讀取失敗回傳錯誤字串。
 fn read_install_marker(path: &Path) -> Result<Option<u32>, String> {
-    match fs::read_to_string(path) {
-        Ok(value) => value
-            .trim()
-            .parse::<u32>()
-            .ok()
-            .filter(|pid| *pid != 0)
-            .map(Some)
-            .ok_or_else(|| "安裝程序 PID 記錄格式無效；為避免啟動重複安裝，請檢查記錄。".into()),
+    match read_bounded_regular_file(path, MAX_INSTALL_METADATA_BYTES) {
+        Ok(bytes) => {
+            let value = String::from_utf8(bytes).map_err(|_| {
+                "安裝程序 PID 記錄格式無效；為避免啟動重複安裝，請檢查記錄。".to_owned()
+            })?;
+            value
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|pid| *pid != 0)
+                .map(Some)
+                .ok_or_else(|| "安裝程序 PID 記錄格式無效；為避免啟動重複安裝，請檢查記錄。".into())
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("無法讀取安裝程序 PID 記錄：{error}")),
     }
@@ -1016,7 +1058,7 @@ fn read_install_marker(path: &Path) -> Result<Option<u32>, String> {
 /// # 回傳值
 /// 檔案不存在回傳 `Ok(None)`；有效結果回傳 `Ok(Some(InstallResult))`；格式或 PID 無效回傳錯誤字串。
 fn read_install_result(path: &Path) -> Result<Option<InstallResult>, String> {
-    match fs::read(path) {
+    match read_bounded_regular_file(path, MAX_INSTALL_METADATA_BYTES) {
         Ok(contents) => {
             let result: InstallResult = serde_json::from_slice(&contents)
                 .map_err(|error| format!("安裝程序完成記錄格式無效：{error}"))?;
@@ -1038,7 +1080,7 @@ fn read_install_result(path: &Path) -> Result<Option<InstallResult>, String> {
 /// # 回傳值
 /// 檔案不存在回傳 `Ok(None)`；讀取或反序列化成功回傳 `Ok(Some(LaunchRecord))`；失敗回傳錯誤字串。
 fn read_launch_record(path: &Path) -> Result<Option<LaunchRecord>, String> {
-    match fs::read(path) {
+    match read_bounded_regular_file(path, MAX_INSTALL_METADATA_BYTES) {
         Ok(contents) => serde_json::from_slice(&contents)
             .map(Some)
             .map_err(|error| format!("安裝程序啟動記錄格式無效：{error}")),
@@ -1062,7 +1104,7 @@ enum ProcessPresence {
 ///
 /// # 參數
 /// - `pid`: 欲探測的作業系統行程識別碼。
-/// - `_engine_dir`: 投影工具目錄（Windows 上用於組裝 `tasklist.exe` 查詢環境 PATH）。
+/// - `_engine_dir`: 保留參數（Windows 改用系統 `System32` 絕對路徑呼叫 `tasklist.exe`）。
 ///
 /// # 回傳值
 /// 回傳 `ProcessPresence::Alive`、`Dead` 或 `Unknown`。
@@ -1094,7 +1136,7 @@ fn process_presence(pid: u32, _engine_dir: &Path) -> ProcessPresence {
     #[cfg(target_os = "windows")]
     {
         let output = run_with_timeout_in_path(
-            Path::new("tasklist.exe"),
+            &windows_tasklist_executable(),
             &[
                 "/FI".into(),
                 format!("PID eq {pid}"),
@@ -1103,7 +1145,7 @@ fn process_presence(pid: u32, _engine_dir: &Path) -> ProcessPresence {
                 "/NH".into(),
             ],
             PROCESS_PROBE_TIMEOUT,
-            Some(installer_path(_engine_dir).as_os_str()),
+            None,
         );
         match output {
             Ok(output) if output.status.success() && tasklist_contains_pid(&output, pid) => {
@@ -1113,6 +1155,45 @@ fn process_presence(pid: u32, _engine_dir: &Path) -> ProcessPresence {
             Ok(_) | Err(_) => ProcessPresence::Unknown,
         }
     }
+}
+
+/// 解析 Windows `SystemRoot` 環境變數以取得受保護的 `System32` 目錄路徑，忽略相對或 UNC 路徑。
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn windows_system32_dir_from(system_root: Option<&OsStr>) -> PathBuf {
+    let valid_root = system_root
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.to_str())
+        .filter(|text| {
+            !text.starts_with(r"\\")
+                && !text.starts_with("//")
+                && (text.starts_with('/')
+                    || (text.len() >= 3
+                        && text.as_bytes()[0].is_ascii_alphabetic()
+                        && text.as_bytes()[1] == b':'
+                        && matches!(text.as_bytes()[2], b'\\' | b'/')))
+        })
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    valid_root.join("System32")
+}
+
+/// 依 `SystemRoot` 組裝內建 Windows PowerShell 5.1 的絕對執行路徑，防止 PATH 劫持。
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn windows_powershell_executable_from(system_root: Option<&OsStr>) -> PathBuf {
+    windows_system32_dir_from(system_root)
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe")
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn windows_powershell_executable() -> PathBuf {
+    windows_powershell_executable_from(std::env::var_os("SystemRoot").as_deref())
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn windows_tasklist_executable() -> PathBuf {
+    windows_system32_dir_from(std::env::var_os("SystemRoot").as_deref()).join("tasklist.exe")
 }
 
 /// 解析 Windows `tasklist.exe /FO CSV /NH` 輸出，判斷目標 PID 是否仍在執行清單中。
@@ -1144,7 +1225,7 @@ fn launch_is_recent(record: &LaunchRecord) -> bool {
     unix_time_seconds().saturating_sub(record.started_at) < LAUNCH_GRACE.as_secs()
 }
 
-/// 以暫存檔寫入並更名的方式原子性將資料序列化為 JSON 檔案。
+/// 以唯一暫存檔與原子更名方式將資料序列化為 JSON 檔案，並拒絕覆寫符號連結。
 ///
 /// # 參數
 /// - `path`: 目標 JSON 檔案路徑。
@@ -1154,12 +1235,7 @@ fn launch_is_recent(record: &LaunchRecord) -> bool {
 /// 成功回傳 `Ok(())`；序列化、寫入或更名失敗時回傳錯誤字串。
 pub(crate) fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<(), String> {
     let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
-    let temporary_path = path.with_extension(format!("tmp-{}", std::process::id()));
-    fs::write(&temporary_path, bytes).map_err(|error| error.to_string())?;
-    fs::rename(&temporary_path, path).map_err(|error| {
-        let _ = fs::remove_file(&temporary_path);
-        error.to_string()
-    })
+    write_file_atomic_secure(path, &bytes, 0o600).map_err(|error| error.to_string())
 }
 
 /// 若目標檔案存在則盡力移除，忽略不存在或其他刪除錯誤（用於清理非關鍵標記檔）。
@@ -1190,15 +1266,24 @@ pub(crate) fn clear_app_tools(
     clear_gstreamer_registry(gstreamer_registry_path)
 }
 
-/// 移除指定的 GStreamer registry 快取檔案（若路徑非空）。
+/// 移除指定的 GStreamer registry 快取檔案（若路徑非空），並拒絕符號連結路徑與父目錄。
 ///
 /// # 參數
 /// - `path`: GStreamer registry 快取檔案路徑。
 ///
 /// # 回傳值
-/// 成功移除或檔案本不存在回傳 `Ok(())`；刪除失敗回傳錯誤字串。
+/// 成功移除或檔案本不存在回傳 `Ok(())`；遇到符號連結或刪除失敗回傳錯誤字串。
 pub(crate) fn clear_gstreamer_registry(path: &Path) -> Result<(), String> {
     if !path.as_os_str().is_empty() {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            reject_symlink_path(parent)
+                .map_err(|_| "GStreamer 快取目錄不是安全的資料夾，未移除任何檔案。".to_owned())?;
+        }
+        reject_symlink_path(path)
+            .map_err(|_| "GStreamer 快取檔案不可為符號連結，未移除任何檔案。".to_owned())?;
         remove_file_if_exists(path)?;
     }
     Ok(())
@@ -1212,12 +1297,8 @@ pub(crate) fn clear_gstreamer_registry(path: &Path) -> Result<(), String> {
 /// # 回傳值
 /// 清理成功回傳 `Ok(())`；目錄無效或遭遇系統權限錯誤回傳錯誤字串。
 fn clear_engine_directory(path: &Path) -> Result<(), String> {
-    fs::create_dir_all(path).map_err(|error| format!("無法建立工具目錄：{error}"))?;
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| format!("無法檢查工具目錄：{error}"))?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err("工具目錄不是安全的資料夾，未移除任何工具。".into());
-    }
+    ensure_safe_directory(path, false)
+        .map_err(|_| "工具目錄不是安全的資料夾，未移除任何工具。".to_owned())?;
 
     for entry in fs::read_dir(path).map_err(|error| format!("無法讀取工具目錄：{error}"))?
     {
@@ -1257,13 +1338,74 @@ fn remove_file_if_exists(path: &Path) -> Result<(), String> {
     }
 }
 
-/// 將單行診斷或腳本輸出附加寫入安裝日誌檔尾端。
+/// 安全讀取安裝日誌檔案（最多僅回傳尾端 `max_bytes`），拒絕符號連結或非一般檔案。
+fn read_log_tail(path: &Path, max_bytes: usize) -> Result<String, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err("尚無安裝記錄。".to_owned());
+        }
+        Err(error) => return Err(format!("無法讀取安裝記錄：{error}")),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("安裝記錄檔案路徑不安全。".to_owned());
+    }
+    if metadata.len() <= max_bytes as u64 {
+        let bytes = fs::read(path).map_err(|error| format!("無法讀取安裝記錄：{error}"))?;
+        return Ok(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    let mut file = fs::File::open(path).map_err(|error| format!("無法讀取安裝記錄：{error}"))?;
+    file.seek(SeekFrom::End(-(max_bytes as i64)))
+        .map_err(|error| format!("無法讀取安裝記錄：{error}"))?;
+    let mut bytes = Vec::with_capacity(max_bytes);
+    file.take(max_bytes as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("無法讀取安裝記錄：{error}"))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let aligned = match text.find('\n') {
+        Some(index) => &text[index + 1..],
+        None => text.as_ref(),
+    };
+    Ok(format!(
+        "[已省略較早記錄，僅顯示最後 1 MiB 內容]\n{aligned}"
+    ))
+}
+
+/// 在啟動新一輪安裝前，若既有 `install.log` 超過大小上限，原子保留最後 1 MiB 內容以防止磁碟無限制膨脹。
+fn rotate_install_log_if_oversized(path: &Path) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("無法檢查安裝記錄：{error}")),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("安裝記錄檔案路徑不安全。".to_owned());
+    }
+    if metadata.len() <= MAX_INSTALL_LOG_FILE_BYTES {
+        return Ok(());
+    }
+    let tail = read_log_tail(path, MAX_INSTALL_LOG_READ_BYTES)?;
+    write_file_atomic_secure(path, tail.as_bytes(), 0o600)
+        .map_err(|error| format!("無法修剪過大的安裝記錄：{error}"))
+}
+
+/// 將單行診斷或腳本輸出附加寫入安裝日誌檔尾端，並拒絕追蹤符號連結。
 ///
 /// # 參數
 /// - `path`: 安裝日誌檔案（`install.log`）路徑。
 /// - `message`: 欲附加的文字內容。
 fn append_log(path: &Path, message: &str) {
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+    if reject_symlink_path(path).is_err() {
+        return;
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    if let Ok(mut file) = options.open(path) {
         let _ = writeln!(file, "{message}");
     }
 }
@@ -1310,6 +1452,37 @@ fn unix_time_seconds() -> u64 {
         .as_secs()
 }
 
+/// 驗證傳遞給 macOS 終端機安裝器的路徑不含控制字元（NUL、LF、CR）。
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn validate_terminal_path(path: &Path) -> Result<(), String> {
+    let text = path.to_string_lossy();
+    if text.chars().any(|ch| matches!(ch, '\0' | '\n' | '\r')) {
+        return Err("終端機安裝路徑包含不安全的控制字元。".into());
+    }
+    Ok(())
+}
+
+/// 建構使用 `on run argv` 安全傳遞參數給 Terminal.app 的 `osascript` 命令列參數。
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn macos_terminal_osascript_args(command_line: &str) -> Result<Vec<String>, String> {
+    if command_line
+        .chars()
+        .any(|ch| matches!(ch, '\0' | '\n' | '\r'))
+    {
+        return Err("終端機安裝命令包含不安全的控制字元。".into());
+    }
+    Ok(vec![
+        "-e".into(),
+        "on run argv".into(),
+        "-e".into(),
+        "tell application \"Terminal\" to do script (item 1 of argv)".into(),
+        "-e".into(),
+        "end run".into(),
+        "--".into(),
+        command_line.to_owned(),
+    ])
+}
+
 /// 在 macOS 下為 shell 命令參數加上單引號跳脫保護，防止空白或特殊字元被 Shell 誤解析。
 ///
 /// # 參數
@@ -1317,7 +1490,7 @@ fn unix_time_seconds() -> u64 {
 ///
 /// # 回傳值
 /// 回傳經過單引號跳脫包覆的安全字串。
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }

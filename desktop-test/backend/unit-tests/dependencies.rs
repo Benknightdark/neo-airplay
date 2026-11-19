@@ -348,11 +348,176 @@ fn tasklist_pid_matching_does_not_accept_prefixes() {
 }
 
 /// 驗證 macOS 終端指令參數跳脫函式會正確保護空白與反引號／命令替換字元。
-#[cfg(target_os = "macos")]
 #[test]
 fn terminal_paths_are_shell_quoted() {
     assert_eq!(
         shell_quote("/tmp/a b/'$(touch injected)'"),
         "'/tmp/a b/'\\''$(touch injected)'\\'''"
     );
+}
+
+/// 驗證 macOS `osascript` 會透過 `on run argv` 傳遞命令列並拒絕換行與 NUL 控制字元。
+#[test]
+fn macos_terminal_osascript_uses_argv_and_rejects_control_characters() {
+    let args = macos_terminal_osascript_args("/bin/bash '/tmp/safe path/launch.sh'").unwrap();
+    assert_eq!(args[0], "-e");
+    assert_eq!(args[1], "on run argv");
+    assert_eq!(
+        args[3],
+        "tell application \"Terminal\" to do script (item 1 of argv)"
+    );
+    assert_eq!(args[6], "--");
+    assert_eq!(args[7], "/bin/bash '/tmp/safe path/launch.sh'");
+
+    assert!(macos_terminal_osascript_args("echo hi\nrm -rf /").is_err());
+    assert!(macos_terminal_osascript_args("echo hi\rwhoami").is_err());
+    assert!(macos_terminal_osascript_args("echo hi\0bad").is_err());
+    assert!(validate_terminal_path(Path::new("/tmp/bad\npath")).is_err());
+    assert!(validate_terminal_path(Path::new("/tmp/good path")).is_ok());
+}
+
+/// 驗證 Windows PowerShell 系統路徑解析會採用 `SystemRoot\System32` 並忽略 UNC 或相對路徑。
+#[test]
+fn windows_powershell_path_ignores_unc_and_relative_system_roots() {
+    let default_path = windows_powershell_executable_from(None);
+    assert!(default_path.to_string_lossy().contains("WindowsPowerShell"));
+    assert!(default_path.to_string_lossy().ends_with("powershell.exe"));
+
+    let custom_path = windows_powershell_executable_from(Some(OsStr::new(r"D:\Windows")));
+    assert!(custom_path.to_string_lossy().starts_with(r"D:\Windows"));
+
+    let unc_fallback = windows_powershell_executable_from(Some(OsStr::new(r"\\attacker\share")));
+    assert!(unc_fallback.to_string_lossy().starts_with(r"C:\Windows"));
+
+    let rel_fallback = windows_powershell_executable_from(Some(OsStr::new("Windows")));
+    assert!(rel_fallback.to_string_lossy().starts_with(r"C:\Windows"));
+}
+
+/// 驗證 `read_install_log` 會保留正常大小日誌並截斷超過 1 MiB 的超大日誌。
+#[test]
+fn read_install_log_caps_oversized_logs_to_tail() {
+    let config_dir = install_log_test_directory();
+    let setup_dir = config_dir.join("setup");
+    fs::create_dir_all(&setup_dir).unwrap();
+    let line = "0123456789abcdef0123456789abcdef\n";
+    let repeated = line.repeat(40_000);
+    assert!(repeated.len() > MAX_INSTALL_LOG_READ_BYTES);
+    fs::write(setup_dir.join(INSTALL_LOG), &repeated).unwrap();
+    let manager = DependencyManager::new(
+        PathBuf::from("unused"),
+        PathBuf::from("unused-cache"),
+        &config_dir,
+        true,
+    );
+
+    let read_back = manager.read_install_log().unwrap();
+    assert!(read_back.starts_with("[已省略較早記錄，僅顯示最後 1 MiB 內容]\n"));
+    assert!(read_back.len() <= MAX_INSTALL_LOG_READ_BYTES + 128);
+    assert!(read_back.ends_with(line));
+    fs::remove_dir_all(config_dir).unwrap();
+}
+
+/// 驗證 `stage_installer` 在 Unix 會套用 `0700` 目錄／腳本權限且拒絕符號連結路徑與目標。
+#[cfg(unix)]
+#[test]
+fn stage_installer_enforces_permissions_and_rejects_symlinks() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let root = install_log_test_directory();
+    let setup_dir = root.join("setup");
+    let staged = stage_installer(&setup_dir).unwrap();
+    let dir_mode = fs::symlink_metadata(&setup_dir)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    let file_mode = fs::symlink_metadata(&staged).unwrap().permissions().mode() & 0o777;
+    assert_eq!(dir_mode, 0o700);
+    assert_eq!(file_mode, 0o700);
+
+    let outside_target = root.join("outside.txt");
+    fs::write(&outside_target, b"original").unwrap();
+    fs::remove_file(&staged).unwrap();
+    symlink(&outside_target, &staged).unwrap();
+    assert!(stage_installer(&setup_dir).is_err());
+    assert_eq!(fs::read(&outside_target).unwrap(), b"original");
+
+    let symlink_setup = root.join("symlink-setup");
+    symlink(&setup_dir, &symlink_setup).unwrap();
+    assert!(stage_installer(&symlink_setup).is_err());
+
+    let symlink_log = setup_dir.join(INSTALL_LOG);
+    symlink(&outside_target, &symlink_log).unwrap();
+    let manager = DependencyManager::new(
+        PathBuf::from("unused"),
+        PathBuf::from("unused-cache"),
+        &root,
+        true,
+    );
+    assert!(manager.read_install_log().is_err());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// 驗證 `clear_engine_directory` 拒絕懸空符號連結且 `clear_gstreamer_registry` 拒絕符號連結快取路徑。
+#[cfg(unix)]
+#[test]
+fn cleanup_rejects_dangling_and_symlinked_paths() {
+    use std::os::unix::fs::symlink;
+
+    let root = install_log_test_directory();
+    fs::create_dir_all(&root).unwrap();
+    let dangling_engine = root.join("dangling-engine");
+    symlink(root.join("missing-target"), &dangling_engine).unwrap();
+    assert!(clear_engine_directory(&dangling_engine).is_err());
+
+    let real_cache_dir = root.join("cache");
+    fs::create_dir_all(&real_cache_dir).unwrap();
+    let target_file = root.join("outside-keep.txt");
+    fs::write(&target_file, b"keep").unwrap();
+    let symlink_registry = real_cache_dir.join("registry.bin");
+    symlink(&target_file, &symlink_registry).unwrap();
+    assert!(clear_gstreamer_registry(&symlink_registry).is_err());
+    assert_eq!(fs::read(&target_file).unwrap(), b"keep");
+
+    let symlink_cache_dir = root.join("symlink-cache");
+    symlink(&real_cache_dir, &symlink_cache_dir).unwrap();
+    assert!(clear_gstreamer_registry(&symlink_cache_dir.join("registry.bin")).is_err());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// 驗證 `seed_bundled_engine_in_dir` 會安全複製常規檔案、略過來源符號連結並拒絕目的地符號連結。
+#[cfg(unix)]
+#[test]
+fn seed_bundled_engine_ignores_source_symlinks_and_rejects_destination_symlinks() {
+    use crate::infrastructure::process::seed_bundled_engine_in_dir;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let root = install_log_test_directory();
+    let bundled = root.join("bundled");
+    let engine = root.join("engine");
+    let outside = root.join("outside-secret");
+    fs::create_dir_all(bundled.join("bin")).unwrap();
+    fs::write(&outside, b"secret").unwrap();
+    fs::write(bundled.join("bin/uxplay"), b"binary").unwrap();
+    fs::set_permissions(
+        bundled.join("bin/uxplay"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    symlink(&outside, bundled.join("bin/smuggled")).unwrap();
+
+    seed_bundled_engine_in_dir(&bundled, &engine, "0.2.5").unwrap();
+    assert!(engine.join("bin/uxplay").is_file());
+    assert!(!engine.join("bin/smuggled").exists());
+    assert!(engine.join(".bundled-0.2.5").is_file());
+
+    let tampered_engine = root.join("tampered-engine");
+    fs::create_dir_all(tampered_engine.join("bin")).unwrap();
+    symlink(&outside, tampered_engine.join("bin/uxplay")).unwrap();
+    assert!(seed_bundled_engine_in_dir(&bundled, &tampered_engine, "0.2.5").is_err());
+    assert_eq!(fs::read(&outside).unwrap(), b"secret");
+
+    fs::remove_dir_all(root).unwrap();
 }

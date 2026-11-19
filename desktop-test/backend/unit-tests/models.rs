@@ -87,3 +87,21 @@ fn domain_parsers_and_stage_labels_work_without_io() {
         "Neo AirPlay"
     ));
 }
+
+/// 驗證 `AppLogEntry` 序列化為標準 RFC 3339（`Z`）格式，且可向下相容反序列化既有含時區偏移量的舊日誌。
+#[test]
+fn log_entry_timestamp_serializes_rfc3339_and_parses_legacy_offsets() {
+    let entry = AppLogEntry::new(LogLevel::Warning, "test event");
+    let serialized = serde_json::to_value(&entry).unwrap();
+    let timestamp_str = serialized["timestamp"].as_str().unwrap();
+    assert!(
+        timestamp_str.ends_with('Z'),
+        "預期序列化時間戳記應為 RFC 3339 UTC 格式：{timestamp_str}"
+    );
+
+    let legacy_json = r#"{"timestamp":"2026-11-13T12:00:00.123456+08:00","level":"information","message":"legacy"}"#;
+    let parsed: AppLogEntry = serde_json::from_str(legacy_json).unwrap();
+    assert_eq!(parsed.timestamp.to_string(), "2026-11-13T04:00:00.123456Z");
+    assert_eq!(parsed.level, LogLevel::Information);
+    assert_eq!(parsed.message, "legacy");
+}

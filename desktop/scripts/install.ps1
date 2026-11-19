@@ -5,6 +5,7 @@ param(
     [switch]$Upgrade,
     [switch]$Gui,
     [switch]$Elevated,
+    [switch]$ElevatedPrerequisitesOnly,
     [string]$EngineDirectory = $env:NEO_AIRPLAY_ENGINE_DIR,
     [string]$MarkerFile,
     [string]$ResultFile,
@@ -18,6 +19,42 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
+
+function Enable-TlsSecurity {
+    $protocols = [Net.SecurityProtocolType]::Tls12
+    if ([Enum]::IsDefined([Net.SecurityProtocolType], 'Tls13')) {
+        $protocols = $protocols -bor [Net.SecurityProtocolType]::Tls13
+    }
+    [Net.ServicePointManager]::SecurityProtocol = $protocols
+}
+
+function Test-ValidUserSid([string]$Sid) {
+    return (-not [string]::IsNullOrWhiteSpace($Sid) -and $Sid -match '^S-1-\d+(-\d+)+$')
+}
+
+function Test-LocalSafePath([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    if ($Path.StartsWith('\\') -or $Path.StartsWith('//')) { return $false }
+    return [IO.Path]::IsPathRooted($Path)
+}
+
+function Assert-NotReparsePoint([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -ne $item -and (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+        throw "Setup failed: Refusing reparse point / symbolic link path: $Path"
+    }
+}
+
+function Get-SystemPowerShellPath {
+    $systemRoot = if ($env:SystemRoot -and (Test-LocalSafePath $env:SystemRoot)) { $env:SystemRoot } else { 'C:\Windows' }
+    return [IO.Path]::Combine($systemRoot, 'System32\WindowsPowerShell\v1.0\powershell.exe')
+}
+
+Enable-TlsSecurity
+if ($OriginalUserSid -and -not (Test-ValidUserSid $OriginalUserSid)) {
+    throw "Setup failed: Invalid Windows user SID: $OriginalUserSid"
+}
 
 $UxPlayVersion = '1.74'
 $UxPlayCommit = 'f524d8aa28028ad5572ae1b462d119e4cec1f9f4'
@@ -73,11 +110,16 @@ function Stop-Setup([string]$Message, [string]$Summary = '') {
 }
 
 function Write-InstallJson([string]$Path, [hashtable]$Value) {
+    Assert-NotReparsePoint $Path
     $directory = Split-Path -Parent $Path
-    if ($directory) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
-    $temporary = "$Path.tmp.$PID"
+    if ($directory) {
+        Assert-NotReparsePoint $directory
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+    $temporary = "$Path.tmp.$([Guid]::NewGuid().ToString('N'))"
     try {
         [IO.File]::WriteAllText($temporary, ($Value | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+        Assert-NotReparsePoint $Path
         if (Test-Path -LiteralPath $Path -PathType Leaf) {
             [IO.File]::Replace($temporary, $Path, [NullString]::Value)
         } else {
@@ -85,6 +127,146 @@ function Write-InstallJson([string]$Path, [hashtable]$Value) {
         }
     } finally {
         if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+    }
+}
+
+function Assert-MicrosoftSignedFile([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Stop-Setup "Cannot verify signature of missing file: $Path"
+    }
+    Assert-NotReparsePoint $Path
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($null -eq $signature -or $signature.Status -ne [Management.Automation.SignatureStatus]::Valid) {
+        $status = if ($signature) { $signature.Status } else { 'Missing' }
+        Stop-Setup "Authenticode signature validation failed for ${Path}: $status"
+    }
+    $subject = if ($signature.SignerCertificate) { [string]$signature.SignerCertificate.Subject } else { '' }
+    if ($subject -notmatch 'CN=Microsoft (Corporation|Windows)') {
+        Stop-Setup "Unexpected Authenticode signer for ${Path}: $subject"
+    }
+}
+
+function Invoke-HttpsDownloadStream([string]$Uri, [string]$Destination, [string]$Label) {
+    $currentUri = [Uri]$Uri
+    for ($hop = 0; $hop -le 5; $hop++) {
+        if ($currentUri.Scheme -ne 'https') {
+            Stop-Setup "Refusing non-HTTPS URL for ${Label}: $currentUri"
+        }
+        $request = [Net.HttpWebRequest]::CreateHttp($currentUri)
+        $request.AllowAutoRedirect = $false
+        $request.Timeout = 30000
+        $request.ReadWriteTimeout = 600000
+        $request.UserAgent = 'NeoAirPlay-Setup/1.0'
+        $response = [Net.HttpWebResponse]$request.GetResponse()
+        try {
+            $statusCode = [int]$response.StatusCode
+            if ($statusCode -in @(301, 302, 303, 307, 308)) {
+                $location = $response.Headers['Location']
+                if ([string]::IsNullOrWhiteSpace($location)) {
+                    Stop-Setup "Redirect response missing Location header while downloading $Label."
+                }
+                $nextUri = [Uri]::new($currentUri, $location)
+                if ($nextUri.Scheme -ne 'https') {
+                    Stop-Setup "Refusing non-HTTPS redirect target for ${Label}: $nextUri"
+                }
+                $currentUri = $nextUri
+                continue
+            }
+            if ($statusCode -lt 200 -or $statusCode -ge 300) {
+                Stop-Setup "Download failed for $Label with HTTP status $statusCode."
+            }
+            $responseStream = $response.GetResponseStream()
+            try {
+                $fileStream = [IO.File]::Open($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                try {
+                    $responseStream.CopyTo($fileStream)
+                } finally {
+                    $fileStream.Dispose()
+                }
+            } finally {
+                $responseStream.Dispose()
+            }
+            return
+        } finally {
+            $response.Dispose()
+        }
+    }
+    Stop-Setup "Too many redirects while downloading $Label."
+}
+
+function Invoke-VerifiedDownload([string]$Uri, [string]$Destination, [string]$ExpectedSha256, [string]$Label) {
+    $parsedUri = $null
+    if (-not [Uri]::TryCreate($Uri, [UriKind]::Absolute, [ref]$parsedUri) -or $parsedUri.Scheme -ne 'https') {
+        Stop-Setup "Refusing non-HTTPS download URL for ${Label}: $Uri"
+    }
+    if ($ExpectedSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        Stop-Setup "Invalid SHA-256 checksum configured for $Label."
+    }
+    Enable-TlsSecurity
+    Assert-NotReparsePoint $Destination
+    $parent = Split-Path -Parent $Destination
+    if ($parent) {
+        Assert-NotReparsePoint $parent
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    $temporary = "$Destination.download.$([Guid]::NewGuid().ToString('N'))"
+    try {
+        Invoke-HttpsDownloadStream $Uri $temporary $Label
+        $actualHash = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualHash -ne $ExpectedSha256.ToLowerInvariant()) {
+            Stop-Setup "$Label SHA-256 verification failed."
+        }
+        Assert-NotReparsePoint $Destination
+        if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+            [IO.File]::Replace($temporary, $Destination, [NullString]::Value)
+        } else {
+            [IO.File]::Move($temporary, $Destination)
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Expand-ZipArchiveSafely([string]$ArchivePath, [string]$DestinationDirectory) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    Assert-NotReparsePoint $ArchivePath
+    Assert-NotReparsePoint $DestinationDirectory
+    $resolvedDestination = [IO.Path]::GetFullPath($DestinationDirectory)
+    if (-not $resolvedDestination.EndsWith([IO.Path]::DirectorySeparatorChar)) {
+        $resolvedDestination += [IO.Path]::DirectorySeparatorChar
+    }
+    New-Item -ItemType Directory -Path $resolvedDestination -Force | Out-Null
+    $comparison = if ($env:OS -eq 'Windows_NT') { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    $archive = [IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    try {
+        foreach ($entry in $archive.Entries) {
+            if ([string]::IsNullOrEmpty($entry.FullName)) { continue }
+            $relativePath = $entry.FullName -replace '/', [IO.Path]::DirectorySeparatorChar
+            $targetPath = [IO.Path]::GetFullPath((Join-Path $resolvedDestination $relativePath))
+            if (-not $targetPath.StartsWith($resolvedDestination, $comparison)) {
+                Stop-Setup "Archive entry escapes destination directory: $($entry.FullName)"
+            }
+            if ($entry.FullName.EndsWith('/') -or $entry.FullName.EndsWith('\')) {
+                New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
+                Assert-NotReparsePoint $targetPath
+                continue
+            }
+            $parent = Split-Path -Parent $targetPath
+            if ($parent) {
+                New-Item -ItemType Directory -Path $parent -Force | Out-Null
+                Assert-NotReparsePoint $parent
+            }
+            Assert-NotReparsePoint $targetPath
+            $inStream = $entry.Open()
+            try {
+                $outStream = [IO.File]::Open($targetPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+                try { $inStream.CopyTo($outStream) } finally { $outStream.Dispose() }
+            } finally {
+                $inStream.Dispose()
+            }
+        }
+    } finally {
+        $archive.Dispose()
     }
 }
 
@@ -155,28 +337,31 @@ function Test-Administrator {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Test-ElevatedPrerequisitesMode {
+    $variable = Get-Variable -Name ElevatedPrerequisitesOnly -ValueOnly -ErrorAction SilentlyContinue
+    return ([bool]$variable)
+}
+
 function Invoke-ElevatedInstaller {
-    if ($Check -or $Elevated -or (Test-Administrator)) {
+    if ($Check -or $Elevated -or (Test-ElevatedPrerequisitesMode) -or (Test-Administrator)) {
         return $null
+    }
+    if ($Development -and -not (Test-ValidUserSid $script:SetupUserSid)) {
+        Stop-Setup "Refusing elevated setup with invalid user SID: $($script:SetupUserSid)"
     }
 
     Set-InstallStage 'authorizing' '請完成系統授權提示，以便繼續準備工具。'
-    $powershell = (Get-Process -Id $PID).Path
+    $powershell = Get-SystemPowerShellPath
     $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass')
     if ($Gui) { $arguments += '-NonInteractive' }
-    $arguments += @('-File', $PSCommandPath)
+    $arguments += @('-File', $PSCommandPath, '-ElevatedPrerequisitesOnly')
     if ($Development) { $arguments += '-Development' }
-    if ($Upgrade) { $arguments += '-Upgrade' }
     if ($Gui) { $arguments += '-Gui' }
-    $arguments += @('-EngineDirectory', $script:EngineDirectory)
-    if ($MarkerFile) { $arguments += @('-MarkerFile', $MarkerFile) }
-    if ($ResultFile) { $arguments += @('-ResultFile', $ResultFile) }
     if ($ProgressFile) { $arguments += @('-ProgressFile', $ProgressFile) }
     if ($LogFile) { $arguments += @('-LogFile', $LogFile) }
-    $arguments += @('-OriginalUserProfile', $script:SetupUserProfile)
-    $arguments += @('-OriginalLocalAppData', $script:SetupLocalAppData)
-    $arguments += @('-OriginalUserSid', $script:SetupUserSid)
-    $arguments += '-Elevated'
+    if (Test-ValidUserSid $script:SetupUserSid) {
+        $arguments += @('-OriginalUserSid', $script:SetupUserSid)
+    }
     $startOptions = @{
         FilePath = $powershell
         ArgumentList = (($arguments | ForEach-Object { ConvertTo-ProcessArgument $_ }) -join ' ')
@@ -202,6 +387,33 @@ function Invoke-ElevatedInstaller {
 }
 
 function Get-WinGetPath {
+    $isPrivileged = (Test-ElevatedPrerequisitesMode) -or (Test-Administrator)
+    $appInstaller = Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue
+    if ($appInstaller -and $appInstaller.InstallLocation) {
+        $packagedWinGet = Join-Path $appInstaller.InstallLocation 'winget.exe'
+        if (Test-Path -LiteralPath $packagedWinGet -PathType Leaf) {
+            if ($isPrivileged) { Assert-MicrosoftSignedFile $packagedWinGet }
+            return $packagedWinGet
+        }
+    }
+    if ($isPrivileged) {
+        $command = Get-Command winget.exe -ErrorAction SilentlyContinue
+        if ($command -and $command.Source) {
+            $programFilesRoots = @($env:ProgramFiles, [Environment]::GetEnvironmentVariable('ProgramFiles(x86)'), $env:SystemRoot) | Where-Object { $_ }
+            $inProtectedRoot = $false
+            foreach ($root in $programFilesRoots) {
+                if ($command.Source.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
+                    $inProtectedRoot = $true
+                    break
+                }
+            }
+            if ($inProtectedRoot) {
+                Assert-MicrosoftSignedFile $command.Source
+                return $command.Source
+            }
+        }
+        return $null
+    }
     $command = Get-Command winget.exe -ErrorAction SilentlyContinue
     if ($command) { return $command.Source }
     foreach ($localAppData in @($script:SetupLocalAppData, $env:LOCALAPPDATA)) {
@@ -224,10 +436,18 @@ function Ensure-WinGet {
         if ($winget) { return $winget }
     }
 
-    Write-Info 'Bootstrapping WinGet with the documented Microsoft PowerShell module.'
-    Install-PackageProvider -Name NuGet -Force -Confirm:$false | Out-Null
-    Install-Module -Name Microsoft.WinGet.Client -Force -Repository PSGallery -Confirm:$false
-    Import-Module Microsoft.WinGet.Client -Force
+    Write-Info 'Bootstrapping WinGet with the pinned and signed Microsoft PowerShell module.'
+    $winGetClientVersion = '1.29.380'
+    Install-PackageProvider -Name NuGet -MinimumVersion '2.8.5.201' -Force -Confirm:$false | Out-Null
+    Install-Module -Name Microsoft.WinGet.Client -RequiredVersion $winGetClientVersion -Force -Repository PSGallery -Confirm:$false
+    $module = Get-Module -ListAvailable -Name Microsoft.WinGet.Client | Where-Object { $_.Version -eq [Version]$winGetClientVersion } | Select-Object -First 1
+    if (-not $module) {
+        Stop-Setup "Pinned Microsoft.WinGet.Client $winGetClientVersion was not found after installation."
+    }
+    foreach ($moduleFile in (Get-ChildItem -LiteralPath $module.ModuleBase -Include '*.psd1', '*.psm1', '*.ps1', '*.dll' -Recurse -File)) {
+        Assert-MicrosoftSignedFile $moduleFile.FullName
+    }
+    Import-Module $module.Path -Force
     Repair-WinGetPackageManager -AllUsers -Force
     $winget = Get-WinGetPath
     if (-not $winget) { Stop-Setup 'WinGet bootstrap completed but winget.exe is not available. Install Microsoft App Installer and rerun setup.' }
@@ -250,7 +470,13 @@ function Invoke-WinGetInstall([string]$PackageId, [string]$Version = '', [string
 
 function Get-MsysRoot {
     $candidates = @()
-    if ($env:NEO_AIRPLAY_MSYS2_ROOT) { $candidates += $env:NEO_AIRPLAY_MSYS2_ROOT }
+    if ($env:NEO_AIRPLAY_MSYS2_ROOT) {
+        if (-not (Test-LocalSafePath $env:NEO_AIRPLAY_MSYS2_ROOT)) {
+            Stop-Setup "Refusing non-local or relative NEO_AIRPLAY_MSYS2_ROOT path: $($env:NEO_AIRPLAY_MSYS2_ROOT)"
+        }
+        Assert-NotReparsePoint $env:NEO_AIRPLAY_MSYS2_ROOT
+        $candidates += $env:NEO_AIRPLAY_MSYS2_ROOT
+    }
     if ($env:SystemDrive) { $candidates += (Join-Path $env:SystemDrive 'msys64') }
     $candidates += 'C:\msys64'
     foreach ($localAppData in @($script:SetupLocalAppData, $env:LOCALAPPDATA)) {
@@ -260,7 +486,10 @@ function Get-MsysRoot {
         }
     }
     foreach ($candidate in ($candidates | Select-Object -Unique)) {
-        if ($candidate -and (Test-Path -LiteralPath (Join-Path $candidate 'usr\bin\bash.exe') -PathType Leaf)) {
+        if (-not $candidate -or -not (Test-LocalSafePath $candidate)) { continue }
+        $item = Get-Item -LiteralPath $candidate -Force -ErrorAction SilentlyContinue
+        if ($null -ne $item -and (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { continue }
+        if (Test-Path -LiteralPath (Join-Path $candidate 'usr\bin\bash.exe') -PathType Leaf) {
             return (Get-Item -LiteralPath $candidate).FullName
         }
     }
@@ -460,9 +689,14 @@ function Get-EngineToolPath([string]$Name) {
     $names = @($Name)
     if (-not $Name.EndsWith('.exe', [StringComparison]::OrdinalIgnoreCase)) { $names += "$Name.exe" }
     foreach ($directory in @($script:EngineBin, (Join-Path $script:EngineAndroid 'platform-tools'), $script:EngineAndroid, $script:EngineDirectory)) {
+        $dirItem = Get-Item -LiteralPath $directory -Force -ErrorAction SilentlyContinue
+        if ($null -eq $dirItem -or (($dirItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { continue }
         foreach ($candidateName in $names) {
             $candidate = Join-Path $directory $candidateName
-            if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+            $item = Get-Item -LiteralPath $candidate -Force -ErrorAction SilentlyContinue
+            if ($null -ne $item -and -not $item.PSIsContainer -and (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0)) {
+                return $candidate
+            }
         }
     }
     return $null
@@ -480,56 +714,62 @@ function Test-Runtime {
     if (-not $tools.uxplay) { [void]$missing.Add('uxplay 1.73.7 or newer') }
     if (-not $tools.scrcpy) { [void]$missing.Add('scrcpy') }
     $scrcpyServer = Join-Path $script:EngineBin 'scrcpy-server'
-    if (-not (Test-Path -LiteralPath $scrcpyServer -PathType Leaf) -or (Get-Item -LiteralPath $scrcpyServer -ErrorAction SilentlyContinue).Length -le 0) {
+    $scrcpyServerItem = Get-Item -LiteralPath $scrcpyServer -Force -ErrorAction SilentlyContinue
+    if ($null -eq $scrcpyServerItem -or $scrcpyServerItem.PSIsContainer -or (($scrcpyServerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or $scrcpyServerItem.Length -le 0) {
         [void]$missing.Add('scrcpy server (scrcpy-server)')
     }
     if (-not $tools.adb) { [void]$missing.Add('adb') }
     if (-not $tools.gst) { [void]$missing.Add('GStreamer (gst-inspect-1.0)') }
 
-    $env:Path = (($script:EngineBin, (Join-Path $script:EngineAndroid 'platform-tools'), $env:Path) -join ';')
-    $pluginDirectory = Join-Path $script:EngineDirectory 'lib\gstreamer-1.0'
-    $env:GST_PLUGIN_PATH_1_0 = $pluginDirectory
-    $env:GST_PLUGIN_SYSTEM_PATH_1_0 = $pluginDirectory
-    $scanner = Join-Path $script:EngineBin 'gst-plugin-scanner.exe'
-    $env:GST_PLUGIN_SCANNER_1_0 = $scanner
+    $previousPath = $env:Path
+    try {
+        $env:Path = (($script:EngineBin, (Join-Path $script:EngineAndroid 'platform-tools'), $env:Path) -join ';')
+        $pluginDirectory = Join-Path $script:EngineDirectory 'lib\gstreamer-1.0'
+        $env:GST_PLUGIN_PATH_1_0 = $pluginDirectory
+        $env:GST_PLUGIN_SYSTEM_PATH_1_0 = $pluginDirectory
+        $scanner = Join-Path $script:EngineBin 'gst-plugin-scanner.exe'
+        $env:GST_PLUGIN_SCANNER_1_0 = $scanner
 
-    $probeSpecs = @(
-        @{ Path = $tools.scrcpy; Arguments = '--version'; Label = 'scrcpy' },
-        @{ Path = $tools.adb; Arguments = 'version'; Label = 'adb' }
-    )
-    foreach ($probeSpec in $probeSpecs) {
-        if (-not $probeSpec.Path) { continue }
-        $probe = Invoke-BoundedProbe $probeSpec.Path $probeSpec.Arguments
-        if ($probe.TimedOut -or $probe.ExitCode -ne 0 -or -not $probe.Output.Trim()) {
-            [void]$missing.Add("$($probeSpec.Label) (unusable or version probe timed out)")
-        }
-    }
-
-    if ($tools.uxplay) {
-        $uxplayProbe = Invoke-BoundedProbe $tools.uxplay '-v'
-        $versionMatch = [regex]::Match($uxplayProbe.Output, '(?im)UxPlay version\s+([0-9]+(?:\.[0-9]+)+)')
-        $minimumUxPlay = [Version]'1.73.7'
-        $uxplayVersion = $null
-        if ($versionMatch.Success) { $uxplayVersion = [Version]$versionMatch.Groups[1].Value }
-        if ($uxplayProbe.TimedOut) {
-            [void]$missing.Add('UxPlay version probe (timed out)')
-        } elseif (-not $uxplayVersion -or $uxplayVersion -lt $minimumUxPlay) {
-            [void]$missing.Add("UxPlay $minimumUxPlay or newer")
-        }
-    }
-    if ($tools.gst) {
-        foreach ($element in @('decodebin', 'h264parse', 'videoconvert', 'autovideosink', 'autoaudiosink', 'avdec_aac')) {
-            try {
-                $probe = Invoke-BoundedProbe $tools.gst $element 30000
-                if ($probe.TimedOut) {
-                    [void]$missing.Add("GStreamer element $element (probe timed out)")
-                } elseif ($probe.ExitCode -ne 0) {
-                    [void]$missing.Add("GStreamer element $element")
-                }
-            } catch {
-                [void]$missing.Add("GStreamer element $element (probe failed)")
+        $probeSpecs = @(
+            @{ Path = $tools.scrcpy; Arguments = '--version'; Label = 'scrcpy' },
+            @{ Path = $tools.adb; Arguments = 'version'; Label = 'adb' }
+        )
+        foreach ($probeSpec in $probeSpecs) {
+            if (-not $probeSpec.Path) { continue }
+            $probe = Invoke-BoundedProbe $probeSpec.Path $probeSpec.Arguments
+            if ($probe.TimedOut -or $probe.ExitCode -ne 0 -or -not $probe.Output.Trim()) {
+                [void]$missing.Add("$($probeSpec.Label) (unusable or version probe timed out)")
             }
         }
+
+        if ($tools.uxplay) {
+            $uxplayProbe = Invoke-BoundedProbe $tools.uxplay '-v'
+            $versionMatch = [regex]::Match($uxplayProbe.Output, '(?im)UxPlay version\s+([0-9]+(?:\.[0-9]+)+)')
+            $minimumUxPlay = [Version]'1.73.7'
+            $uxplayVersion = $null
+            if ($versionMatch.Success) { $uxplayVersion = [Version]$versionMatch.Groups[1].Value }
+            if ($uxplayProbe.TimedOut) {
+                [void]$missing.Add('UxPlay version probe (timed out)')
+            } elseif (-not $uxplayVersion -or $uxplayVersion -lt $minimumUxPlay) {
+                [void]$missing.Add("UxPlay $minimumUxPlay or newer")
+            }
+        }
+        if ($tools.gst) {
+            foreach ($element in @('decodebin', 'h264parse', 'videoconvert', 'autovideosink', 'autoaudiosink', 'avdec_aac')) {
+                try {
+                    $probe = Invoke-BoundedProbe $tools.gst $element 30000
+                    if ($probe.TimedOut) {
+                        [void]$missing.Add("GStreamer element $element (probe timed out)")
+                    } elseif ($probe.ExitCode -ne 0) {
+                        [void]$missing.Add("GStreamer element $element")
+                    }
+                } catch {
+                    [void]$missing.Add("GStreamer element $element (probe failed)")
+                }
+            }
+        }
+    } finally {
+        $env:Path = $previousPath
     }
     if (-not $script:MsysRoot -and $missing.Count -gt 0) {
         [void]$missing.Add('MSYS2 UCRT64 package installation source')
@@ -581,27 +821,33 @@ function Test-Development {
 function Sync-MsysTrust {
     $anchorsDir = Join-Path $script:MsysRoot 'etc\pki\ca-trust\source\anchors'
     if (Test-Path -LiteralPath $anchorsDir -PathType Container) {
+        Assert-NotReparsePoint $anchorsDir
+        $pemFile = Join-Path $anchorsDir 'windows-roots.pem'
+        Assert-NotReparsePoint $pemFile
+        $now = [DateTime]::UtcNow
         $pemBuilder = [System.Text.StringBuilder]::new()
         $certs = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue | Sort-Object NotBefore -Descending
         $seenSubjects = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         foreach ($cert in $certs) {
-            if ($cert.Subject -eq $cert.Issuer -and $seenSubjects.Add($cert.Subject)) {
+            if ($cert.NotBefore.ToUniversalTime() -le $now -and $cert.NotAfter.ToUniversalTime() -gt $now -and $cert.Subject -eq $cert.Issuer -and $seenSubjects.Add($cert.Subject)) {
                 [void]$pemBuilder.AppendLine('-----BEGIN CERTIFICATE-----')
                 [void]$pemBuilder.AppendLine([Convert]::ToBase64String($cert.RawData, [Base64FormattingOptions]::InsertLineBreaks))
                 [void]$pemBuilder.AppendLine('-----END CERTIFICATE-----')
             }
         }
         if ($pemBuilder.Length -gt 0) {
-            [IO.File]::WriteAllText((Join-Path $anchorsDir 'windows-roots.pem'), $pemBuilder.ToString(), [Text.UTF8Encoding]::new($false))
+            [IO.File]::WriteAllText($pemFile, $pemBuilder.ToString(), [Text.UTF8Encoding]::new($false))
             Invoke-Msys 'update-ca-trust'
         }
     }
     $pacmanConf = Join-Path $script:MsysRoot 'etc\pacman.conf'
     if (Test-Path -LiteralPath $pacmanConf -PathType Leaf) {
+        Assert-NotReparsePoint $pacmanConf
         $confContent = Get-Content -LiteralPath $pacmanConf -Raw
-        if ($confContent -match '(?m)^SigLevel\s*=') {
-            $confContent = [regex]::Replace($confContent, '(?m)^SigLevel\s*=.*$', 'SigLevel = Never')
+        if ($confContent -match '(?m)^SigLevel\s*=\s*Never\b') {
+            $confContent = [regex]::Replace($confContent, '(?m)^SigLevel\s*=\s*Never\b.*$', 'SigLevel = Required DatabaseOptional')
             [IO.File]::WriteAllText($pacmanConf, $confContent, [Text.UTF8Encoding]::new($false))
+            Write-Info 'Restored MSYS2 pacman SigLevel from Never to Required DatabaseOptional.'
         }
     }
     Invoke-Msys 'pacman-key --init && pacman-key --populate msys2'
@@ -620,6 +866,8 @@ function Install-Msys2 {
     Sync-MsysTrust
     $env:NEO_SETUP_PACKAGES = $MsysPackages -join ' '
     try {
+        Invoke-MsysPacmanWithLockRetry 'pacman -Sy --needed --noconfirm --noprogressbar msys2-keyring'
+        Invoke-Msys 'pacman-key --populate msys2'
         Update-Msys2
         Set-InstallStage 'packages' '正在安裝投影與編譯所需的套件…'
         Invoke-MsysPacmanWithLockRetry 'pacman -S --needed --noconfirm --noprogressbar $NEO_SETUP_PACKAGES'
@@ -697,6 +945,7 @@ function Stage-MsysRuntime {
     $shareSource = Join-Path $script:MsysRoot 'ucrt64\share\gstreamer-1.0'
     $shareTarget = Join-Path $script:EngineDirectory 'share\gstreamer-1.0'
     New-Item -ItemType Directory -Path $script:EngineBin -Force | Out-Null
+    Assert-NotReparsePoint $script:EngineBin
 
     if ($Upgrade) {
         foreach ($path in @($pluginTarget, $shareTarget)) {
@@ -756,9 +1005,7 @@ function Install-UxPlay {
     try {
         Set-InstallStage 'uxplay-download' '正在下載 AirPlay 投影工具…'
         Write-Info "Downloading pinned UxPlay $UxPlayVersion experimental source ($UxPlayCommit)."
-        Invoke-WebRequest -Uri $UxPlayUrl -OutFile $archive -UseBasicParsing
-        $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actualHash -ne $UxPlaySha256) { Stop-Setup 'UxPlay source archive SHA-256 verification failed.' }
+        Invoke-VerifiedDownload $UxPlayUrl $archive $UxPlaySha256 "UxPlay $UxPlayVersion source archive"
 
         $env:NEO_SETUP_ARCHIVE = ConvertTo-MsysPath $archive
         $env:NEO_SETUP_SOURCE = ConvertTo-MsysPath $source
@@ -795,19 +1042,25 @@ function Install-Scrcpy {
     try {
         Set-InstallStage 'scrcpy-download' '正在下載 Android 投影工具…'
         Write-Info "Downloading official scrcpy $ScrcpyVersion Windows distribution."
-        Invoke-WebRequest -Uri $ScrcpyWin64Url -OutFile $archive -UseBasicParsing
-        $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actualHash -ne $ScrcpyWin64Sha256) { Stop-Setup 'The official Windows scrcpy archive SHA-256 verification failed.' }
-        Expand-Archive -LiteralPath $archive -DestinationPath $extract -Force
+        Invoke-VerifiedDownload $ScrcpyWin64Url $archive $ScrcpyWin64Sha256 "Official scrcpy $ScrcpyVersion Windows archive"
+        Expand-ZipArchiveSafely $archive $extract
         $bundle = Get-ChildItem -LiteralPath $extract -Directory | Select-Object -First 1
         if (-not $bundle) { Stop-Setup 'The official Windows scrcpy archive did not contain its distribution directory.' }
         foreach ($requiredFile in @('scrcpy.exe', 'scrcpy-server', 'adb.exe')) {
-            if (-not (Test-Path -LiteralPath (Join-Path $bundle.FullName $requiredFile) -PathType Leaf)) {
+            $requiredPath = Join-Path $bundle.FullName $requiredFile
+            if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
                 Stop-Setup "The official Windows scrcpy archive is missing $requiredFile."
             }
+            Assert-NotReparsePoint $requiredPath
         }
         New-Item -ItemType Directory -Path $script:EngineBin -Force | Out-Null
-        Get-ChildItem -LiteralPath $bundle.FullName -File -Force | Copy-Item -Destination $script:EngineBin -Force
+        Assert-NotReparsePoint $script:EngineBin
+        foreach ($file in (Get-ChildItem -LiteralPath $bundle.FullName -File -Force)) {
+            Assert-NotReparsePoint $file.FullName
+            $targetFile = Join-Path $script:EngineBin $file.Name
+            Assert-NotReparsePoint $targetFile
+            Copy-Item -LiteralPath $file.FullName -Destination $targetFile -Force
+        }
     }
     finally {
         if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
@@ -862,20 +1115,22 @@ function Install-RustStable {
     if (-not (Test-Path -LiteralPath $rustup -PathType Leaf)) {
         $architecture = $env:PROCESSOR_ARCHITECTURE
         if ($env:PROCESSOR_ARCHITEW6432) { $architecture = $env:PROCESSOR_ARCHITEW6432 }
-        if ($architecture -eq 'ARM64') { $target = 'aarch64-pc-windows-msvc' }
-        elseif ($architecture -eq 'AMD64') { $target = 'x86_64-pc-windows-msvc' }
-        else { Stop-Setup "Rust stable is unavailable for Windows architecture $architecture." }
+        $rustupVersion = '1.29.3'
+        if ($architecture -eq 'ARM64') {
+            $target = 'aarch64-pc-windows-msvc'
+            $expectedHash = '407e0d72f81d26a01f9d032b8317908cbb2917ba22765474b682b41390792ad9'
+        } elseif ($architecture -eq 'AMD64') {
+            $target = 'x86_64-pc-windows-msvc'
+            $expectedHash = '38027d51d69a5d05493627a0634dbea52d6cd793c8f072d2373d3f4163eec7db'
+        } else {
+            Stop-Setup "Rust stable is unavailable for Windows architecture $architecture."
+        }
         $temporaryRoot = Join-Path $env:TEMP ([Guid]::NewGuid().ToString('N'))
         $installer = Join-Path $temporaryRoot 'rustup-init.exe'
-        $checksumFile = "$installer.sha256"
-        $installerUrl = "https://static.rust-lang.org/rustup/dist/$target/rustup-init.exe"
+        $installerUrl = "https://static.rust-lang.org/rustup/archive/$rustupVersion/$target/rustup-init.exe"
         New-Item -ItemType Directory -Path $temporaryRoot -Force | Out-Null
         try {
-            Invoke-WebRequest -Uri $installerUrl -OutFile $installer -UseBasicParsing
-            Invoke-WebRequest -Uri "$installerUrl.sha256" -OutFile $checksumFile -UseBasicParsing
-            $expectedHash = ((Get-Content -LiteralPath $checksumFile -Raw) -split '\s+')[0].ToLowerInvariant()
-            $actualHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($actualHash -ne $expectedHash) { Stop-Setup 'Official rustup-init SHA-256 verification failed.' }
+            Invoke-VerifiedDownload $installerUrl $installer $expectedHash "Official rustup-init $rustupVersion ($target)"
             New-Item -ItemType Directory -Path $cargoHome, $rustupHome -Force | Out-Null
             $env:CARGO_HOME = $cargoHome
             $env:RUSTUP_HOME = $rustupHome
@@ -920,14 +1175,16 @@ function Install-Bun {
     $bunRoot = Join-Path $script:SetupUserProfile '.bun\bin'
     New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
     try {
-        Invoke-WebRequest -Uri "https://github.com/oven-sh/bun/releases/download/bun-v$BunVersion/$asset" -OutFile $archive -UseBasicParsing
-        $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actualHash -ne $expectedHash) { Stop-Setup "Bun $BunVersion archive SHA-256 verification failed." }
-        Expand-Archive -LiteralPath $archive -DestinationPath $extractRoot -Force
+        Invoke-VerifiedDownload "https://github.com/oven-sh/bun/releases/download/bun-v$BunVersion/$asset" $archive $expectedHash "Bun $BunVersion archive"
+        Expand-ZipArchiveSafely $archive $extractRoot
         $source = Get-ChildItem -LiteralPath $extractRoot -Filter bun.exe -Recurse -File | Select-Object -First 1
         if (-not $source) { Stop-Setup 'Official Bun archive did not contain bun.exe.' }
+        Assert-NotReparsePoint $source.FullName
+        Assert-NotReparsePoint $bunRoot
         New-Item -ItemType Directory -Path $bunRoot -Force | Out-Null
-        Copy-Item -LiteralPath $source.FullName -Destination (Join-Path $bunRoot 'bun.exe') -Force
+        $targetBun = Join-Path $bunRoot 'bun.exe'
+        Assert-NotReparsePoint $targetBun
+        Copy-Item -LiteralPath $source.FullName -Destination $targetBun -Force
         Add-UserPathEntry $bunRoot
         $env:Path = "$bunRoot;$env:Path"
     } finally {
@@ -955,14 +1212,13 @@ function Install-NodeBinary {
     $nodeRoot = Join-Path $script:SetupLocalAppData "NeoAirPlay\node-v$NodeVersion"
     New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
     try {
-        Invoke-WebRequest -Uri "https://nodejs.org/dist/v$NodeVersion/$asset" -OutFile $archive -UseBasicParsing
-        $actualHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actualHash -ne $expectedHash) { Stop-Setup "Node.js $NodeVersion archive SHA-256 verification failed." }
-        Expand-Archive -LiteralPath $archive -DestinationPath $extractRoot -Force
+        Invoke-VerifiedDownload "https://nodejs.org/dist/v$NodeVersion/$asset" $archive $expectedHash "Node.js $NodeVersion archive"
+        Expand-ZipArchiveSafely $archive $extractRoot
         $sourceRoot = Get-ChildItem -LiteralPath $extractRoot -Directory | Select-Object -First 1
         if (-not $sourceRoot -or -not (Test-Path -LiteralPath (Join-Path $sourceRoot.FullName 'node.exe'))) {
             Stop-Setup "Official Node.js archive did not contain node.exe."
         }
+        Assert-NotReparsePoint $nodeRoot
         New-Item -ItemType Directory -Path $nodeRoot -Force | Out-Null
         Copy-Item -Path (Join-Path $sourceRoot.FullName '*') -Destination $nodeRoot -Recurse -Force
         Add-UserPathEntry $nodeRoot
@@ -1064,16 +1320,29 @@ function Refresh-ProcessPath {
 
 function Write-InstallMarker {
     if ($MarkerFile) {
+        Assert-NotReparsePoint $MarkerFile
         $directory = Split-Path -Parent $MarkerFile
-        if ($directory) { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
-        $temporaryMarker = "$MarkerFile.tmp.$PID"
-        [IO.File]::WriteAllText($temporaryMarker, "$PID`n", [Text.UTF8Encoding]::new($false))
-        Move-Item -LiteralPath $temporaryMarker -Destination $MarkerFile -Force
+        if ($directory) {
+            Assert-NotReparsePoint $directory
+            New-Item -ItemType Directory -Path $directory -Force | Out-Null
+        }
+        $temporaryMarker = "$MarkerFile.tmp.$([Guid]::NewGuid().ToString('N'))"
+        try {
+            [IO.File]::WriteAllText($temporaryMarker, "$PID`n", [Text.UTF8Encoding]::new($false))
+            Assert-NotReparsePoint $MarkerFile
+            if (Test-Path -LiteralPath $MarkerFile -PathType Leaf) {
+                [IO.File]::Replace($temporaryMarker, $MarkerFile, [NullString]::Value)
+            } else {
+                [IO.File]::Move($temporaryMarker, $MarkerFile)
+            }
+        } finally {
+            if (Test-Path -LiteralPath $temporaryMarker) { Remove-Item -LiteralPath $temporaryMarker -Force -ErrorAction SilentlyContinue }
+        }
     }
 }
 
 function Complete-Install([int]$ExitCode) {
-    if ($script:DelegatedToElevated) { return }
+    if ($script:DelegatedToElevated -or (Test-ElevatedPrerequisitesMode)) { return }
     try {
         if ($ResultFile) {
             Write-InstallJson $ResultFile @{ pid = $PID; exitCode = $ExitCode; stage = $script:InstallStage; message = $script:InstallFailure }
@@ -1085,7 +1354,34 @@ function Complete-Install([int]$ExitCode) {
     }
 }
 
+function Install-ElevatedPrerequisites {
+    if (-not (Test-Administrator)) {
+        Stop-Setup 'Elevated prerequisites mode requires administrator privileges.'
+    }
+    $null = Ensure-WinGet
+    if ($Development) {
+        if (-not (Test-VisualStudioCppTools)) {
+            $override = '--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended'
+            if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') {
+                $override += ' --add Microsoft.VisualStudio.Component.VC.Tools.ARM64'
+            }
+            Invoke-WinGetInstall 'Microsoft.VisualStudio.BuildTools' '' $override 'machine'
+        }
+        if (-not (Test-WebView2Runtime)) {
+            Invoke-WinGetInstall 'Microsoft.EdgeWebView2Runtime' '' '' 'machine'
+        }
+        if (-not (Test-VcRedistRuntime)) {
+            $architecture = $env:PROCESSOR_ARCHITECTURE
+            if ($env:PROCESSOR_ARCHITEW6432) { $architecture = $env:PROCESSOR_ARCHITEW6432 }
+            $redist = if ($architecture -eq 'ARM64') { 'Microsoft.VCRedist.2015+.arm64' } else { 'Microsoft.VCRedist.2015+.x64' }
+            Invoke-WinGetInstall $redist '' '' 'machine'
+        }
+    }
+}
+
 if ($Check) {
+    Assert-NotReparsePoint $script:EngineDirectory
+    Assert-NotReparsePoint $script:EngineBin
     Refresh-ProcessPath
     $runtimeReady = Test-Runtime
     $developmentReady = $true
@@ -1098,43 +1394,57 @@ $script:DelegatedToElevated = $false
 $InstallExitCode = 0
 try {
     if ($LogFile) {
+        Assert-NotReparsePoint $LogFile
         $logDirectory = Split-Path -Parent $LogFile
-        if ($logDirectory) { New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null }
+        if ($logDirectory) {
+            Assert-NotReparsePoint $logDirectory
+            New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
+        }
     }
-    Write-InstallMarker
-    Set-InstallStage 'checking' '正在檢查投影工具…'
-    Refresh-ProcessPath
-    $runtimeReady = Test-Runtime
-    $developmentReady = $true
-    if ($Development) { $developmentReady = Test-Development }
-    if ($runtimeReady -and $developmentReady -and -not $Upgrade) {
-        Write-Info 'All requested dependencies are already available.'
+    if ($ProgressFile) {
+        Assert-NotReparsePoint $ProgressFile
+    }
+    if (Test-ElevatedPrerequisitesMode) {
+        Install-ElevatedPrerequisites
     } else {
-        if (Test-NeedsElevation $runtimeReady $developmentReady) {
-            $elevatedExitCode = Invoke-ElevatedInstaller
-            if ($null -ne $elevatedExitCode) {
-                $script:DelegatedToElevated = $true
-                $InstallExitCode = $elevatedExitCode
-                exit $elevatedExitCode
-            }
-        }
-        if (-not $runtimeReady -or $Upgrade) {
-            $null = Ensure-WinGet
-            Install-Msys2
-            Set-InstalledEnvironment $script:MsysRoot
-            Install-UxPlay
-            Install-Scrcpy
-            Stage-MsysRuntime
-        }
-        if ($Development -and -not $developmentReady) { Install-DevelopmentTools }
-        if ($script:MsysRoot) { Set-InstalledEnvironment $script:MsysRoot }
-        Set-InstallStage 'verifying' '正在驗證已安裝的投影工具…'
+        Assert-NotReparsePoint $script:EngineDirectory
+        Assert-NotReparsePoint $script:EngineBin
+        Assert-NotReparsePoint $MarkerFile
+        Assert-NotReparsePoint $ResultFile
+        Write-InstallMarker
+        Set-InstallStage 'checking' '正在檢查投影工具…'
+        Refresh-ProcessPath
         $runtimeReady = Test-Runtime
         $developmentReady = $true
         if ($Development) { $developmentReady = Test-Development }
-        if (-not $runtimeReady -or -not $developmentReady) { throw 'One or more requested dependencies remain unavailable after installation.' }
+        if ($runtimeReady -and $developmentReady -and -not $Upgrade) {
+            Write-Info 'All requested dependencies are already available.'
+        } else {
+            if (Test-NeedsElevation $runtimeReady $developmentReady) {
+                $elevatedExitCode = Invoke-ElevatedInstaller
+                if ($null -ne $elevatedExitCode -and $elevatedExitCode -ne 0) {
+                    Stop-Setup "System prerequisites installation failed with exit code $elevatedExitCode."
+                }
+                Refresh-ProcessPath
+            }
+            if (-not $runtimeReady -or $Upgrade) {
+                $null = Ensure-WinGet
+                Install-Msys2
+                Set-InstalledEnvironment $script:MsysRoot
+                Install-UxPlay
+                Install-Scrcpy
+                Stage-MsysRuntime
+            }
+            if ($Development -and -not $developmentReady) { Install-DevelopmentTools }
+            if ($script:MsysRoot) { Set-InstalledEnvironment $script:MsysRoot }
+            Set-InstallStage 'verifying' '正在驗證已安裝的投影工具…'
+            $runtimeReady = Test-Runtime
+            $developmentReady = $true
+            if ($Development) { $developmentReady = Test-Development }
+            if (-not $runtimeReady -or -not $developmentReady) { throw 'One or more requested dependencies remain unavailable after installation.' }
+        }
+        Set-InstallStage 'ready' '投影工具已就緒。'
     }
-    Set-InstallStage 'ready' '投影工具已就緒。'
 }
 catch {
     $InstallExitCode = 1
