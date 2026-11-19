@@ -378,22 +378,28 @@ try {
         }
         Assert-True $httpRejected 'HTTP URL must be rejected before network access'
 
-        $payload = [Text.Encoding]::UTF8.GetBytes('verified payload')
-        $expectedSha = ([BitConverter]::ToString(([Security.Cryptography.SHA256]::Create()).ComputeHash($payload)) -replace '-', '').ToLowerInvariant()
+        $script:verifiedDownloadPayload = [Text.Encoding]::UTF8.GetBytes('verified payload')
+        $script:verifiedDownloadCalls = 0
+        $expectedSha = ([BitConverter]::ToString(([Security.Cryptography.SHA256]::Create()).ComputeHash($script:verifiedDownloadPayload)) -replace '-', '').ToLowerInvariant()
         function Invoke-HttpsDownloadStream([string]$Uri, [string]$Destination, [string]$Label) {
-            [IO.File]::WriteAllBytes($Destination, $payload)
+            $script:verifiedDownloadCalls++
+            [IO.File]::WriteAllBytes($Destination, $script:verifiedDownloadPayload)
         }
         $badHashRejected = $false
+        $checksumError = ''
         try {
             Invoke-VerifiedDownload 'https://example.com/artifact.bin' $destFile ('0' * 64) 'Mismatched artifact'
         } catch {
-            $badHashRejected = $_.Exception.Message.Contains('SHA-256 verification failed')
+            $checksumError = $_.Exception.Message
+            $badHashRejected = $checksumError.Contains('SHA-256 verification failed')
         }
-        Assert-True $badHashRejected 'Checksum mismatch must throw'
+        Assert-True $badHashRejected "Checksum mismatch must throw SHA-256 error; actual error: $checksumError"
+        Assert-True ($script:verifiedDownloadCalls -eq 1) 'Download mock must be called once for the mismatched checksum'
         Assert-True (-not (Test-Path -LiteralPath $destFile)) 'Failed download must not leave destination file'
         Assert-True (@(Get-ChildItem -LiteralPath $downloadDir -Filter '*.download.*').Count -eq 0) 'Failed download must clean temporary file'
 
         Invoke-VerifiedDownload 'https://example.com/artifact.bin' $destFile $expectedSha 'Valid artifact'
+        Assert-True ($script:verifiedDownloadCalls -eq 2) 'Download mock must be called once for the valid checksum'
         Assert-True ([IO.File]::ReadAllText($destFile) -eq 'verified payload') 'Valid download did not write destination'
     }
 
