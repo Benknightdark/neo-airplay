@@ -1,18 +1,20 @@
 use crate::application::{DependencyRuntime, EngineAccessGuard, ToolCatalogFetcher};
 use crate::domain::{
     build_tool_catalog_snapshot, first_useful_line, interrupted_install_detail,
-    parse_github_releases_atom, parse_github_scrcpy_releases_json,
+    parse_arch_gstreamer_version, parse_debian_gstreamer_version, parse_dnf_gstreamer_version,
+    parse_fedora_gstreamer_version, parse_github_releases_atom, parse_github_scrcpy_releases_json,
     parse_github_uxplay_releases_json, parse_homebrew_gstreamer_version,
     parse_installed_adb_version, parse_installed_gstreamer_version, parse_installed_scrcpy_version,
     parse_installed_uxplay_version, parse_missing_dependencies, parse_msys2_gstreamer_version,
-    validate_optional_sha256, validate_scrcpy_version, validate_tool_install_request,
-    validate_uxplay_ref, CatalogContext, DependencyAction, DependencyOperation, DependencySnapshot,
-    DomainError, DomainResult, InstallProgress, InstallResult, InstalledVersions, LaunchRecord,
-    PinnedToolVersion, PlatformOs, RemoteCatalogCache, RuntimeCheck, SetupOutcome,
-    ToolCatalogSnapshot, ToolId, ToolInstallRequest, ToolVersionPreferences, ValidatedToolInstall,
-    HOMEBREW_GSTREAMER_API_URL, MSYS2_GSTREAMER_PAGE_URL, SCRCPY_RELEASES_API_URL,
-    SCRCPY_RELEASES_ATOM_URL, UXPLAY_RELEASES_API_URL, UXPLAY_RELEASES_ATOM_URL,
-    UXPLAY_TAGS_API_URL,
+    parse_ubuntu_gstreamer_version, validate_optional_sha256, validate_scrcpy_version,
+    validate_tool_install_request, validate_uxplay_ref, CatalogContext, DependencyAction,
+    DependencyOperation, DependencySnapshot, DomainError, DomainResult, InstallProgress,
+    InstallResult, InstalledVersions, LaunchRecord, PinnedToolVersion, PlatformOs,
+    RemoteCatalogCache, RuntimeCheck, SetupOutcome, ToolCatalogSnapshot, ToolId,
+    ToolInstallRequest, ToolVersionPreferences, ValidatedToolInstall, ARCH_GSTREAMER_PACKAGES_URL,
+    FEDORA_GSTREAMER_PACKAGES_URL, HOMEBREW_GSTREAMER_API_URL, MSYS2_GSTREAMER_PAGE_URL,
+    SCRCPY_RELEASES_API_URL, SCRCPY_RELEASES_ATOM_URL, UXPLAY_RELEASES_API_URL,
+    UXPLAY_RELEASES_ATOM_URL, UXPLAY_TAGS_API_URL,
 };
 #[cfg(target_os = "windows")]
 use crate::infrastructure::process::background_command;
@@ -41,6 +43,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(90);
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const RHEL_GSTREAMER_QUERY_TIMEOUT: Duration = Duration::from_secs(15);
+const RHEL_GSTREAMER_DNF_ARGS: &[&str] = &[
+    "--quiet",
+    "repoquery",
+    "--latest-limit=1",
+    "--queryformat=%{version}-%{release}",
+    "gstreamer1-tools",
+];
 #[cfg(target_os = "macos")]
 const GSTREAMER_REGISTRY_WARMUP_TIMEOUT: Duration = Duration::from_secs(100);
 const PROCESS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -698,14 +708,167 @@ fn fetch_gstreamer_latest(
     match os {
         PlatformOs::Macos => {
             let body = fetcher.fetch_text(HOMEBREW_GSTREAMER_API_URL)?;
-            Ok(parse_homebrew_gstreamer_version(&body))
+            parse_homebrew_gstreamer_version(&body)
+                .map(Some)
+                .ok_or_else(|| DomainError::external_process("無法解析 Homebrew GStreamer 版本。"))
         }
         PlatformOs::Windows => {
             let body = fetcher.fetch_text(MSYS2_GSTREAMER_PAGE_URL)?;
-            Ok(parse_msys2_gstreamer_version(&body))
+            parse_msys2_gstreamer_version(&body)
+                .map(Some)
+                .ok_or_else(|| DomainError::external_process("無法解析 MSYS2 GStreamer 版本。"))
         }
-        PlatformOs::Linux => Ok(None),
+        PlatformOs::Linux => {
+            let os_release = fs::read_to_string("/etc/os-release").map_err(|error| {
+                DomainError::external_process(format!("無法讀取 Linux 發行版資訊：{error}"))
+            })?;
+            let distribution = parse_linux_distribution(&os_release)?;
+            fetch_linux_gstreamer_latest(fetcher, &distribution, detect_platform_arch()).map(Some)
+        }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LinuxDistribution {
+    Debian { codename: String },
+    Ubuntu { codename: String },
+    Fedora { release: String },
+    Rhel,
+    Arch,
+}
+
+fn parse_linux_distribution(os_release: &str) -> DomainResult<LinuxDistribution> {
+    let id = os_release_value(os_release, "ID")
+        .map(|value| value.to_ascii_lowercase())
+        .ok_or_else(|| DomainError::external_process("Linux 發行版資訊缺少 ID 欄位。"))?;
+
+    match id.as_str() {
+        "debian" => {
+            let codename = os_release_value(os_release, "VERSION_CODENAME")
+                .map(|value| value.to_ascii_lowercase())
+                .filter(|value| is_safe_linux_release_segment(value))
+                .ok_or_else(|| {
+                    DomainError::external_process("Debian 發行版資訊缺少有效的版本代號。")
+                })?;
+            Ok(LinuxDistribution::Debian { codename })
+        }
+        "ubuntu" => {
+            let codename = os_release_value(os_release, "VERSION_CODENAME")
+                .or_else(|| os_release_value(os_release, "UBUNTU_CODENAME"))
+                .map(|value| value.to_ascii_lowercase())
+                .filter(|value| is_safe_linux_release_segment(value))
+                .ok_or_else(|| {
+                    DomainError::external_process("Ubuntu 發行版資訊缺少有效的版本代號。")
+                })?;
+            Ok(LinuxDistribution::Ubuntu { codename })
+        }
+        "fedora" => {
+            let release = os_release_value(os_release, "VERSION_ID")
+                .filter(|value| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()))
+                .ok_or_else(|| {
+                    DomainError::external_process("Fedora 發行版資訊缺少有效的版本號。")
+                })?;
+            Ok(LinuxDistribution::Fedora { release })
+        }
+        "rhel" => Ok(LinuxDistribution::Rhel),
+        "arch" => Ok(LinuxDistribution::Arch),
+        _ => Err(DomainError::external_process(format!(
+            "尚未支援 Linux 發行版「{id}」的 GStreamer 版本查詢。"
+        ))),
+    }
+}
+
+fn os_release_value(os_release: &str, key: &str) -> Option<String> {
+    os_release.lines().find_map(|line| {
+        let (field, raw_value) = line.split_once('=')?;
+        if field != key {
+            return None;
+        }
+        let raw_value = raw_value.trim();
+        let value = if raw_value.starts_with('"') {
+            raw_value.strip_prefix('"')?.strip_suffix('"')?
+        } else if raw_value.starts_with('\'') {
+            raw_value.strip_prefix('\'')?.strip_suffix('\'')?
+        } else {
+            raw_value.split('#').next()?.trim()
+        };
+        (!value.is_empty()).then(|| value.to_owned())
+    })
+}
+
+fn is_safe_linux_release_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+        })
+}
+
+fn fetch_linux_gstreamer_latest(
+    fetcher: &dyn ToolCatalogFetcher,
+    distribution: &LinuxDistribution,
+    arch: &str,
+) -> DomainResult<String> {
+    match distribution {
+        LinuxDistribution::Debian { codename } => {
+            let url = format!("https://packages.debian.org/{codename}/utils/gstreamer1.0-tools");
+            let body = fetcher.fetch_text(&url)?;
+            parse_debian_gstreamer_version(&body).ok_or_else(|| {
+                DomainError::external_process("無法解析 Debian 官方 GStreamer 套件版本。")
+            })
+        }
+        LinuxDistribution::Ubuntu { codename } => {
+            let url = format!("https://packages.ubuntu.com/{codename}/utils/gstreamer1.0-tools");
+            let body = fetcher.fetch_text(&url)?;
+            parse_ubuntu_gstreamer_version(&body).ok_or_else(|| {
+                DomainError::external_process("無法解析 Ubuntu 官方 GStreamer 套件版本。")
+            })
+        }
+        LinuxDistribution::Fedora { release } => {
+            let body = fetcher.fetch_text(FEDORA_GSTREAMER_PACKAGES_URL)?;
+            parse_fedora_gstreamer_version(&body, release).ok_or_else(|| {
+                DomainError::external_process(format!(
+                    "無法解析 Fedora {release} 官方 GStreamer 套件版本。"
+                ))
+            })
+        }
+        LinuxDistribution::Rhel => fetch_rhel_gstreamer_latest(),
+        LinuxDistribution::Arch if arch == "x86_64" => {
+            let body = fetcher.fetch_text(ARCH_GSTREAMER_PACKAGES_URL)?;
+            parse_arch_gstreamer_version(&body).ok_or_else(|| {
+                DomainError::external_process("無法解析 Arch Linux 官方 GStreamer 套件版本。")
+            })
+        }
+        LinuxDistribution::Arch => Err(DomainError::external_process(format!(
+            "Arch Linux 官方 GStreamer 版本頁不支援目前的 {arch} 架構。"
+        ))),
+    }
+}
+
+fn fetch_rhel_gstreamer_latest() -> DomainResult<String> {
+    let executable = Path::new("/usr/bin/dnf");
+    if !executable.is_file() {
+        return Err(DomainError::external_process(
+            "找不到 /usr/bin/dnf，無法查詢 RHEL GStreamer 套件版本。",
+        ));
+    }
+    let args = RHEL_GSTREAMER_DNF_ARGS
+        .iter()
+        .map(|arg| (*arg).to_owned())
+        .collect::<Vec<_>>();
+    let output = run_with_timeout_env(executable, &args, RHEL_GSTREAMER_QUERY_TIMEOUT, None, &[])
+        .map_err(|error| {
+        DomainError::external_process(format!("RHEL DNF 版本查詢失敗：{error}"))
+    })?;
+    if !output.status.success() {
+        let detail = first_useful_line(&combined_output(&output))
+            .unwrap_or_else(|| format!("結束代碼 {}", output.status));
+        return Err(DomainError::external_process(format!(
+            "RHEL DNF 版本查詢失敗：{detail}"
+        )));
+    }
+    parse_dnf_gstreamer_version(&String::from_utf8_lossy(&output.stdout))
+        .ok_or_else(|| DomainError::external_process("RHEL DNF 未回傳有效的 GStreamer 套件版本。"))
 }
 
 /// 從 `config_dir/tool-versions.json` 安全讀取使用者自訂版本偏好，遇到符號連結或無效內容時安全退回預設。

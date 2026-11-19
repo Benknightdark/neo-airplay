@@ -32,19 +32,22 @@ pub use settings::{
 };
 pub use tool_catalog::{
     build_tool_catalog_snapshot, default_scrcpy_sha256, default_uxplay_spec,
-    parse_github_releases_atom, parse_github_scrcpy_releases_json,
+    parse_arch_gstreamer_version, parse_debian_gstreamer_version, parse_dnf_gstreamer_version,
+    parse_fedora_gstreamer_version, parse_github_releases_atom, parse_github_scrcpy_releases_json,
     parse_github_uxplay_releases_json, parse_homebrew_gstreamer_version,
     parse_installed_adb_version, parse_installed_gstreamer_version, parse_installed_scrcpy_version,
     parse_installed_uxplay_version, parse_msys2_gstreamer_version, parse_scrcpy_sha256sums,
-    scrcpy_asset_name, validate_catalog_url, validate_optional_sha256, validate_scrcpy_version,
-    validate_tool_install_request, validate_uxplay_ref, CatalogContext, InstalledVersions,
-    ManagedToolInfo, PinnedToolVersion, PlatformOs, RemoteCatalogCache, ToolCatalogSnapshot,
-    ToolId, ToolInstallRequest, ToolReleaseOption, ToolVersionPreferences, ValidatedToolInstall,
-    VersionControlMode, ALLOWED_CATALOG_HOSTS, DEFAULT_SCRCPY_VERSION, DEFAULT_UXPLAY_COMMIT_UNIX,
-    DEFAULT_UXPLAY_COMMIT_WINDOWS, DEFAULT_UXPLAY_SHA256_UNIX, DEFAULT_UXPLAY_SHA256_WINDOWS,
-    DEFAULT_UXPLAY_VERSION_UNIX, DEFAULT_UXPLAY_VERSION_WINDOWS, HOMEBREW_GSTREAMER_API_URL,
-    MSYS2_GSTREAMER_PAGE_URL, SCRCPY_RELEASES_API_URL, SCRCPY_RELEASES_ATOM_URL,
-    UXPLAY_RELEASES_API_URL, UXPLAY_RELEASES_ATOM_URL, UXPLAY_TAGS_API_URL,
+    parse_ubuntu_gstreamer_version, scrcpy_asset_name, validate_catalog_url,
+    validate_optional_sha256, validate_scrcpy_version, validate_tool_install_request,
+    validate_uxplay_ref, CatalogContext, InstalledVersions, ManagedToolInfo, PinnedToolVersion,
+    PlatformOs, RemoteCatalogCache, ToolCatalogSnapshot, ToolId, ToolInstallRequest,
+    ToolReleaseOption, ToolVersionPreferences, ValidatedToolInstall, VersionControlMode,
+    ALLOWED_CATALOG_HOSTS, ARCH_GSTREAMER_PACKAGES_URL, DEFAULT_SCRCPY_VERSION,
+    DEFAULT_UXPLAY_COMMIT_UNIX, DEFAULT_UXPLAY_COMMIT_WINDOWS, DEFAULT_UXPLAY_SHA256_UNIX,
+    DEFAULT_UXPLAY_SHA256_WINDOWS, DEFAULT_UXPLAY_VERSION_UNIX, DEFAULT_UXPLAY_VERSION_WINDOWS,
+    FEDORA_GSTREAMER_PACKAGES_URL, HOMEBREW_GSTREAMER_API_URL, MSYS2_GSTREAMER_PAGE_URL,
+    SCRCPY_RELEASES_API_URL, SCRCPY_RELEASES_ATOM_URL, UXPLAY_RELEASES_API_URL,
+    UXPLAY_RELEASES_ATOM_URL, UXPLAY_TAGS_API_URL,
 };
 
 #[cfg(test)]

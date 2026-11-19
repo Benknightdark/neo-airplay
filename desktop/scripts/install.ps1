@@ -286,6 +286,21 @@ function Invoke-HttpsDownloadStream([string]$Uri, [string]$Destination, [string]
     Stop-Setup "Too many redirects while downloading $Label."
 }
 
+function Get-FileSha256([string]$Path) {
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [IO.File]::OpenRead($Path)
+        try {
+            $hash = $algorithm.ComputeHash($stream)
+        } finally {
+            $stream.Dispose()
+        }
+    } finally {
+        $algorithm.Dispose()
+    }
+    return ([BitConverter]::ToString($hash) -replace '-', '').ToLowerInvariant()
+}
+
 function Invoke-VerifiedDownload([string]$Uri, [string]$Destination, [string]$ExpectedSha256, [string]$Label) {
     $parsedUri = $null
     if (-not [Uri]::TryCreate($Uri, [UriKind]::Absolute, [ref]$parsedUri) -or $parsedUri.Scheme -ne 'https') {
@@ -304,7 +319,7 @@ function Invoke-VerifiedDownload([string]$Uri, [string]$Destination, [string]$Ex
     $temporary = "$Destination.download.$([Guid]::NewGuid().ToString('N'))"
     try {
         Invoke-HttpsDownloadStream $Uri $temporary $Label
-        $actualHash = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash.ToLowerInvariant()
+        $actualHash = Get-FileSha256 $temporary
         if ($actualHash -ne $ExpectedSha256.ToLowerInvariant()) {
             Stop-Setup "$Label SHA-256 verification failed."
         }

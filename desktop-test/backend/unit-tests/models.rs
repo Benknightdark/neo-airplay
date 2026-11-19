@@ -121,6 +121,17 @@ fn tool_catalog_validation_enforces_allowlists_and_formats() {
         "https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-gstreamer"
     )
     .is_ok());
+    assert!(
+        validate_catalog_url("https://packages.debian.org/trixie/utils/gstreamer1.0-tools").is_ok()
+    );
+    assert!(
+        validate_catalog_url("https://packages.ubuntu.com/noble/utils/gstreamer1.0-tools").is_ok()
+    );
+    assert!(
+        validate_catalog_url("https://packages.fedoraproject.org/pkgs/gstreamer1/gstreamer1/")
+            .is_ok()
+    );
+    assert!(validate_catalog_url("https://archlinux.org/packages/extra/x86_64/gstreamer/").is_ok());
     assert!(validate_catalog_url("http://api.github.com/repos/FDH2/UxPlay/releases").is_err());
     assert!(validate_catalog_url("https://evil.example/releases").is_err());
     assert!(validate_catalog_url("https://user@api.github.com/repos").is_err());
@@ -207,12 +218,14 @@ fn tool_catalog_validation_enforces_allowlists_and_formats() {
 #[test]
 fn tool_catalog_parsers_and_os_matrix_work_offline() {
     use super::tool_catalog::{
-        build_tool_catalog_snapshot, parse_github_releases_atom, parse_github_scrcpy_releases_json,
-        parse_github_uxplay_releases_json, parse_homebrew_gstreamer_version,
-        parse_installed_adb_version, parse_installed_gstreamer_version,
-        parse_installed_scrcpy_version, parse_installed_uxplay_version,
-        parse_msys2_gstreamer_version, parse_scrcpy_sha256sums, CatalogContext, InstalledVersions,
-        PlatformOs, RemoteCatalogCache, ToolId, ToolVersionPreferences, VersionControlMode,
+        build_tool_catalog_snapshot, parse_arch_gstreamer_version, parse_debian_gstreamer_version,
+        parse_dnf_gstreamer_version, parse_fedora_gstreamer_version, parse_github_releases_atom,
+        parse_github_scrcpy_releases_json, parse_github_uxplay_releases_json,
+        parse_homebrew_gstreamer_version, parse_installed_adb_version,
+        parse_installed_gstreamer_version, parse_installed_scrcpy_version,
+        parse_installed_uxplay_version, parse_msys2_gstreamer_version, parse_scrcpy_sha256sums,
+        parse_ubuntu_gstreamer_version, CatalogContext, InstalledVersions, PlatformOs,
+        RemoteCatalogCache, ToolId, ToolVersionPreferences, VersionControlMode,
     };
 
     let scrcpy_json = r#"[
@@ -253,6 +266,35 @@ fn tool_catalog_parsers_and_os_matrix_work_offline() {
             .as_deref(),
         Some("1.28.9-1")
     );
+    assert_eq!(
+        parse_debian_gstreamer_version("<h1>Package: gstreamer1.0-tools (1:1.26.2+ds-2)</h1>")
+            .as_deref(),
+        Some("1:1.26.2+ds-2")
+    );
+    assert_eq!(
+        parse_ubuntu_gstreamer_version(
+            "<h1>Package: gstreamer1.0-tools (1.24.2-1ubuntu0.1 and others)</h1>"
+        )
+        .as_deref(),
+        Some("1.24.2-1ubuntu0.1")
+    );
+    assert_eq!(
+        parse_fedora_gstreamer_version(
+            "<table><tr><td>Fedora 44</td><td><a>1.27.1-1.fc44</a></td></tr><tr><td>Fedora 45</td><td><a href=\"/pkg\">1.28.9-1.fc45</a></td></tr></table>",
+            "45"
+        )
+        .as_deref(),
+        Some("1.28.9-1.fc45")
+    );
+    assert_eq!(
+        parse_arch_gstreamer_version("<h2>gstreamer 1.28.9-3</h2>").as_deref(),
+        Some("1.28.9-3")
+    );
+    assert_eq!(
+        parse_dnf_gstreamer_version("\n1.28.9-1.el10\n").as_deref(),
+        Some("1.28.9-1.el10")
+    );
+    assert!(parse_dnf_gstreamer_version("1.28.9-1\n1.27.9-1").is_none());
 
     assert_eq!(
         parse_installed_uxplay_version("UxPlay version 1.73.7; AirPlay2").as_deref(),

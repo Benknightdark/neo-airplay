@@ -25,6 +25,7 @@
 - **執行路徑隔離**：App 只從目前模式的 `engine/` 啟動 `uxplay`、`adb`、`scrcpy` 與 GStreamer 檢查工具，子程序 `PATH` 僅含該目錄與其 Android 子目錄，不回退系統 `PATH`。
 - **引擎與鎖分離**：AirPlay 與 Android 各自持有程序與狀態，互不影響；設定變更（含 OS 登入啟動 transaction 鎖）、ADB 列舉與工具維護（阻擋引擎啟動與 ADB 刷新）各自以 Mutex 序列化。
 - **macOS 專屬管線**：GStreamer registry 存放於 Tauri app cache，函式庫路徑僅含 engine `lib`、Homebrew prefix `lib` 與繼承路徑；AirPlay 需經系統 `dns-sd` 找到設定的 `_airplay._tcp` 名稱才回報 `Running`。
+- **GStreamer 套件版本來源**：macOS 查 Homebrew API，Windows 查 MSYS2，Linux 依 `/etc/os-release` 查 Debian／Ubuntu、Fedora 與 Arch 官方套件頁；RHEL 執行有逾時上限的唯讀 `dnf repoquery`，不支援的發行版會在工具目錄顯示查詢錯誤。
 
 ## 驗證與 CI/CD 界線
 

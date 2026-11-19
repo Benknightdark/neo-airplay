@@ -655,3 +655,134 @@ fn tool_version_preferences_and_catalog_atom_fallback_work() {
 
     fs::remove_dir_all(&config_dir).unwrap();
 }
+
+/// 驗證受支援 Linux 發行版從 `/etc/os-release` 解析版本代號，並拒絕未支援衍生版與不安全路徑片段。
+#[test]
+fn linux_distribution_detection_uses_supported_ids_and_safe_release_values() {
+    assert_eq!(
+        parse_linux_distribution("ID=debian\nVERSION_CODENAME=trixie\n").unwrap(),
+        LinuxDistribution::Debian {
+            codename: "trixie".into()
+        }
+    );
+    assert_eq!(
+        parse_linux_distribution("ID=ubuntu\nUBUNTU_CODENAME=noble\n").unwrap(),
+        LinuxDistribution::Ubuntu {
+            codename: "noble".into()
+        }
+    );
+    assert_eq!(
+        parse_linux_distribution("ID=fedora\nVERSION_ID=45\n").unwrap(),
+        LinuxDistribution::Fedora {
+            release: "45".into()
+        }
+    );
+    assert_eq!(
+        parse_linux_distribution("ID=rhel\nVERSION_ID=10.0\n").unwrap(),
+        LinuxDistribution::Rhel
+    );
+    assert_eq!(
+        parse_linux_distribution("ID=arch\n").unwrap(),
+        LinuxDistribution::Arch
+    );
+    assert!(parse_linux_distribution("ID=rocky\nID_LIKE=rhel fedora\n").is_err());
+    assert!(parse_linux_distribution("ID=ubuntu\nVERSION_CODENAME=../noble\n").is_err());
+}
+
+/// 驗證 Linux 各發行版選用白名單官方 GStreamer 套件頁並取得平台套件版本。
+#[test]
+fn linux_gstreamer_queries_use_official_distribution_sources() {
+    use crate::application::ToolCatalogFetcher;
+    use crate::domain::{DomainResult, ARCH_GSTREAMER_PACKAGES_URL, FEDORA_GSTREAMER_PACKAGES_URL};
+
+    struct FixtureFetcher {
+        expected_url: &'static str,
+        body: &'static str,
+    }
+    impl ToolCatalogFetcher for FixtureFetcher {
+        fn fetch_text(&self, url: &str) -> DomainResult<String> {
+            assert_eq!(url, self.expected_url);
+            Ok(self.body.into())
+        }
+    }
+
+    assert_eq!(
+        fetch_linux_gstreamer_latest(
+            &FixtureFetcher {
+                expected_url: "https://packages.debian.org/trixie/utils/gstreamer1.0-tools",
+                body: "<h1>Package: gstreamer1.0-tools (1.26.2-2)</h1>",
+            },
+            &LinuxDistribution::Debian {
+                codename: "trixie".into()
+            },
+            "x86_64",
+        )
+        .unwrap(),
+        "1.26.2-2"
+    );
+    assert_eq!(
+        fetch_linux_gstreamer_latest(
+            &FixtureFetcher {
+                expected_url: "https://packages.ubuntu.com/noble/utils/gstreamer1.0-tools",
+                body: "<h1>Package: gstreamer1.0-tools (1.24.2-1ubuntu0.1 and others)</h1>",
+            },
+            &LinuxDistribution::Ubuntu {
+                codename: "noble".into()
+            },
+            "aarch64",
+        )
+        .unwrap(),
+        "1.24.2-1ubuntu0.1"
+    );
+    assert_eq!(
+        fetch_linux_gstreamer_latest(
+            &FixtureFetcher {
+                expected_url: FEDORA_GSTREAMER_PACKAGES_URL,
+                body: "<table><tr><td>Fedora 45</td><td><a>1.28.9-1.fc45</a></td></tr></table>",
+            },
+            &LinuxDistribution::Fedora {
+                release: "45".into()
+            },
+            "x86_64",
+        )
+        .unwrap(),
+        "1.28.9-1.fc45"
+    );
+    assert_eq!(
+        fetch_linux_gstreamer_latest(
+            &FixtureFetcher {
+                expected_url: ARCH_GSTREAMER_PACKAGES_URL,
+                body: "<h2>gstreamer 1.28.9-3</h2>",
+            },
+            &LinuxDistribution::Arch,
+            "x86_64",
+        )
+        .unwrap(),
+        "1.28.9-3"
+    );
+    assert!(fetch_linux_gstreamer_latest(
+        &FixtureFetcher {
+            expected_url: ARCH_GSTREAMER_PACKAGES_URL,
+            body: "<h2>gstreamer 1.28.9-3</h2>",
+        },
+        &LinuxDistribution::Arch,
+        "aarch64",
+    )
+    .is_err());
+}
+
+/// 驗證 RHEL 版本查詢只呼叫唯讀 `dnf repoquery` 並限制輸出、參數與執行時間。
+#[test]
+fn rhel_gstreamer_query_is_bounded_and_read_only() {
+    assert_eq!(
+        RHEL_GSTREAMER_DNF_ARGS,
+        [
+            "--quiet",
+            "repoquery",
+            "--latest-limit=1",
+            "--queryformat=%{version}-%{release}",
+            "gstreamer1-tools",
+        ]
+    );
+    assert_eq!(RHEL_GSTREAMER_QUERY_TIMEOUT, Duration::from_secs(15));
+}

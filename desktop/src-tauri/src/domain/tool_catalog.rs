@@ -45,6 +45,10 @@ pub const ALLOWED_CATALOG_HOSTS: &[&str] = &[
     "github.com",
     "formulae.brew.sh",
     "packages.msys2.org",
+    "packages.debian.org",
+    "packages.ubuntu.com",
+    "packages.fedoraproject.org",
+    "archlinux.org",
 ];
 
 /// GitHub API：`scrcpy` 官方 Releases 清單端點。
@@ -64,6 +68,12 @@ pub const HOMEBREW_GSTREAMER_API_URL: &str = "https://formulae.brew.sh/api/formu
 /// MSYS2 UCRT64 套件頁：Windows GStreamer 最新套件版端點。
 pub const MSYS2_GSTREAMER_PAGE_URL: &str =
     "https://packages.msys2.org/packages/mingw-w64-ucrt-x86_64-gstreamer";
+/// Fedora 官方套件頁：Fedora 各版本 GStreamer RPM 套件資訊。
+pub const FEDORA_GSTREAMER_PACKAGES_URL: &str =
+    "https://packages.fedoraproject.org/pkgs/gstreamer1/gstreamer1/";
+/// Arch Linux 官方套件頁：x86_64 GStreamer 套件資訊。
+pub const ARCH_GSTREAMER_PACKAGES_URL: &str =
+    "https://archlinux.org/packages/extra/x86_64/gstreamer/";
 
 /// 目前執行中的作業系統平台分類。
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -700,7 +710,7 @@ pub fn parse_scrcpy_sha256sums(contents: &str, asset_name: &str) -> Option<Strin
 pub fn parse_homebrew_gstreamer_version(json_text: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(json_text).ok()?;
     let stable = parsed["versions"]["stable"].as_str()?.trim();
-    (!stable.is_empty() && stable.len() <= 64).then(|| stable.to_owned())
+    is_package_version(stable).then(|| stable.to_owned())
 }
 
 /// 解析 MSYS2 `packages.msys2.org` 網頁擷取 UCRT64 `gstreamer` 最新版本號。
@@ -712,15 +722,75 @@ pub fn parse_msys2_gstreamer_version(html: &str) -> Option<String> {
     let content = &after_dt[dd_start + after_dd_tag + 1..];
     let dd_end = content.find("</dd>")?;
     let version = content[..dd_end].trim();
-    if version.is_empty()
-        || version.len() > 64
-        || version
-            .chars()
-            .any(|ch| ch.is_control() || ch == '<' || ch == '>')
-    {
+    is_package_version(version).then(|| version.to_owned())
+}
+
+/// 解析 Debian 官方套件頁取得指定 GStreamer 工具套件的套件版本。
+pub fn parse_debian_gstreamer_version(html: &str) -> Option<String> {
+    parse_debian_family_gstreamer_version(html)
+}
+
+/// 解析 Ubuntu 官方套件頁取得指定 GStreamer 工具套件的套件版本。
+pub fn parse_ubuntu_gstreamer_version(html: &str) -> Option<String> {
+    parse_debian_family_gstreamer_version(html)
+}
+
+fn parse_debian_family_gstreamer_version(html: &str) -> Option<String> {
+    let marker = "Package: gstreamer1.0-tools (";
+    let after_marker = html.get(html.find(marker)? + marker.len()..)?;
+    let package_details = after_marker.split_once(')')?.0;
+    let version = package_details.split_whitespace().next()?;
+    is_package_version(version).then(|| version.to_owned())
+}
+
+/// 解析 Fedora 官方套件頁中指定 Fedora 發行版的 GStreamer 套件版本。
+pub fn parse_fedora_gstreamer_version(html: &str, release: &str) -> Option<String> {
+    if release.is_empty() || !release.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    Some(version.to_owned())
+    let marker = format!("Fedora {release}</td>");
+    let marker_index = html.find(&marker)?;
+    let row_start = html[..marker_index].rfind("<tr")?;
+    let row_end = html[marker_index..].find("</tr>")? + marker_index;
+    let row = &html[row_start..row_end];
+    let anchor_start = row.find("<a")?;
+    let content_start = row[anchor_start..].find('>')? + anchor_start + 1;
+    let content_end = row[content_start..].find("</a>")? + content_start;
+    let version = row[content_start..content_end].trim();
+    is_package_version(version).then(|| version.to_owned())
+}
+
+/// 解析 Arch Linux 官方套件頁取得 x86_64 GStreamer 套件版本。
+pub fn parse_arch_gstreamer_version(html: &str) -> Option<String> {
+    let marker = "<h2>gstreamer ";
+    let after_marker = html.get(html.find(marker)? + marker.len()..)?;
+    let version = after_marker.split(['<', ' ', '\n', '\r', '\t']).next()?;
+    is_package_version(version).then(|| version.to_owned())
+}
+
+/// 解析 DNF `repoquery` 對 GStreamer 套件輸出的單一版本行。
+pub fn parse_dnf_gstreamer_version(output: &str) -> Option<String> {
+    let mut version = None;
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if !is_package_version(line) || version.as_deref().is_some_and(|found| found != line) {
+            return None;
+        }
+        version = Some(line.to_owned());
+    }
+    version
+}
+
+fn is_package_version(version: &str) -> bool {
+    !version.is_empty()
+        && version.len() <= 64
+        && version.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(byte, b'.' | b'-' | b'+' | b'~' | b':' | b'_' | b'^')
+        })
 }
 
 /// 解析本機 `uxplay -v` 指令輸出中的版本號。
