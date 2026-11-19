@@ -8,7 +8,12 @@ import { describe, expect, it, vi } from "vitest";
 import type { DependencyGateway } from "../../../desktop/src/application";
 import ToolManagementPage from "../../../desktop/src/components/ToolManagementPage.vue";
 import { DEPENDENCY_GATEWAY_KEY } from "../../../desktop/src/presentation/di";
-import { createDependencySnapshot } from "../fixtures/builders";
+import {
+  createDependencySnapshot,
+  createManagedToolInfo,
+  createToolCatalogSnapshot,
+  createToolReleaseOption,
+} from "../fixtures/builders";
 import { createFakeDependencyGateway } from "../fixtures/fake-gateways";
 
 /** 預設已就緒的投影工具依賴快照。 */
@@ -104,6 +109,140 @@ describe("工具管理頁", () => {
     expect(wrapper.get('[data-testid="tools-reinstall"]').attributes("disabled")).toBeDefined();
     await wrapper.get('[data-testid="tools-upgrade"]').trigger("click");
     expect(gateway.manageDependencies).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  /** 驗證作業系統差異化渲染：僅在 Arch pacman 時顯示 pacman 警告，macOS 與 Windows 不顯示。 */
+  it("依目前作業系統區別顯示來源與平台專屬警告", async () => {
+    const macGateway = createFakeDependencyGateway({
+      getDependencies: vi.fn().mockResolvedValue(ready),
+      getToolCatalog: vi.fn().mockResolvedValue(createToolCatalogSnapshot({ os: "macos", platformWarning: null })),
+    });
+    const macWrapper = mountToolsPage(macGateway);
+    await flushPromises();
+    expect(macWrapper.get('[data-testid="tools-platform-os"]').text()).toContain("macOS");
+    expect(macWrapper.find('[data-testid="tools-platform-warning"]').exists()).toBe(false);
+    macWrapper.unmount();
+
+    const winGateway = createFakeDependencyGateway({
+      getDependencies: vi.fn().mockResolvedValue(ready),
+      getToolCatalog: vi.fn().mockResolvedValue(
+        createToolCatalogSnapshot({
+          os: "windows",
+          arch: "x86_64",
+          platformLabel: "Windows (x86_64)",
+          packageManager: "WinGet + MSYS2 UCRT64",
+          platformNotice: "Windows 僅於補裝系統前置項目時要求 UAC 授權。",
+          platformWarning: null,
+        }),
+      ),
+    });
+    const winWrapper = mountToolsPage(winGateway);
+    await flushPromises();
+    expect(winWrapper.get('[data-testid="tools-platform-os"]').text()).toContain("Windows");
+    expect(winWrapper.text()).toContain("WinGet + MSYS2 UCRT64");
+    expect(winWrapper.find('[data-testid="tools-platform-warning"]').exists()).toBe(false);
+    winWrapper.unmount();
+
+    const pacmanGateway = createFakeDependencyGateway({
+      getDependencies: vi.fn().mockResolvedValue(ready),
+      getToolCatalog: vi.fn().mockResolvedValue(
+        createToolCatalogSnapshot({
+          os: "linux",
+          arch: "aarch64",
+          platformLabel: "Linux (aarch64)",
+          packageManager: "Pacman（Arch Linux）",
+          platformWarning: "偵測到 Arch Linux pacman：升級可能會執行 pacman -Syu。",
+          tools: [
+            createManagedToolInfo({ id: "uxplay", name: "UxPlay", versionControl: "selectable" }),
+            createManagedToolInfo({
+              id: "scrcpy",
+              versionControl: "packageManager",
+              availableVersions: [],
+              supportsManualSha256: false,
+            }),
+          ],
+        }),
+      ),
+    });
+    const pacmanWrapper = mountToolsPage(pacmanGateway);
+    await flushPromises();
+    expect(pacmanWrapper.get('[data-testid="tools-platform-warning"]').text()).toContain("pacman -Syu");
+    expect(pacmanWrapper.find('[data-testid="tool-install-scrcpy"]').exists()).toBe(false);
+    pacmanWrapper.unmount();
+  });
+
+  /** 驗證透過按鈕爬取線上版本後可選擇特定 scrcpy 版本並送出 installToolVersion。 */
+  it("支援重新爬取線上版本並安裝選取的 scrcpy 版本", async () => {
+    const crawledCatalog = createToolCatalogSnapshot({
+      tools: [
+        createManagedToolInfo({ id: "uxplay", name: "UxPlay" }),
+        createManagedToolInfo({
+          id: "scrcpy",
+          availableVersions: [
+            createToolReleaseOption({ version: "5.0.1", label: "v5.0.1（內建推薦驗證版）", recommended: true }),
+            createToolReleaseOption({ version: "4.1", reference: "v4.1", label: "v4.1", recommended: false, sha256: null }),
+          ],
+        }),
+      ],
+    });
+    const gateway = createFakeDependencyGateway({
+      getDependencies: vi.fn().mockResolvedValue(ready),
+      getToolCatalog: vi.fn().mockResolvedValue(createToolCatalogSnapshot({ remoteFetchedAt: null })),
+      fetchToolVersions: vi.fn().mockResolvedValue(crawledCatalog),
+    });
+
+    const wrapper = mountToolsPage(gateway);
+    await flushPromises();
+    expect(gateway.fetchToolVersions).toHaveBeenCalledOnce();
+
+    await wrapper.get('[data-testid="tools-fetch-versions"]').trigger("click");
+    await flushPromises();
+    expect(gateway.fetchToolVersions).toHaveBeenCalledTimes(2);
+
+    await wrapper.get('[data-testid="tool-version-select-scrcpy"]').setValue("4.1");
+    await wrapper.get('[data-testid="tool-install-scrcpy"]').trigger("click");
+    await flushPromises();
+
+    expect(gateway.installToolVersion).toHaveBeenCalledWith({
+      tool: "scrcpy",
+      version: "4.1",
+      sha256: null,
+      allowUnverified: false,
+    });
+    wrapper.unmount();
+  });
+
+  /** 驗證手動輸入非法版本時阻擋提交，以及安裝未附 SHA-256 的非預設 UxPlay 時顯示確認對話框（Option 1A）。 */
+  it("手動輸入會即時驗證格式並在未附 SHA-256 的 UxPlay 時跳出確認視窗", async () => {
+    const gateway = createFakeDependencyGateway({
+      getDependencies: vi.fn().mockResolvedValue(ready),
+    });
+    const wrapper = mountToolsPage(gateway);
+    await flushPromises();
+
+    await wrapper.get('[data-testid="tool-mode-manual-uxplay"]').trigger("click");
+    const input = wrapper.get('[data-testid="tool-version-input-uxplay"]');
+    await input.setValue("bad version;id");
+    expect(wrapper.find('[data-testid="tool-version-error-uxplay"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="tool-install-uxplay"]').attributes("disabled")).toBeDefined();
+
+    await input.setValue("1.73.6");
+    expect(wrapper.find('[data-testid="tool-version-error-uxplay"]').exists()).toBe(false);
+    await wrapper.get('[data-testid="tool-install-uxplay"]').trigger("click");
+
+    expect(wrapper.find('[data-testid="tools-unverified-confirmation"]').exists()).toBe(true);
+    expect(gateway.installToolVersion).not.toHaveBeenCalled();
+
+    await wrapper.get('[data-testid="tools-unverified-confirm"]').trigger("click");
+    await flushPromises();
+
+    expect(gateway.installToolVersion).toHaveBeenCalledWith({
+      tool: "uxplay",
+      version: "1.73.6",
+      sha256: null,
+      allowUnverified: true,
+    });
     wrapper.unmount();
   });
 });

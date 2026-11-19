@@ -521,3 +521,137 @@ fn seed_bundled_engine_ignores_source_symlinks_and_rejects_destination_symlinks(
 
     fs::remove_dir_all(root).unwrap();
 }
+
+/// 驗證 Unix 與 Windows 安裝器引數建構函式正確傳遞 `--only`、自訂版本、SHA-256 與 `--allow-unverified-uxplay` 參數。
+#[test]
+fn extra_installer_args_encode_selected_tool_versions_without_shell_interpolation() {
+    use super::{
+        unix_extra_installer_args, windows_extra_installer_args, InstallInvocationOptions,
+    };
+    use crate::domain::{PinnedToolVersion, ToolId};
+
+    let options = InstallInvocationOptions {
+        only_tool: Some(ToolId::UxPlay),
+        uxplay: Some(PinnedToolVersion {
+            version: "1.73.6".into(),
+            reference: "v1.73.6".into(),
+            sha256: None,
+            allow_unverified: true,
+        }),
+        scrcpy: Some(PinnedToolVersion {
+            version: "4.1".into(),
+            reference: "v4.1".into(),
+            sha256: Some("a".repeat(64)),
+            allow_unverified: false,
+        }),
+        validated_install: None,
+    };
+
+    let unix = unix_extra_installer_args(false, &options);
+    assert_eq!(
+        unix,
+        vec![
+            "--only",
+            "uxplay",
+            "--uxplay-ref",
+            "v1.73.6",
+            "--expect-uxplay-version",
+            "1.73.6",
+            "--allow-unverified-uxplay",
+            "--scrcpy-version",
+            "4.1",
+            "--scrcpy-sha256",
+            &"a".repeat(64),
+        ]
+    );
+
+    let windows = windows_extra_installer_args(true, &options);
+    assert_eq!(
+        windows,
+        vec![
+            "-Upgrade",
+            "-Only",
+            "uxplay",
+            "-UxPlayRef",
+            "v1.73.6",
+            "-ExpectUxPlayVersion",
+            "1.73.6",
+            "-AllowUnverifiedUxPlay",
+            "-ScrcpyVersionOverride",
+            "4.1",
+            "-ScrcpySha256",
+            &"a".repeat(64),
+        ]
+    );
+}
+
+/// 驗證 `tool-versions.json` 安全持久化（寫入、讀取、恢復預設、拒絕符號連結）與 API 失敗回退 Atom XML 爬取流程。
+#[test]
+fn tool_version_preferences_and_catalog_atom_fallback_work() {
+    use super::{
+        load_tool_version_preferences, reset_tool_version_preferences, save_tool_version_preference,
+    };
+    use crate::application::ToolCatalogFetcher;
+    use crate::domain::{DomainError, DomainResult, ToolId, ValidatedToolInstall};
+
+    let config_dir = install_log_test_directory();
+    fs::create_dir_all(&config_dir).unwrap();
+
+    let custom_scrcpy = ValidatedToolInstall {
+        tool: ToolId::Scrcpy,
+        version: "4.1".into(),
+        reference: "v4.1".into(),
+        sha256: None,
+        allow_unverified: false,
+        is_default: false,
+    };
+    save_tool_version_preference(&config_dir, &custom_scrcpy).unwrap();
+    let loaded = load_tool_version_preferences(&config_dir);
+    assert_eq!(loaded.scrcpy.as_ref().unwrap().version, "4.1");
+
+    reset_tool_version_preferences(&config_dir).unwrap();
+    assert!(load_tool_version_preferences(&config_dir).scrcpy.is_none());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let outside = config_dir.join("outside.json");
+        fs::write(&outside, b"{}").unwrap();
+        symlink(&outside, config_dir.join(super::TOOL_VERSIONS_FILE)).unwrap();
+        assert!(save_tool_version_preference(&config_dir, &custom_scrcpy).is_err());
+        assert!(reset_tool_version_preferences(&config_dir).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"{}");
+    }
+
+    struct FallbackFetcher;
+    impl ToolCatalogFetcher for FallbackFetcher {
+        fn fetch_text(&self, url: &str) -> DomainResult<String> {
+            if url.contains("api.github.com") {
+                return Err(DomainError::external_process("HTTP 403 rate limited"));
+            }
+            if url.contains("scrcpy/releases.atom") {
+                return Ok(r#"<feed><entry><link href="https://github.com/Genymobile/scrcpy/releases/tag/v5.0.1"/><updated>2026-10-08T00:00:00Z</updated></entry></feed>"#.into());
+            }
+            if url.contains("UxPlay/releases.atom") {
+                return Ok(r#"<feed><entry><link href="https://github.com/FDH2/UxPlay/releases/tag/v1.73.7"/><updated>2026-09-10T00:00:00Z</updated></entry></feed>"#.into());
+            }
+            Ok(r#"{"versions":{"stable":"1.28.9"}}"#.into())
+        }
+    }
+
+    let manager = DependencyManager::new(
+        config_dir.join("engine"),
+        config_dir.join("cache/registry.bin"),
+        &config_dir,
+        false,
+    );
+    let catalog = manager.refresh_tool_catalog(&FallbackFetcher).unwrap();
+    assert!(catalog.remote_fetched_at.is_some());
+    assert_eq!(
+        catalog.tools[0].latest_remote_version.as_deref(),
+        Some("1.73.7")
+    );
+    assert_eq!(catalog.tools[1].available_versions[0].version, "5.0.1");
+
+    fs::remove_dir_all(&config_dir).unwrap();
+}

@@ -1,21 +1,148 @@
 <script setup lang="ts">
 /**
- * @file 投影工具與相依套件管理頁面元件，提供工具升級、危險操作的雙重確認重裝及安裝日誌檢視。
+ * @file 投影工具與相依套件管理頁面元件：依目前作業系統呈現工具來源、線上版本爬取／手動版本安裝、重裝確認與安裝日誌。
  */
-import { computed, ref } from "vue";
+import { computed, reactive, ref, watch } from "vue";
 import { useDependencyState } from "../composables/useDependencyState";
-import { dependencyOperationLabel, dependencyStatusLabel } from "../domain";
+import { useToolCatalog } from "../composables/useToolCatalog";
+import {
+  dependencyOperationLabel,
+  dependencyStatusLabel,
+  platformBadgeLabel,
+  requiresUnverifiedConfirmation,
+  validateOptionalSha256Input,
+  validateToolVersionInput,
+  type ManagedToolInfo,
+  type ToolId,
+} from "../domain";
 import InstallLogViewer from "./InstallLogViewer.vue";
+
+/** 單一工具卡片的表單互動狀態。 */
+interface ToolSelectionDraft {
+  mode: "select" | "manual";
+  selectedVersion: string;
+  manualVersion: string;
+  sha256: string;
+}
 
 /** 控制清除並重新安裝確認對話框是否開啟。 */
 const confirmingReinstall = ref(false);
+/** 暫存待使用者明確確認（未附 SHA-256 的非預設 UxPlay）安裝項目。 */
+const pendingUnverifiedTool = ref<{ tool: ManagedToolInfo; version: string } | null>(null);
+
 /** 取得目前依賴工具狀態、忙碌鎖定狀態及維護操作方法。 */
-const { snapshot, error, installing, unavailable, runAction } = useDependencyState();
+const { snapshot, error, installing, unavailable, runAction, installToolVersion } =
+  useDependencyState();
+
+const dependencyStatus = computed(() => snapshot.value?.status);
+const {
+  catalog,
+  fetchingRemote,
+  catalogError,
+  hasCustomVersions,
+  fetchRemoteVersions,
+  resetToolVersions,
+} = useToolCatalog({ dependencyStatus });
 
 /** 依據目前背景作業類型轉換的繁體中文操作名稱。 */
 const operationLabel = computed(() => dependencyOperationLabel(snapshot.value?.operation));
 /** 依據目前依賴狀態轉換的繁體中文狀態標籤。 */
 const statusLabel = computed(() => dependencyStatusLabel(snapshot.value?.status));
+
+/** 各工具之版本選擇／手動輸入表單狀態。 */
+const drafts = reactive<Record<ToolId, ToolSelectionDraft>>({
+  uxplay: { mode: "select", selectedVersion: "", manualVersion: "", sha256: "" },
+  scrcpy: { mode: "select", selectedVersion: "", manualVersion: "", sha256: "" },
+  gstreamer: { mode: "select", selectedVersion: "", manualVersion: "", sha256: "" },
+});
+
+watch(
+  catalog,
+  (nextCatalog) => {
+    if (!nextCatalog) return;
+    for (const tool of nextCatalog.tools) {
+      if (tool.versionControl !== "selectable") continue;
+      const draft = drafts[tool.id];
+      const desired = tool.selectedVersion || tool.defaultVersion;
+      const hasInList = tool.availableVersions.some((option) => option.version === desired);
+      if (!draft.selectedVersion) {
+        if (hasInList) {
+          draft.mode = "select";
+          draft.selectedVersion = desired;
+        } else {
+          draft.mode = "manual";
+          draft.selectedVersion = tool.availableVersions[0]?.version ?? tool.defaultVersion;
+        }
+      } else if (!tool.availableVersions.some((option) => option.version === draft.selectedVersion)) {
+        draft.selectedVersion = tool.availableVersions[0]?.version ?? tool.defaultVersion;
+      }
+      if (!draft.manualVersion) {
+        draft.manualVersion = desired;
+      }
+    }
+  },
+  { immediate: true },
+);
+
+/**
+ * 取得指定工具表單目前選用或輸入的目標版本字串。
+ */
+function effectiveVersion(tool: ManagedToolInfo): string {
+  const draft = drafts[tool.id];
+  return draft.mode === "select" ? draft.selectedVersion.trim() : draft.manualVersion.trim();
+}
+
+/**
+ * 檢查指定工具目前版本與 SHA-256 輸入欄位之驗證錯誤訊息。
+ */
+function versionErrorFor(tool: ManagedToolInfo): string | null {
+  return validateToolVersionInput(tool.id, effectiveVersion(tool));
+}
+
+/**
+ * 檢查指定工具目前選填 SHA-256 輸入欄位之格式錯誤訊息。
+ */
+function shaErrorFor(tool: ManagedToolInfo): string | null {
+  return validateOptionalSha256Input(drafts[tool.id].sha256);
+}
+
+/**
+ * 觸發安裝指定工具與版本；若屬於未附 SHA-256 的非預設 UxPlay，先行顯示確認視窗。
+ */
+async function submitToolInstall(tool: ManagedToolInfo): Promise<void> {
+  if (installing.value || unavailable.value) return;
+  const version = effectiveVersion(tool);
+  if (validateToolVersionInput(tool.id, version) || shaErrorFor(tool)) return;
+
+  const sha256 = drafts[tool.id].sha256.trim();
+  if (requiresUnverifiedConfirmation(tool, version, sha256)) {
+    pendingUnverifiedTool.value = { tool, version };
+    return;
+  }
+
+  await installToolVersion({
+    tool: tool.id,
+    version,
+    sha256: sha256.length > 0 ? sha256 : null,
+    allowUnverified: false,
+  });
+}
+
+/**
+ * 使用者確認後，送出未附帶 SHA-256 的自訂 UxPlay HTTPS 安裝請求。
+ */
+async function confirmUnverifiedInstall(): Promise<void> {
+  const pending = pendingUnverifiedTool.value;
+  pendingUnverifiedTool.value = null;
+  if (!pending) return;
+
+  await installToolVersion({
+    tool: pending.tool.id,
+    version: pending.version,
+    sha256: null,
+    allowUnverified: true,
+  });
+}
 
 /**
  * 僅在工具未忙碌且功能可用時開啟「清除並重新安裝」二次確認對話框。
@@ -26,12 +153,27 @@ function requestReinstall(): void {
 
 /**
  * 關閉確認對話框並觸發清除重新安裝維護流程。
- *
- * @returns 維護請求提交完成後解析的 `Promise<void>`。
  */
 async function confirmReinstall(): Promise<void> {
   confirmingReinstall.value = false;
   await runAction("reinstall");
+}
+
+/**
+ * 格式化爬取時間戳記為台灣 24 小時制簡短時間顯示。
+ */
+function formatFetchedAt(timestamp: string | null | undefined): string {
+  if (!timestamp) return "尚未線上爬取（使用內建清單）";
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.valueOf())) return timestamp;
+  return new Intl.DateTimeFormat("zh-TW", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
 }
 </script>
 
@@ -41,7 +183,7 @@ async function confirmReinstall(): Promise<void> {
       <div>
         <p class="eyebrow">投影工具</p>
         <h2>管理工具與相依套件</h2>
-        <p class="muted-copy">升級至 Neo AirPlay 支援的工具版本，或清除 App 專用工具後重新安裝。</p>
+        <p class="muted-copy">依目前作業系統自動區分來源，並支援爬取線上版本或手動輸入版本安裝。</p>
       </div>
       <span class="tool-status" :class="`tool-status-${snapshot?.status ?? 'checking'}`" role="status" data-testid="tools-status">
         <span class="status-indicator" aria-hidden="true"></span>{{ statusLabel }}
@@ -61,11 +203,171 @@ async function confirmReinstall(): Promise<void> {
       <p v-if="snapshot?.status === 'disabled'" class="tool-disabled-hint">此工作階段已停用工具管理。</p>
     </div>
 
+    <section v-if="catalog" class="tool-platform-banner" data-testid="tools-platform-banner" aria-label="作業系統環境與線上版本">
+      <div class="tool-platform-summary">
+        <div class="tool-platform-badges">
+          <span class="os-badge" :class="`os-badge-${catalog.os}`" data-testid="tools-platform-os">
+            {{ platformBadgeLabel(catalog.os) }} · {{ catalog.platformLabel }}
+          </span>
+          <span class="pkg-badge">{{ catalog.packageManager }}</span>
+        </div>
+        <p class="tool-platform-notice">{{ catalog.platformNotice }}</p>
+        <p class="tool-remote-meta">
+          線上版本清單更新：{{ formatFetchedAt(catalog.remoteFetchedAt) }}
+          <span v-if="catalog.remoteError || catalogError" class="tool-remote-error" data-testid="tools-remote-error">
+            （部分來源暫時無法連線：{{ catalogError || catalog.remoteError }}）
+          </span>
+        </p>
+      </div>
+      <div class="tool-platform-actions">
+        <button
+          class="button-secondary"
+          type="button"
+          :disabled="fetchingRemote"
+          data-testid="tools-fetch-versions"
+          @click="fetchRemoteVersions"
+        >
+          {{ fetchingRemote ? "正在爬取版本…" : "重新抓取線上版本" }}
+        </button>
+        <button
+          v-if="hasCustomVersions"
+          class="button-secondary"
+          type="button"
+          :disabled="installing || unavailable"
+          data-testid="tools-reset-versions"
+          @click="resetToolVersions"
+        >
+          還原推薦版本
+        </button>
+      </div>
+    </section>
+
+    <div v-if="catalog" class="tool-catalog-grid" data-testid="tools-catalog-list">
+      <article
+        v-for="tool in catalog.tools"
+        :key="tool.id"
+        class="tool-version-card"
+        :class="{ 'tool-version-card-readonly': tool.versionControl === 'packageManager' }"
+        :data-testid="`tool-card-${tool.id}`"
+      >
+        <div class="tool-version-header">
+          <div>
+            <h3>{{ tool.name }}</h3>
+            <span class="tool-source-label">{{ tool.sourceLabel }}</span>
+          </div>
+          <div class="tool-version-pills">
+            <span class="version-pill" :class="{ 'version-pill-active': Boolean(tool.installedVersion) }">
+              已安裝：{{ tool.installedVersion ? `v${tool.installedVersion}` : "尚未偵測" }}
+            </span>
+            <span v-if="tool.latestRemoteVersion" class="version-pill version-pill-remote">
+              線上最新：v{{ tool.latestRemoteVersion }}
+            </span>
+            <span v-if="tool.selectedVersion" class="version-pill version-pill-pinned">
+              已鎖定：{{ tool.selectedVersion }}
+            </span>
+          </div>
+        </div>
+
+        <p class="tool-version-summary">{{ tool.summary }}</p>
+
+        <div v-if="tool.bundledComponents.length" class="tool-bundled-row">
+          <span v-for="component in tool.bundledComponents" :key="component" class="bundled-chip">
+            {{ component }}
+          </span>
+        </div>
+
+        <template v-if="tool.versionControl === 'selectable'">
+          <div class="tool-mode-tabs" role="group" :aria-label="`${tool.name} 版本輸入方式`">
+            <button
+              type="button"
+              class="mode-tab"
+              :class="{ 'mode-tab-active': drafts[tool.id].mode === 'select' }"
+              :data-testid="`tool-mode-select-${tool.id}`"
+              @click="drafts[tool.id].mode = 'select'"
+            >
+              線上版本清單
+            </button>
+            <button
+              type="button"
+              class="mode-tab"
+              :class="{ 'mode-tab-active': drafts[tool.id].mode === 'manual' }"
+              :data-testid="`tool-mode-manual-${tool.id}`"
+              @click="drafts[tool.id].mode = 'manual'"
+            >
+              手動輸入版本
+            </button>
+          </div>
+
+          <div class="tool-version-controls">
+            <label v-if="drafts[tool.id].mode === 'select'" class="field-block">
+              <span class="field-label">選擇發行版本</span>
+              <select
+                v-model="drafts[tool.id].selectedVersion"
+                class="tool-input"
+                :disabled="installing || unavailable"
+                :data-testid="`tool-version-select-${tool.id}`"
+              >
+                <option v-for="option in tool.availableVersions" :key="`${option.version}-${option.reference}`" :value="option.version">
+                  {{ option.label }}{{ option.publishedAt ? ` · ${option.publishedAt}` : "" }}{{ option.prerelease ? "（預覽）" : "" }}
+                </option>
+              </select>
+            </label>
+
+            <label v-else class="field-block">
+              <span class="field-label">輸入版本號{{ tool.id === "uxplay" ? "或 40 碼 Commit SHA" : "" }}</span>
+              <input
+                v-model="drafts[tool.id].manualVersion"
+                type="text"
+                class="tool-input"
+                :disabled="installing || unavailable"
+                :placeholder="tool.id === 'uxplay' ? '例如 1.73.7 或 40 碼 commit SHA' : '例如 5.0.1 或 v4.1'"
+                :data-testid="`tool-version-input-${tool.id}`"
+              />
+            </label>
+
+            <button
+              class="button-primary"
+              type="button"
+              :disabled="installing || unavailable || Boolean(versionErrorFor(tool)) || Boolean(shaErrorFor(tool))"
+              :data-testid="`tool-install-${tool.id}`"
+              @click="submitToolInstall(tool)"
+            >
+              安裝此版本
+            </button>
+          </div>
+
+          <p v-if="versionErrorFor(tool)" class="tool-input-error" :data-testid="`tool-version-error-${tool.id}`">
+            {{ versionErrorFor(tool) }}
+          </p>
+
+          <details v-if="tool.supportsManualSha256" class="tool-advanced-details">
+            <summary>進階校驗選項（選填 SHA-256）</summary>
+            <label class="field-block">
+              <span class="field-label">
+                SHA-256 校驗碼（{{ tool.autoVerifiesChecksum ? "留空將自動比對官方 SHA256SUMS.txt" : "選填 64 碼十六進位" }}）
+              </span>
+              <input
+                v-model="drafts[tool.id].sha256"
+                type="text"
+                class="tool-input"
+                :disabled="installing || unavailable"
+                placeholder="選填 64 碼十六進位 SHA-256"
+                :data-testid="`tool-sha256-input-${tool.id}`"
+              />
+            </label>
+            <p v-if="shaErrorFor(tool)" class="tool-input-error">{{ shaErrorFor(tool) }}</p>
+          </details>
+        </template>
+
+        <p v-if="tool.note" class="tool-version-note">{{ tool.note }}</p>
+      </article>
+    </div>
+
     <div class="tool-action-grid">
       <article class="tool-action-card">
         <div class="tool-action-icon tool-action-icon-upgrade" aria-hidden="true">↻</div>
         <h3>升級工具</h3>
-        <p>更新 UxPlay、GStreamer、ADB 與 scrcpy，並更新平台套件管理器中的相依套件。</p>
+        <p>更新平台套件管理器中的相依套件，並依目前設定版本重建／部署 UxPlay、scrcpy 與 ADB。</p>
         <button class="button-primary" type="button" :disabled="installing || unavailable" data-testid="tools-upgrade" @click="runAction('upgrade')">
           {{ installing && snapshot?.operation === 'upgrade' ? '正在升級…' : '升級工具' }}
         </button>
@@ -81,7 +383,9 @@ async function confirmReinstall(): Promise<void> {
       </article>
     </div>
 
-    <p class="tool-package-warning">套件更新可能會要求系統授權；Arch Linux 的 pacman 更新可能同時更新整個系統。</p>
+    <p v-if="catalog?.platformWarning" class="tool-package-warning" data-testid="tools-platform-warning">
+      {{ catalog.platformWarning }}
+    </p>
 
     <div v-if="confirmingReinstall" class="tool-confirmation-backdrop" data-testid="tools-confirmation">
       <section class="tool-confirmation" role="dialog" aria-modal="true" aria-labelledby="tools-confirmation-title">
@@ -90,6 +394,19 @@ async function confirmReinstall(): Promise<void> {
         <div class="tool-confirmation-actions">
           <button class="button-secondary" type="button" data-testid="tools-reinstall-cancel" @click="confirmingReinstall = false">取消</button>
           <button class="button-primary" type="button" data-testid="tools-reinstall-confirm" @click="confirmReinstall">清除並重新安裝</button>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="pendingUnverifiedTool" class="tool-confirmation-backdrop" data-testid="tools-unverified-confirmation">
+      <section class="tool-confirmation tool-confirmation-amber" role="dialog" aria-modal="true" aria-labelledby="tools-unverified-title">
+        <h3 id="tools-unverified-title">安裝未附帶雜湊值的 UxPlay {{ pendingUnverifiedTool.version }}？</h3>
+        <p>
+          您所選的非內建推薦 UxPlay 版本未填入 SHA-256 校驗碼。確認後將透過嚴格 HTTPS（TLS 1.2+）自官方 GitHub 原始碼倉庫（<code>https://github.com/FDH2/UxPlay</code>）下載並本機編譯。
+        </p>
+        <div class="tool-confirmation-actions">
+          <button class="button-secondary" type="button" data-testid="tools-unverified-cancel" @click="pendingUnverifiedTool = null">取消</button>
+          <button class="button-primary" type="button" data-testid="tools-unverified-confirm" @click="confirmUnverifiedInstall">確認並透過 HTTPS 安裝</button>
         </div>
       </section>
     </div>
@@ -117,6 +434,67 @@ async function confirmReinstall(): Promise<void> {
 .tool-status-card :deep(.install-log-control) { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border-rust); }
 .tool-missing-list { margin: 8px 0 0; padding-left: 19px; color: var(--crimson-alert); font-size: 12px; line-height: 1.7; }
 .tool-status-card .tool-disabled-hint { color: var(--text-muted); font-size: 11px; }
+
+.tool-platform-banner {
+  display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 16px;
+  margin-bottom: 20px; padding: 16px 20px; border: 1px solid var(--border-rust); border-radius: 2px; background: var(--bg-bunker);
+}
+.tool-platform-summary { flex: 1 1 520px; min-width: 0; }
+.tool-platform-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.os-badge, .pkg-badge {
+  display: inline-flex; align-items: center; padding: 4px 9px; border: 1px solid var(--border-rust); border-radius: 2px;
+  font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+}
+.os-badge-macos { color: var(--phosphor-cyan); border-color: rgba(0, 229, 255, .35); background: var(--phosphor-cyan-dim); }
+.os-badge-windows { color: var(--hazard-amber); border-color: rgba(255, 157, 0, .35); background: var(--hazard-amber-dim); }
+.os-badge-linux { color: var(--text-primary); background: var(--bg-bunker-elevated); }
+.pkg-badge { color: var(--text-secondary); background: var(--bg-ash); }
+.tool-platform-notice { margin: 10px 0 4px; color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
+.tool-remote-meta { margin: 0; color: var(--text-muted); font-size: 11px; line-height: 1.6; }
+.tool-remote-error { color: var(--hazard-amber); }
+.tool-platform-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+
+.tool-catalog-grid { display: grid; gap: 16px; margin-bottom: 20px; }
+.tool-version-card {
+  padding: 20px; border: 1px solid var(--border-rust); border-left: 3px solid var(--phosphor-cyan); border-radius: 2px;
+  background: var(--bg-bunker);
+}
+.tool-version-card-readonly { border-left-color: var(--border-rust); }
+.tool-version-header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.tool-version-header h3 { margin: 0; color: var(--text-primary); font-size: 15px; }
+.tool-source-label { display: inline-block; margin-top: 4px; color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; }
+.tool-version-pills { display: flex; flex-wrap: wrap; gap: 8px; }
+.version-pill {
+  padding: 4px 8px; border: 1px solid var(--border-rust); border-radius: 2px;
+  color: var(--text-muted); background: var(--bg-ash); font-family: var(--font-mono); font-size: 11px;
+}
+.version-pill-active { color: var(--phosphor-cyan); border-color: rgba(0, 229, 255, .35); background: var(--phosphor-cyan-dim); }
+.version-pill-remote { color: var(--text-secondary); }
+.version-pill-pinned { color: var(--hazard-amber); border-color: rgba(255, 157, 0, .35); background: var(--hazard-amber-dim); }
+.tool-version-summary { margin: 10px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.65; }
+.tool-bundled-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.bundled-chip {
+  padding: 3px 8px; border: 1px dashed var(--border-rust); border-radius: 2px;
+  color: var(--text-secondary); font-family: var(--font-mono); font-size: 11px;
+}
+.tool-mode-tabs { display: inline-flex; margin-top: 14px; border: 1px solid var(--border-rust); border-radius: 2px; overflow: hidden; }
+.mode-tab {
+  padding: 7px 12px; border: 0; color: var(--text-muted); background: var(--bg-ash); font-size: 11px; font-weight: 600;
+}
+.mode-tab-active { color: var(--phosphor-cyan); background: var(--phosphor-cyan-dim); }
+.tool-version-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin-top: 12px; }
+.field-block { display: grid; gap: 6px; flex: 1 1 280px; min-width: 0; }
+.field-label { color: var(--text-muted); font-size: 11px; }
+.tool-input {
+  width: 100%; padding: 10px 12px; border: 1px solid var(--border-rust); border-radius: 2px;
+  color: var(--text-primary); background: var(--bg-ash); font-family: var(--font-mono); font-size: 12px;
+}
+.tool-input-error { margin: 8px 0 0; color: var(--crimson-alert); font-size: 11px; }
+.tool-advanced-details { margin-top: 12px; color: var(--text-muted); font-size: 11px; }
+.tool-advanced-details summary { cursor: pointer; user-select: none; }
+.tool-advanced-details .field-block { margin-top: 10px; }
+.tool-version-note { margin: 12px 0 0; color: var(--text-muted); font-size: 11px; line-height: 1.6; }
+
 .tool-action-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 17px; }
 .tool-action-card {
   position: relative; padding: 22px; border: 1px solid var(--border-rust); border-top: 2px solid var(--hazard-amber); border-radius: 2px;
@@ -132,8 +510,10 @@ async function confirmReinstall(): Promise<void> {
 .tool-package-warning { margin: 16px 0 0; padding: 10px 12px; border-left: 2px solid var(--hazard-amber); color: var(--text-secondary); background: var(--hazard-amber-dim); font-size: 11px; line-height: 1.7; }
 .tool-confirmation-backdrop { position: fixed; inset: 0; z-index: 5; display: grid; place-items: center; padding: 20px; background: rgba(3, 5, 7, .85); }
 .tool-confirmation { width: min(100%, 470px); padding: 24px; border: 1px solid var(--border-rust); border-top: 2px solid var(--crimson-alert); border-radius: 3px; background: var(--bg-bunker); box-shadow: 0 24px 80px rgba(0, 0, 0, .65); }
+.tool-confirmation-amber { border-top-color: var(--hazard-amber); }
 .tool-confirmation h3 { margin: 0; color: var(--text-primary); font-size: 16px; }
 .tool-confirmation p { margin: 12px 0 22px; color: var(--text-secondary); font-size: 12px; line-height: 1.8; }
+.tool-confirmation code { font-family: var(--font-mono); color: var(--phosphor-cyan); }
 .tool-confirmation-actions { display: flex; justify-content: flex-end; gap: 10px; }
 
 @media (max-width: 700px) {

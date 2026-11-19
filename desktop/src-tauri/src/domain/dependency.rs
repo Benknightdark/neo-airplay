@@ -23,6 +23,8 @@ pub enum DependencyOperation {
     Upgrade,
     /// 重新安裝所有投影工具。
     Reinstall,
+    /// 依使用者指定版本安裝或切換單一投影工具。
+    InstallTool,
 }
 
 impl From<DependencyAction> for DependencyOperation {
@@ -83,6 +85,7 @@ impl SetupOutcome {
                 DependencyOperation::Install => "投影工具已就緒。".into(),
                 DependencyOperation::Upgrade => "投影工具升級完成。".into(),
                 DependencyOperation::Reinstall => "投影工具重新安裝完成。".into(),
+                DependencyOperation::InstallTool => "指定版本的投影工具安裝完成。".into(),
             },
             missing: Vec::new(),
         }

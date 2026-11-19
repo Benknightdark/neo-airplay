@@ -481,10 +481,24 @@ pub fn run_with_timeout_in_path(
     timeout: Duration,
     path: Option<&OsStr>,
 ) -> Result<Output, String> {
+    run_with_timeout_env(executable, args, timeout, path, &[])
+}
+
+/// 在可選自訂 `PATH` 與額外環境變數下啟動外部指令，以非阻塞輪詢監控逾時並同時排空輸出管道。
+pub fn run_with_timeout_env(
+    executable: &Path,
+    args: &[String],
+    timeout: Duration,
+    path: Option<&OsStr>,
+    extra_env: &[(&str, &OsStr)],
+) -> Result<Output, String> {
     let mut command = background_command(executable);
     command.args(args);
     if let Some(path) = path {
         command.env("PATH", path);
+    }
+    for (key, value) in extra_env {
+        command.env(key, value);
     }
     let mut child = command
         .stdin(Stdio::null())

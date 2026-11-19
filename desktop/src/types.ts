@@ -14,5 +14,12 @@ export type {
   EngineStatus,
   LogFilter,
   LogLevel,
+  ManagedToolInfo,
+  PlatformOs,
   ReceiverSettings,
+  ToolCatalogSnapshot,
+  ToolId,
+  ToolInstallRequest,
+  ToolReleaseOption,
+  VersionControlMode,
 } from "./domain";

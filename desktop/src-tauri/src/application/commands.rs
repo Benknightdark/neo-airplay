@@ -5,7 +5,7 @@ use crate::application::ports::{
 };
 use crate::domain::{
     AndroidDevice, DependencyAction, DependencySnapshot, DomainError, DomainResult, EngineSnapshot,
-    EngineStatus, ReceiverSettings,
+    EngineStatus, ReceiverSettings, ToolCatalogSnapshot, ToolInstallRequest,
 };
 use std::sync::Mutex;
 
@@ -156,6 +156,23 @@ pub fn install_dependencies(
     dependencies.start_install()
 }
 
+/// 工具維護或切換版本前停止所有作用中的投影引擎，若任一引擎停止異常則阻擋工具異動。
+fn stop_engines_for_maintenance(runtime: &dyn ReceiverRuntime) -> DomainResult<()> {
+    let airplay = runtime
+        .stop_airplay()
+        .map_err(|error| DomainError::external_process(format!("無法停止 AirPlay：{error}")))?;
+    let android = runtime.stop_android_mirror().map_err(|error| {
+        DomainError::external_process(format!("無法停止 Android 投影：{error}"))
+    })?;
+    if airplay.status == EngineStatus::Faulted || android.status == EngineStatus::Faulted {
+        return Err(DomainError::external_process(format!(
+            "停止投影服務失敗，工具檔案未移除。{} {}",
+            airplay.message, android.message
+        )));
+    }
+    Ok(())
+}
+
 /// 執行依賴工具升級或重新安裝維護流程，並在前置步驟先停止所有作用中的投影服務。
 ///
 /// # 參數
@@ -170,19 +187,21 @@ pub fn manage_dependencies(
     dependencies: &dyn DependencyRuntime,
     action: DependencyAction,
 ) -> DomainResult<DependencySnapshot> {
-    dependencies.manage(action, &mut || {
-        let airplay = runtime
-            .stop_airplay()
-            .map_err(|error| DomainError::external_process(format!("無法停止 AirPlay：{error}")))?;
-        let android = runtime.stop_android_mirror().map_err(|error| {
-            DomainError::external_process(format!("無法停止 Android 投影：{error}"))
-        })?;
-        if airplay.status == EngineStatus::Faulted || android.status == EngineStatus::Faulted {
-            return Err(DomainError::external_process(format!(
-                "停止投影服務失敗，工具檔案未移除。{} {}",
-                airplay.message, android.message
-            )));
-        }
-        Ok(())
-    })
+    dependencies.manage(action, &mut || stop_engines_for_maintenance(runtime))
+}
+
+/// 停止運作中投影服務後，驗證並啟動指定單一工具版本之背景安裝流程。
+pub fn install_tool_version(
+    runtime: &dyn ReceiverRuntime,
+    dependencies: &dyn DependencyRuntime,
+    request: ToolInstallRequest,
+) -> DomainResult<DependencySnapshot> {
+    dependencies.install_tool_version(request, &mut || stop_engines_for_maintenance(runtime))
+}
+
+/// 清除自訂工具版本偏好並恢復使用內建推薦版。
+pub fn reset_tool_versions(
+    dependencies: &dyn DependencyRuntime,
+) -> DomainResult<ToolCatalogSnapshot> {
+    dependencies.reset_tool_versions()
 }

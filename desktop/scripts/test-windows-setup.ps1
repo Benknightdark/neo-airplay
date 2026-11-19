@@ -449,6 +449,26 @@ try {
         Assert-True ([IO.File]::ReadAllText($ProgressFile) -ceq $before) 'Check mode changed progress records'
     }
 
+    Invoke-Scenario 'Version/hash validators and SHA256SUMS manifest parser handle valid and malicious inputs' {
+        Assert-True ((Test-ValidScrcpyVersion 'v5.0.1') -eq '5.0.1') 'Valid scrcpy version failed'
+        $badScrcpy = $false
+        try { $null = Test-ValidScrcpyVersion '5.0.1; calc.exe' } catch { $badScrcpy = $true }
+        Assert-True $badScrcpy 'Malicious scrcpy version was not rejected'
+
+        $uxVer = Resolve-ValidatedUxPlayRef 'v1.73.6'
+        Assert-True ($uxVer.Version -eq '1.73.6' -and $uxVer.Ref -eq 'v1.73.6') 'Valid UxPlay version failed'
+        $badUx = $false
+        try { $null = Resolve-ValidatedUxPlayRef '../../etc/passwd' } catch { $badUx = $true }
+        Assert-True $badUx 'Malicious UxPlay ref was not rejected'
+
+        Assert-True (Test-ValidSha256 ('a' * 64)) 'Valid SHA256 rejected'
+        Assert-True (-not (Test-ValidSha256 'short')) 'Invalid SHA256 accepted'
+
+        $manifest = "16c3fc2068df64946f670e3504b4752073ebae47a416a45b46e79a5ab19c689b *./scrcpy-winarm64-v5.0.1.zip`nb12a2c4ee8be317422451fc7dcf8ee20a71b5ea7ef9ad73ddd825a25316227a5  scrcpy-win64-v5.0.1.zip"
+        Assert-True ((Find-ScrcpyChecksumInManifest $manifest 'scrcpy-win64-v5.0.1.zip') -eq 'b12a2c4ee8be317422451fc7dcf8ee20a71b5ea7ef9ad73ddd825a25316227a5') 'Failed to parse win64 hash'
+        Assert-True ((Find-ScrcpyChecksumInManifest $manifest 'scrcpy-winarm64-v5.0.1.zip') -eq '16c3fc2068df64946f670e3504b4752073ebae47a416a45b46e79a5ab19c689b') 'Failed to parse winarm64 hash'
+    }
+
     Write-Host "$script:passed installer scenarios passed."
 } finally {
     Remove-Item -LiteralPath $root -Recurse -Force

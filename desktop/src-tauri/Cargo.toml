@@ -25,6 +25,7 @@ fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs", rev = "c
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 jiff = { version = "0.2", features = ["serde"] }
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "http2", "blocking"] }
 tauri-plugin-wdio = { version = "1", optional = true }
 tauri-plugin-wdio-webdriver = { version = "1", optional = true }
 

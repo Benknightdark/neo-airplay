@@ -36,5 +36,9 @@ export function createTauriDependencyGateway(): DependencyGateway {
      * @returns 安裝日誌純文字內容 Promise。
      */
     readInstallLog: () => api.readInstallLog(),
+    getToolCatalog: () => api.getToolCatalog(),
+    fetchToolVersions: () => api.fetchToolVersions(),
+    installToolVersion: (request) => api.installToolVersion(request),
+    resetToolVersions: () => api.resetToolVersions(),
   };
 }

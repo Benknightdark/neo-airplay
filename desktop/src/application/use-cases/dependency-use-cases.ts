@@ -5,11 +5,13 @@ import {
   Result,
   type DependencyAction,
   type DependencySnapshot,
+  type ToolCatalogSnapshot,
+  type ToolInstallRequest,
 } from "../../domain";
 import type { DependencyGateway } from "../ports/dependency-gateway";
 import { executeSafely } from "./execute-safely";
 
-/** 投影依賴工具狀態查詢、安裝、維護與日誌檢視的前端使用案例集合介面。 */
+/** 投影依賴工具狀態查詢、安裝、維護、版本管理與日誌檢視的前端使用案例集合介面。 */
 export interface DependencyUseCases {
   /**
    * 查詢目前依賴工具狀態快照。
@@ -36,6 +38,22 @@ export interface DependencyUseCases {
    * @returns 包含日誌全文字串的非同步 `Result`。
    */
   readInstallLog(): Promise<Result<string>>;
+  /**
+   * 查詢依目前作業系統組裝之工具與本機版本目錄。
+   */
+  getToolCatalog(): Promise<Result<ToolCatalogSnapshot>>;
+  /**
+   * 爬取官方線上版本清單並回傳最新目錄快照。
+   */
+  fetchToolVersions(): Promise<Result<ToolCatalogSnapshot>>;
+  /**
+   * 驗證並啟動指定單一工具版本之安裝／切換作業。
+   */
+  installToolVersion(request: ToolInstallRequest): Promise<Result<DependencySnapshot>>;
+  /**
+   * 清除自訂版本覆寫並恢復推薦版。
+   */
+  resetToolVersions(): Promise<Result<ToolCatalogSnapshot>>;
 }
 
 /**
@@ -46,31 +64,15 @@ export interface DependencyUseCases {
  */
 export function createDependencyUseCases(gateway: DependencyGateway): DependencyUseCases {
   return {
-    /**
-     * 取得目前依賴工具快照。
-     *
-     * @returns 包裝 `DependencySnapshot` 的 `Result`。
-     */
     getDependencies: () => executeSafely(() => gateway.getDependencies()),
-    /**
-     * 觸發自動安裝缺少工具。
-     *
-     * @returns 包裝 `DependencySnapshot` 的 `Result`。
-     */
     installDependencies: () => executeSafely(() => gateway.installDependencies()),
-    /**
-     * 執行升級或重新安裝維護作業。
-     *
-     * @param action 維護動作（`upgrade` 或 `reinstall`）。
-     * @returns 包裝 `DependencySnapshot` 的 `Result`。
-     */
     manageDependencies: (action: DependencyAction) =>
       executeSafely(() => gateway.manageDependencies(action)),
-    /**
-     * 讀取完整安裝日誌內容。
-     *
-     * @returns 包裝日誌字串的 `Result`。
-     */
     readInstallLog: () => executeSafely(() => gateway.readInstallLog()),
+    getToolCatalog: () => executeSafely(() => gateway.getToolCatalog()),
+    fetchToolVersions: () => executeSafely(() => gateway.fetchToolVersions()),
+    installToolVersion: (request: ToolInstallRequest) =>
+      executeSafely(() => gateway.installToolVersion(request)),
+    resetToolVersions: () => executeSafely(() => gateway.resetToolVersions()),
   };
 }

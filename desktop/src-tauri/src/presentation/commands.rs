@@ -3,9 +3,11 @@
 use crate::application::{commands, queries, DashboardSnapshot, SaveSettingsUseCase};
 use crate::domain::{
     AndroidDevice, DependencyAction, DependencySnapshot, EngineSnapshot, ReceiverSettings,
+    ToolCatalogSnapshot, ToolInstallRequest,
 };
 use crate::infrastructure::{AppState, DependencyManager};
 use crate::presentation::autostart::TauriAutostartGateway;
+use crate::presentation::tool_catalog::ReqwestToolCatalogFetcher;
 use tauri::{AppHandle, State};
 
 /// Tauri 命令：查詢目前投影依賴工具的檢查與安裝狀態快照。
@@ -63,6 +65,42 @@ pub fn manage_dependencies(
 ) -> Result<DependencySnapshot, String> {
     commands::manage_dependencies(app_state.inner(), dependencies.inner(), action)
         .map_err(Into::into)
+}
+
+/// Tauri 命令：取得依目前作業系統組裝之投影工具清單、本機已安裝版本與快取線上版本。
+#[tauri::command]
+pub fn get_tool_catalog(
+    state: State<'_, DependencyManager>,
+) -> Result<ToolCatalogSnapshot, String> {
+    queries::get_tool_catalog(state.inner()).map_err(Into::into)
+}
+
+/// Tauri 非同步命令：在背景執行緒從官方白名單網站爬取最新工具版本清單。
+#[tauri::command(async)]
+pub fn fetch_tool_versions(
+    state: State<'_, DependencyManager>,
+) -> Result<ToolCatalogSnapshot, String> {
+    let fetcher = ReqwestToolCatalogFetcher;
+    queries::fetch_tool_versions(state.inner(), &fetcher).map_err(Into::into)
+}
+
+/// Tauri 命令：停止投影引擎後，啟動指定工具與版本之背景安裝／切換流程。
+#[tauri::command]
+pub fn install_tool_version(
+    app_state: State<'_, AppState>,
+    dependencies: State<'_, DependencyManager>,
+    request: ToolInstallRequest,
+) -> Result<DependencySnapshot, String> {
+    commands::install_tool_version(app_state.inner(), dependencies.inner(), request)
+        .map_err(Into::into)
+}
+
+/// Tauri 命令：清除已保存之自訂工具版本偏好，恢復為各作業系統內建推薦版。
+#[tauri::command]
+pub fn reset_tool_versions(
+    state: State<'_, DependencyManager>,
+) -> Result<ToolCatalogSnapshot, String> {
+    commands::reset_tool_versions(state.inner()).map_err(Into::into)
 }
 
 /// Tauri 命令：查詢儀表板畫面所需的設定、引擎狀態、Android 裝置與近期診斷日誌快照。

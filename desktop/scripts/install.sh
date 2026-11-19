@@ -2,24 +2,35 @@
 set -Eeuo pipefail
 umask 077
 
-readonly UXPLAY_VERSION="1.73.7"
-readonly UXPLAY_COMMIT="df67c212a433cf6dda3676dd40c097900d24e645"
-readonly UXPLAY_SHA256="168de53ed688f87c4022d79357ce91f9608ad5c53236bff95134d19b88efeb3f"
-readonly UXPLAY_URL="https://github.com/FDH2/UxPlay/archive/${UXPLAY_COMMIT}.tar.gz"
+readonly DEFAULT_UXPLAY_VERSION="1.73.7"
+readonly DEFAULT_UXPLAY_COMMIT="df67c212a433cf6dda3676dd40c097900d24e645"
+readonly DEFAULT_UXPLAY_SHA256="168de53ed688f87c4022d79357ce91f9608ad5c53236bff95134d19b88efeb3f"
 readonly BUN_VERSION="1.4.2"
 readonly NODE_VERSION_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.node-version"
 NODE_VERSION=""
-readonly SCRCPY_VERSION="5.0.1"
-readonly SCRCPY_SHA256="9f969d30cc574816077edecda65719c1c70b0aee1df1ba5fa00779ac07b8fd6e"
-readonly SCRCPY_LINUX_URL="https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/scrcpy-linux-x86_64-v${SCRCPY_VERSION}.tar.gz"
-readonly SCRCPY_MACOS_ARM64_SHA256="33611e51977a8289e2e124b220f727895181ef2eb9060e0987a4dc2db9cf0d6b"
-readonly SCRCPY_MACOS_X86_64_SHA256="31a5467a9e907f162b093267cbbab1276b15c6e709c2ea8159566a8d165beb50"
+readonly DEFAULT_SCRCPY_VERSION="5.0.1"
+readonly DEFAULT_SCRCPY_LINUX_SHA256="9f969d30cc574816077edecda65719c1c70b0aee1df1ba5fa00779ac07b8fd6e"
+readonly DEFAULT_SCRCPY_MACOS_ARM64_SHA256="33611e51977a8289e2e124b220f727895181ef2eb9060e0987a4dc2db9cf0d6b"
+readonly DEFAULT_SCRCPY_MACOS_X86_64_SHA256="31a5467a9e907f162b093267cbbab1276b15c6e709c2ea8159566a8d165beb50"
 readonly HOMEBREW_INSTALL_COMMIT="eaa2af62ca1d5349c9743f82b1b0c4e5d365fb2d"
 readonly HOMEBREW_INSTALL_SHA256="8fd2f1a5287a7c2e3d7362924c677edcc04c5a0e16448c77132d056bc88cf1ed"
 readonly HOMEBREW_INSTALL_URL="https://raw.githubusercontent.com/Homebrew/install/${HOMEBREW_INSTALL_COMMIT}/install.sh"
 readonly RUSTUP_VERSION="1.29.3"
 readonly RUSTUP_LINUX_X64_SHA256="b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55"
 readonly RUSTUP_LINUX_ARM64_SHA256="9f608c142e0e38a78957d0661ba1dfaf0b6fb37184cfaa4b9a0aa57af6184282"
+
+UXPLAY_VERSION="$DEFAULT_UXPLAY_VERSION"
+UXPLAY_COMMIT="$DEFAULT_UXPLAY_COMMIT"
+UXPLAY_SHA256="$DEFAULT_UXPLAY_SHA256"
+SCRCPY_VERSION="$DEFAULT_SCRCPY_VERSION"
+SCRCPY_SHA256_OVERRIDE=""
+only_tool=""
+expect_uxplay_version=""
+allow_unverified_uxplay=0
+uxplay_ref_arg=""
+uxplay_sha_arg=""
+scrcpy_custom_requested=0
+uxplay_custom_requested=0
 
 development=0
 check_only=0
@@ -41,6 +52,25 @@ while (($#)); do
     --upgrade) upgrade=1 ;;
     --warm-gstreamer-registry) warm_registry=1 ;;
     --gui) gui=1 ;;
+    --allow-unverified-uxplay) allow_unverified_uxplay=1 ;;
+    --only)
+      (($# >= 2)) || { printf 'Missing value for --only\n' >&2; exit 2; }
+      only_tool="$2"; shift ;;
+    --uxplay-ref)
+      (($# >= 2)) || { printf 'Missing value for --uxplay-ref\n' >&2; exit 2; }
+      uxplay_ref_arg="$2"; shift ;;
+    --uxplay-sha256)
+      (($# >= 2)) || { printf 'Missing value for --uxplay-sha256\n' >&2; exit 2; }
+      uxplay_sha_arg="$2"; shift ;;
+    --scrcpy-version)
+      (($# >= 2)) || { printf 'Missing value for --scrcpy-version\n' >&2; exit 2; }
+      SCRCPY_VERSION="$2"; scrcpy_custom_requested=1; shift ;;
+    --scrcpy-sha256)
+      (($# >= 2)) || { printf 'Missing value for --scrcpy-sha256\n' >&2; exit 2; }
+      SCRCPY_SHA256_OVERRIDE="$2"; scrcpy_custom_requested=1; shift ;;
+    --expect-uxplay-version)
+      (($# >= 2)) || { printf 'Missing value for --expect-uxplay-version\n' >&2; exit 2; }
+      expect_uxplay_version="$2"; shift ;;
     --engine-dir)
       (($# >= 2)) || { printf 'Missing value for --engine-dir\n' >&2; exit 2; }
       engine_dir="$2"; shift ;;
@@ -57,6 +87,74 @@ while (($#)); do
   esac
   shift
 done
+
+if [[ -n "$only_tool" && "$only_tool" != "uxplay" && "$only_tool" != "scrcpy" ]]; then
+  printf 'Invalid --only tool: %s\n' "$only_tool" >&2
+  exit 2
+fi
+
+SCRCPY_VERSION="${SCRCPY_VERSION#v}"
+SCRCPY_VERSION="${SCRCPY_VERSION#V}"
+if [[ ! "$SCRCPY_VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+  printf 'Invalid --scrcpy-version format: %s\n' "$SCRCPY_VERSION" >&2
+  exit 2
+fi
+
+if [[ -n "$SCRCPY_SHA256_OVERRIDE" && ! "$SCRCPY_SHA256_OVERRIDE" =~ ^[0-9a-fA-F]{64}$ ]]; then
+  printf 'Invalid --scrcpy-sha256 checksum.\n' >&2
+  exit 2
+fi
+
+if [[ -n "$uxplay_sha_arg" ]]; then
+  if [[ ! "$uxplay_sha_arg" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    printf 'Invalid --uxplay-sha256 checksum.\n' >&2
+    exit 2
+  fi
+  UXPLAY_SHA256="$uxplay_sha_arg"
+fi
+
+if [[ -n "$uxplay_ref_arg" ]]; then
+  if [[ "$uxplay_ref_arg" == "$DEFAULT_UXPLAY_COMMIT" || "$uxplay_ref_arg" == "$DEFAULT_UXPLAY_VERSION" || "$uxplay_ref_arg" == "v${DEFAULT_UXPLAY_VERSION}" ]]; then
+    UXPLAY_COMMIT="$DEFAULT_UXPLAY_COMMIT"
+    UXPLAY_VERSION="$DEFAULT_UXPLAY_VERSION"
+    [[ -n "$uxplay_sha_arg" ]] || UXPLAY_SHA256="$DEFAULT_UXPLAY_SHA256"
+  elif [[ "$uxplay_ref_arg" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    uxplay_custom_requested=1
+    UXPLAY_COMMIT="$(printf '%s' "$uxplay_ref_arg" | awk '{print tolower($1)}')"
+    [[ -n "$uxplay_sha_arg" ]] || UXPLAY_SHA256=""
+  elif [[ "$uxplay_ref_arg" =~ ^[vV]?([0-9]+\.[0-9]+(\.[0-9]+)*)$ ]]; then
+    uxplay_custom_requested=1
+    UXPLAY_VERSION="${BASH_REMATCH[1]}"
+    UXPLAY_COMMIT="v${UXPLAY_VERSION}"
+    [[ -n "$uxplay_sha_arg" ]] || UXPLAY_SHA256=""
+  else
+    printf 'Invalid --uxplay-ref format: %s\n' "$uxplay_ref_arg" >&2
+    exit 2
+  fi
+fi
+
+if ((uxplay_custom_requested)) && [[ -z "$UXPLAY_SHA256" ]] && ((allow_unverified_uxplay == 0)); then
+  printf 'Custom --uxplay-ref requires --uxplay-sha256 or --allow-unverified-uxplay.\n' >&2
+  exit 2
+fi
+
+if [[ -n "$expect_uxplay_version" ]]; then
+  if [[ "$expect_uxplay_version" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    expect_uxplay_version="$(printf '%s' "$expect_uxplay_version" | awk '{print tolower($1)}')"
+  elif [[ "$expect_uxplay_version" =~ ^[vV]?([0-9]+\.[0-9]+(\.[0-9]+)*)$ ]]; then
+    expect_uxplay_version="${BASH_REMATCH[1]}"
+  else
+    printf 'Invalid --expect-uxplay-version format: %s\n' "$expect_uxplay_version" >&2
+    exit 2
+  fi
+fi
+
+if [[ "$UXPLAY_COMMIT" =~ ^[0-9a-fA-F]{40}$ ]]; then
+  readonly UXPLAY_URL="https://github.com/FDH2/UxPlay/archive/${UXPLAY_COMMIT}.tar.gz"
+else
+  readonly UXPLAY_URL="https://github.com/FDH2/UxPlay/archive/refs/tags/${UXPLAY_COMMIT}.tar.gz"
+fi
+readonly SCRCPY_LINUX_URL="https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/scrcpy-linux-x86_64-v${SCRCPY_VERSION}.tar.gz"
 
 log() { printf '%s\n' "$*"; }
 fail() { printf 'Setup failed: %s\n' "$*" >&2; exit 1; }
@@ -133,20 +231,45 @@ sha256_file() {
   fi
 }
 
-download_verified() {
-  local url="$1" destination="$2" expected_sha="$3" label="$4" actual_sha
+download_https_unverified() {
+  local url="$1" destination="$2" label="$3"
   [[ "$url" == https://* ]] || fail "Refusing non-HTTPS download URL for ${label}."
-  [[ "$expected_sha" =~ ^[0-9a-fA-F]{64}$ ]] || fail "Invalid SHA-256 checksum configured for ${label}."
-  expected_sha="$(printf '%s\n' "$expected_sha" | awk '{print tolower($1)}')"
   if ! curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-error --location --max-redirs 5 --connect-timeout 30 --max-time 600 "$url" --output "$destination"; then
     rm -f -- "$destination"
     fail "Failed to download ${label}."
   fi
+}
+
+download_verified() {
+  local url="$1" destination="$2" expected_sha="$3" label="$4" actual_sha
+  [[ "$expected_sha" =~ ^[0-9a-fA-F]{64}$ ]] || fail "Invalid SHA-256 checksum configured for ${label}."
+  expected_sha="$(printf '%s\n' "$expected_sha" | awk '{print tolower($1)}')"
+  download_https_unverified "$url" "$destination" "$label"
   actual_sha="$(sha256_file "$destination" | awk '{print tolower($1)}')"
   if [[ "$actual_sha" != "$expected_sha" ]]; then
     rm -f -- "$destination"
     fail "${label} SHA-256 checksum verification failed."
   fi
+}
+
+resolve_scrcpy_sha256() {
+  local version="$1" asset="$2" builtin_sha="$3" sums_dir sums_file resolved
+  if [[ -n "$SCRCPY_SHA256_OVERRIDE" ]]; then
+    printf '%s\n' "$SCRCPY_SHA256_OVERRIDE"
+    return 0
+  fi
+  if [[ "$version" == "$DEFAULT_SCRCPY_VERSION" && -n "$builtin_sha" ]]; then
+    printf '%s\n' "$builtin_sha"
+    return 0
+  fi
+  sums_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-scrcpy-sums.XXXXXX")"
+  cleanup_paths+=("$sums_dir")
+  sums_file="${sums_dir}/SHA256SUMS.txt"
+  download_https_unverified "https://github.com/Genymobile/scrcpy/releases/download/v${version}/SHA256SUMS.txt" "$sums_file" "Official scrcpy v${version} SHA256SUMS.txt"
+  resolved="$(awk -v target="$asset" '{ name=$2; sub(/^\*/, "", name); sub(/^\.\//, "", name); if (name == target && $1 ~ /^[0-9a-fA-F]{64}$/) { print tolower($1); exit 0 } }' "$sums_file")"
+  rm -rf -- "$sums_dir"
+  [[ -n "$resolved" ]] || fail "Official SHA256SUMS.txt for scrcpy v${version} did not contain checksum for ${asset}."
+  printf '%s\n' "$resolved"
 }
 
 stage_file_atomic() {
@@ -327,10 +450,10 @@ check_version_probe() {
 }
 
 check_uxplay() {
-  local executable version_output version_number
+  local executable version_output version_number min_version
   executable="$(runtime_executable uxplay || true)"
   if [[ -z "$executable" ]]; then
-    missing+=("uxplay ${UXPLAY_VERSION}")
+    missing+=("uxplay ${expect_uxplay_version:-$UXPLAY_VERSION}")
     return 1
   fi
   if [[ -z "$bounded_timeout" ]]; then
@@ -342,8 +465,16 @@ check_uxplay() {
     return 1
   fi
   version_number="$(printf '%s\n' "$version_output" | sed -nE 's/.*UxPlay version ([0-9]+(\.[0-9]+)+).*/\1/p' | head -n 1 || true)"
-  if [[ -z "$version_number" ]] || ! awk -v actual="$version_number" -v minimum="$UXPLAY_VERSION" 'BEGIN { split(actual, a, "."); split(minimum, b, "."); for (i=1; i<=3; i++) { if ((a[i]+0) > (b[i]+0)) exit 0; if ((a[i]+0) < (b[i]+0)) exit 1 } exit 0 }'; then
-    missing+=("uxplay ${UXPLAY_VERSION} or newer")
+  if [[ -z "$version_number" ]]; then
+    missing+=("uxplay ${expect_uxplay_version:-$UXPLAY_VERSION} or newer")
+    return 1
+  fi
+  if [[ "$expect_uxplay_version" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    return 0
+  fi
+  min_version="${expect_uxplay_version:-$UXPLAY_VERSION}"
+  if ! awk -v actual="$version_number" -v minimum="$min_version" 'BEGIN { split(actual, a, "."); split(minimum, b, "."); for (i=1; i<=3; i++) { if ((a[i]+0) > (b[i]+0)) exit 0; if ((a[i]+0) < (b[i]+0)) exit 1 } exit 0 }'; then
+    missing+=("uxplay ${min_version} or newer")
     return 1
   fi
 }
@@ -566,7 +697,7 @@ run_privileged() {
 
 install_uxplay_source() {
   local archive work_dir version_output version_number
-  if ((upgrade == 0)) && [[ -f "${engine_bin}/uxplay" && ! -L "${engine_bin}/uxplay" && -x "${engine_bin}/uxplay" ]]; then
+  if ((upgrade == 0 && uxplay_custom_requested == 0)) && [[ "$only_tool" != "uxplay" ]] && [[ -f "${engine_bin}/uxplay" && ! -L "${engine_bin}/uxplay" && -x "${engine_bin}/uxplay" ]]; then
     version_output="$("${engine_bin}/uxplay" -v 2>&1 || true)"
     version_number="$(printf '%s\n' "$version_output" | sed -nE 's/.*UxPlay version ([0-9]+(\.[0-9]+)+).*/\1/p' | head -n 1 || true)"
     if [[ -n "$version_number" ]] && awk -v actual="$version_number" -v minimum="$UXPLAY_VERSION" 'BEGIN { split(actual, a, "."); split(minimum, b, "."); for (i=1; i<=3; i++) { if ((a[i]+0) > (b[i]+0)) exit 0; if ((a[i]+0) < (b[i]+0)) exit 1 } exit 0 }'; then
@@ -576,7 +707,14 @@ install_uxplay_source() {
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-uxplay.XXXXXX")"
   cleanup_paths+=("$work_dir")
   archive="${work_dir}/uxplay.tar.gz"
-  download_verified "$UXPLAY_URL" "$archive" "$UXPLAY_SHA256" "UxPlay source archive"
+  if [[ -n "$UXPLAY_SHA256" ]]; then
+    download_verified "$UXPLAY_URL" "$archive" "$UXPLAY_SHA256" "UxPlay source archive"
+  elif ((allow_unverified_uxplay)); then
+    log "Downloading UxPlay source (${UXPLAY_COMMIT}) via HTTPS TLS 1.2+ without pinned SHA-256."
+    download_https_unverified "$UXPLAY_URL" "$archive" "UxPlay source archive (${UXPLAY_COMMIT})"
+  else
+    fail "Refusing to download UxPlay source without SHA-256 verification."
+  fi
   mkdir -p "${work_dir}/source"
   tar -xzf "$archive" -C "${work_dir}/source" --strip-components=1
   cmake -S "${work_dir}/source" -B "${work_dir}/build" -DCMAKE_INSTALL_PREFIX="$engine_dir"
@@ -782,18 +920,19 @@ scrcpy_bundle_ready() {
 }
 
 install_scrcpy_macos() {
-  local architecture asset expected_sha work_dir archive extract_dir bundle binary server adb
+  local architecture asset builtin_sha expected_sha work_dir archive extract_dir bundle binary server adb
   architecture="$(uname -m)"
   case "$architecture" in
     arm64|aarch64)
       asset="scrcpy-macos-aarch64-v${SCRCPY_VERSION}.tar.gz"
-      expected_sha="$SCRCPY_MACOS_ARM64_SHA256" ;;
+      builtin_sha="$DEFAULT_SCRCPY_MACOS_ARM64_SHA256" ;;
     x86_64|amd64)
       asset="scrcpy-macos-x86_64-v${SCRCPY_VERSION}.tar.gz"
-      expected_sha="$SCRCPY_MACOS_X86_64_SHA256" ;;
+      builtin_sha="$DEFAULT_SCRCPY_MACOS_X86_64_SHA256" ;;
     *) fail "The official scrcpy release does not support macOS ${architecture}." ;;
   esac
-  if ((upgrade == 0)) && scrcpy_bundle_ready; then return; fi
+  if ((upgrade == 0 && scrcpy_custom_requested == 0)) && [[ "$only_tool" != "scrcpy" ]] && scrcpy_bundle_ready; then return; fi
+  expected_sha="$(resolve_scrcpy_sha256 "$SCRCPY_VERSION" "$asset" "$builtin_sha")"
   work_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-scrcpy.XXXXXX")"
   cleanup_paths+=("$work_dir")
   archive="${work_dir}/${asset}"
@@ -802,6 +941,9 @@ install_scrcpy_macos() {
   download_verified "https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/${asset}" "$archive" "$expected_sha" "Official macOS scrcpy archive"
   tar -xzf "$archive" -C "$extract_dir"
   bundle="$(find "$extract_dir" -type d -name "scrcpy-macos-*-v${SCRCPY_VERSION}" -print -quit)"
+  if [[ -z "$bundle" ]]; then
+    bundle="$(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+  fi
   [[ -n "$bundle" ]] || fail "The official macOS scrcpy archive did not contain its distribution directory."
   binary="${bundle}/scrcpy"
   server="${bundle}/scrcpy-server"
@@ -814,16 +956,18 @@ install_scrcpy_macos() {
 }
 
 install_scrcpy_linux() {
-  local architecture work_dir archive extract_dir binary server adb
-  if ((upgrade == 0)) && scrcpy_bundle_ready; then return; fi
+  local architecture asset expected_sha work_dir archive extract_dir binary server adb
+  if ((upgrade == 0 && scrcpy_custom_requested == 0)) && [[ "$only_tool" != "scrcpy" ]] && scrcpy_bundle_ready; then return; fi
   architecture="$(uname -m)"
   if [[ "$architecture" == x86_64 || "$architecture" == amd64 ]]; then
+    asset="scrcpy-linux-x86_64-v${SCRCPY_VERSION}.tar.gz"
+    expected_sha="$(resolve_scrcpy_sha256 "$SCRCPY_VERSION" "$asset" "$DEFAULT_SCRCPY_LINUX_SHA256")"
     work_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-scrcpy.XXXXXX")"
     cleanup_paths+=("$work_dir")
     archive="${work_dir}/scrcpy.tar.gz"
     extract_dir="${work_dir}/extract"
     mkdir -p "$extract_dir"
-    download_verified "$SCRCPY_LINUX_URL" "$archive" "$SCRCPY_SHA256" "scrcpy source archive"
+    download_verified "$SCRCPY_LINUX_URL" "$archive" "$expected_sha" "scrcpy source archive"
     tar -xzf "$archive" -C "$extract_dir"
     binary="$(find "$extract_dir" -type f -name scrcpy -perm -u+x -print -quit)"
     server="$(find "$extract_dir" -type f -name scrcpy-server -print -quit)"
@@ -1062,6 +1206,53 @@ install_linux_dev_tools() {
   fi
   rm -rf "$temp_dir"
 }
+
+if [[ "$only_tool" == "scrcpy" ]]; then
+  mkdir -p "$engine_bin"
+  case "$(uname -s)" in
+    Darwin)
+      bounded_timeout="$(runtime_executable gtimeout || command -v gtimeout 2>/dev/null || true)"
+      install_scrcpy_macos
+      ;;
+    Linux)
+      bounded_timeout="$(runtime_executable timeout || command -v timeout 2>/dev/null || true)"
+      install_scrcpy_linux
+      stage_runtime_tool scrcpy
+      stage_runtime_tool adb
+      ;;
+    *) fail "This installer supports macOS and Linux. Use install.ps1 on Windows." ;;
+  esac
+  if [[ ! -x "${engine_bin}/scrcpy" || ! -x "${engine_bin}/adb" || ! -s "${engine_bin}/scrcpy-server" ]]; then
+    fail "scrcpy tools were not staged completely in ${engine_bin}."
+  fi
+  exit 0
+fi
+
+if [[ "$only_tool" == "uxplay" ]]; then
+  mkdir -p "$engine_bin"
+  case "$(uname -s)" in
+    Darwin)
+      ensure_xcode_cli_tools
+      ensure_homebrew
+      export HOMEBREW_PREFIX="$(brew --prefix)"
+      if command -v cmake >/dev/null 2>&1 && pkg-config --exists gstreamer-1.0 2>/dev/null && [[ -d "${engine_dir}/lib/gstreamer-1.0" ]]; then
+        install_uxplay_source
+      else
+        install_macos_runtime
+      fi
+      ;;
+    Linux)
+      if command -v cmake >/dev/null 2>&1 && pkg-config --exists gstreamer-1.0 2>/dev/null && [[ -d "${engine_dir}/lib/gstreamer-1.0" ]]; then
+        install_uxplay_source
+      else
+        install_linux_runtime
+      fi
+      ;;
+    *) fail "This installer supports macOS and Linux. Use install.ps1 on Windows." ;;
+  esac
+  [[ -x "${engine_bin}/uxplay" ]] || fail "UxPlay executable was not staged in ${engine_bin}."
+  exit 0
+fi
 
 if ((!runtime_ready || upgrade)); then
   case "$(uname -s)" in

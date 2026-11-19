@@ -5,7 +5,11 @@
 
 import { vi } from "vitest";
 import type { DependencyGateway, ReceiverGateway } from "../../../desktop/src/application";
-import { createDashboardSnapshot, createDependencySnapshot } from "./builders";
+import {
+  createDashboardSnapshot,
+  createDependencySnapshot,
+  createToolCatalogSnapshot,
+} from "./builders";
 
 /**
  * 建立接收器 Gateway 的 Vitest 模擬物件。
@@ -39,11 +43,21 @@ export function createFakeDependencyGateway(
   overrides: Partial<DependencyGateway> = {},
 ): DependencyGateway {
   const defaultSnapshot = createDependencySnapshot();
+  const defaultCatalog = createToolCatalogSnapshot();
   return {
     getDependencies: vi.fn().mockResolvedValue(defaultSnapshot),
     installDependencies: vi.fn().mockResolvedValue(defaultSnapshot),
     manageDependencies: vi.fn().mockResolvedValue(defaultSnapshot),
     readInstallLog: vi.fn().mockResolvedValue("install started\ninstall finished\n"),
+    getToolCatalog: vi.fn().mockResolvedValue(defaultCatalog),
+    fetchToolVersions: vi.fn().mockResolvedValue(defaultCatalog),
+    installToolVersion: vi.fn().mockResolvedValue({
+      ...defaultSnapshot,
+      status: "installing",
+      operation: "installTool",
+      message: "正在準備安裝指定版本工具…",
+    }),
+    resetToolVersions: vi.fn().mockResolvedValue(defaultCatalog),
     ...overrides,
   };
 }

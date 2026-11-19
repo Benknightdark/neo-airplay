@@ -6,6 +6,13 @@ param(
     [switch]$Gui,
     [switch]$Elevated,
     [switch]$ElevatedPrerequisitesOnly,
+    [string]$Only,
+    [string]$UxPlayRef,
+    [string]$UxPlaySha256,
+    [switch]$AllowUnverifiedUxPlay,
+    [string]$ScrcpyVersionOverride,
+    [string]$ScrcpySha256,
+    [string]$ExpectUxPlayVersion,
     [string]$EngineDirectory = $env:NEO_AIRPLAY_ENGINE_DIR,
     [string]$MarkerFile,
     [string]$ResultFile,
@@ -32,6 +39,31 @@ function Test-ValidUserSid([string]$Sid) {
     return (-not [string]::IsNullOrWhiteSpace($Sid) -and $Sid -match '^S-1-\d+(-\d+)+$')
 }
 
+function Test-ValidScrcpyVersion([string]$Value) {
+    $trimmed = $Value.Trim() -replace '^[vV]', ''
+    if ($trimmed -notmatch '^[0-9]+\.[0-9]+(\.[0-9]+)?$') {
+        throw "Setup failed: Invalid scrcpy version format: $Value"
+    }
+    return $trimmed
+}
+
+function Resolve-ValidatedUxPlayRef([string]$Value) {
+    $trimmed = $Value.Trim()
+    if ($trimmed -match '^[0-9a-fA-F]{40}$') {
+        $lower = $trimmed.ToLowerInvariant()
+        return @{ Version = $lower; Ref = $lower }
+    }
+    $clean = $trimmed -replace '^[vV]', ''
+    if ($clean -match '^[0-9]+\.[0-9]+(\.[0-9]+)*$') {
+        return @{ Version = $clean; Ref = "v$clean" }
+    }
+    throw "Setup failed: Invalid UxPlay version or commit ref: $Value"
+}
+
+function Test-ValidSha256([string]$Value) {
+    return (-not [string]::IsNullOrWhiteSpace($Value) -and $Value.Trim() -match '^[0-9a-fA-F]{64}$')
+}
+
 function Test-LocalSafePath([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
     if ($Path.StartsWith('\\') -or $Path.StartsWith('//')) { return $false }
@@ -56,13 +88,73 @@ if ($OriginalUserSid -and -not (Test-ValidUserSid $OriginalUserSid)) {
     throw "Setup failed: Invalid Windows user SID: $OriginalUserSid"
 }
 
-$UxPlayVersion = '1.74'
-$UxPlayCommit = 'f524d8aa28028ad5572ae1b462d119e4cec1f9f4'
-$UxPlaySha256 = '6cd720c5e2debee120fb076df69e76d35d19d11d9f7e377c3a747d4b8d6b692a'
-$UxPlayUrl = "https://github.com/FDH2/UxPlay/archive/$UxPlayCommit.tar.gz"
-$ScrcpyVersion = '5.0.1'
-$ScrcpyWin64Sha256 = 'b12a2c4ee8be317422451fc7dcf8ee20a71b5ea7ef9ad73ddd825a25316227a5'
-$ScrcpyWin64Url = "https://github.com/Genymobile/scrcpy/releases/download/v$ScrcpyVersion/scrcpy-win64-v$ScrcpyVersion.zip"
+$DefaultUxPlayVersion = '1.74'
+$DefaultUxPlayCommit = 'f524d8aa28028ad5572ae1b462d119e4cec1f9f4'
+$DefaultUxPlaySha256 = '6cd720c5e2debee120fb076df69e76d35d19d11d9f7e377c3a747d4b8d6b692a'
+$DefaultScrcpyVersion = '5.0.1'
+$DefaultScrcpyWin64Sha256 = 'b12a2c4ee8be317422451fc7dcf8ee20a71b5ea7ef9ad73ddd825a25316227a5'
+$DefaultScrcpyWinArm64Sha256 = '16c3fc2068df64946f670e3504b4752073ebae47a416a45b46e79a5ab19c689b'
+
+if ($Only -and ($Only -notin @('uxplay', 'scrcpy'))) {
+    throw "Setup failed: Invalid -Only tool value: $Only"
+}
+
+$script:UxPlayCustomRequested = $false
+$script:ScrcpyCustomRequested = $false
+$UxPlayVersion = $DefaultUxPlayVersion
+$UxPlayCommit = $DefaultUxPlayCommit
+$UxPlaySha256Resolved = $DefaultUxPlaySha256
+if ($UxPlaySha256) {
+    if (-not (Test-ValidSha256 $UxPlaySha256)) { throw "Setup failed: Invalid -UxPlaySha256 checksum." }
+    $UxPlaySha256Resolved = $UxPlaySha256.Trim().ToLowerInvariant()
+}
+if ($UxPlayRef) {
+    $trimmedRef = $UxPlayRef.Trim()
+    if ($trimmedRef -eq $DefaultUxPlayCommit -or $trimmedRef -eq $DefaultUxPlayVersion -or $trimmedRef -eq "v$DefaultUxPlayVersion") {
+        $UxPlayVersion = $DefaultUxPlayVersion
+        $UxPlayCommit = $DefaultUxPlayCommit
+        if (-not $UxPlaySha256) { $UxPlaySha256Resolved = $DefaultUxPlaySha256 }
+    } else {
+        $resolvedUxPlay = Resolve-ValidatedUxPlayRef $trimmedRef
+        $script:UxPlayCustomRequested = $true
+        $UxPlayCommit = $resolvedUxPlay.Ref
+        if ($UxPlayCommit -notmatch '^[0-9a-fA-F]{40}$') {
+            $UxPlayVersion = $resolvedUxPlay.Version
+        }
+        if (-not $UxPlaySha256) {
+            if (-not $AllowUnverifiedUxPlay) {
+                throw "Setup failed: Custom -UxPlayRef requires -UxPlaySha256 or -AllowUnverifiedUxPlay."
+            }
+            $UxPlaySha256Resolved = ''
+        }
+    }
+}
+$UxPlaySha256 = $UxPlaySha256Resolved
+$UxPlayUrl = if ($UxPlayCommit -match '^[0-9a-fA-F]{40}$') {
+    "https://github.com/FDH2/UxPlay/archive/$UxPlayCommit.tar.gz"
+} else {
+    "https://github.com/FDH2/UxPlay/archive/refs/tags/$UxPlayCommit.tar.gz"
+}
+
+if ($ExpectUxPlayVersion) {
+    $null = Resolve-ValidatedUxPlayRef $ExpectUxPlayVersion
+}
+
+$ScrcpyVersion = $DefaultScrcpyVersion
+$ScrcpySha256Override = ''
+if ($ScrcpyVersionOverride) {
+    $ScrcpyVersion = Test-ValidScrcpyVersion $ScrcpyVersionOverride
+    $script:ScrcpyCustomRequested = ($ScrcpyVersion -ne $DefaultScrcpyVersion)
+}
+if ($ScrcpySha256) {
+    if (-not (Test-ValidSha256 $ScrcpySha256)) { throw "Setup failed: Invalid -ScrcpySha256 checksum." }
+    $ScrcpySha256Override = $ScrcpySha256.Trim().ToLowerInvariant()
+    $script:ScrcpyCustomRequested = $true
+}
+$scrcpyArch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') { 'winarm64' } else { 'win64' }
+$ScrcpyArchiveName = "scrcpy-$scrcpyArch-v$ScrcpyVersion.zip"
+$ScrcpyBuiltinSha256 = if ($scrcpyArch -eq 'winarm64') { $DefaultScrcpyWinArm64Sha256 } else { $DefaultScrcpyWin64Sha256 }
+$ScrcpyDownloadUrl = "https://github.com/Genymobile/scrcpy/releases/download/v$ScrcpyVersion/$ScrcpyArchiveName"
 $BunVersion = '1.4.2'
 $NodeVersion = $null
 $script:EngineDirectory = if ($EngineDirectory) { [IO.Path]::GetFullPath($EngineDirectory) } else { [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\engine')) }
@@ -222,6 +314,37 @@ function Invoke-VerifiedDownload([string]$Uri, [string]$Destination, [string]$Ex
         } else {
             [IO.File]::Move($temporary, $Destination)
         }
+    } finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Find-ScrcpyChecksumInManifest([string]$ManifestContent, [string]$AssetName) {
+    foreach ($line in ($ManifestContent -split "`r?`n")) {
+        $trimmed = $line.Trim()
+        if ($trimmed -match '^([0-9a-fA-F]{64})\s+\*?(\./)?(.+)$') {
+            $hash = $Matches[1].ToLowerInvariant()
+            $file = $Matches[3].Trim()
+            if ($file -eq $AssetName) { return $hash }
+        }
+    }
+    return $null
+}
+
+function Resolve-ScrcpyOfficialSha256([string]$Version, [string]$AssetName, [string]$BuiltinSha, [string]$DefaultVer, [string]$ExplicitOverride) {
+    if ($ExplicitOverride) { return $ExplicitOverride }
+    if ($Version -eq $DefaultVer -and $BuiltinSha) { return $BuiltinSha }
+    $sumsUrl = "https://github.com/Genymobile/scrcpy/releases/download/v$Version/SHA256SUMS.txt"
+    $temporary = Join-Path $env:TEMP ("scrcpy-sums-" + [Guid]::NewGuid().ToString('N') + '.txt')
+    try {
+        Enable-TlsSecurity
+        Invoke-HttpsDownloadStream $sumsUrl $temporary "Official scrcpy v$Version SHA256SUMS.txt"
+        $content = [IO.File]::ReadAllText($temporary)
+        $resolved = Find-ScrcpyChecksumInManifest $content $AssetName
+        if (-not $resolved) {
+            Stop-Setup "Official SHA256SUMS.txt for scrcpy v$Version did not contain checksum for $AssetName."
+        }
+        return $resolved
     } finally {
         if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
     }
@@ -745,12 +868,21 @@ function Test-Runtime {
         if ($tools.uxplay) {
             $uxplayProbe = Invoke-BoundedProbe $tools.uxplay '-v'
             $versionMatch = [regex]::Match($uxplayProbe.Output, '(?im)UxPlay version\s+([0-9]+(?:\.[0-9]+)+)')
-            $minimumUxPlay = [Version]'1.73.7'
+            $expectedRaw = (Get-Variable -Name ExpectUxPlayVersion -ValueOnly -ErrorAction SilentlyContinue)
+            $isCommitExpect = ($expectedRaw -and $expectedRaw -match '^[0-9a-fA-F]{40}$')
+            $minimumUxPlay = if ($expectedRaw -and ($expectedRaw -replace '^[vV]', '') -match '^[0-9]+\.[0-9]+(\.[0-9]+)*$') {
+                $cleanExp = ($expectedRaw -replace '^[vV]', '')
+                [Version](($cleanExp -split '\.')[0..([Math]::Min(3, ($cleanExp -split '\.').Count - 1))] -join '.')
+            } else {
+                [Version]'1.73.7'
+            }
             $uxplayVersion = $null
             if ($versionMatch.Success) { $uxplayVersion = [Version]$versionMatch.Groups[1].Value }
             if ($uxplayProbe.TimedOut) {
                 [void]$missing.Add('UxPlay version probe (timed out)')
-            } elseif (-not $uxplayVersion -or $uxplayVersion -lt $minimumUxPlay) {
+            } elseif (-not $uxplayVersion) {
+                [void]$missing.Add("UxPlay $minimumUxPlay or newer")
+            } elseif (-not $isCommitExpect -and $uxplayVersion -lt $minimumUxPlay) {
                 [void]$missing.Add("UxPlay $minimumUxPlay or newer")
             }
         }
@@ -991,8 +1123,9 @@ function Stage-MsysRuntime {
 }
 
 function Install-UxPlay {
+    $onlyMode = (Get-Variable -Name Only -ValueOnly -ErrorAction SilentlyContinue)
     $existing = Get-EngineToolPath 'uxplay'
-    if ($existing -and -not $Upgrade) {
+    if ($existing -and -not $Upgrade -and -not $script:UxPlayCustomRequested -and $onlyMode -ne 'uxplay') {
         $probe = Invoke-BoundedProbe $existing '-v'
         $versionMatch = [regex]::Match($probe.Output, '(?im)UxPlay version\s+([0-9]+(?:\.[0-9]+)+)')
         if (-not $probe.TimedOut -and $versionMatch.Success -and [Version]$versionMatch.Groups[1].Value -ge [Version]'1.73.7') { return }
@@ -1004,8 +1137,16 @@ function Install-UxPlay {
     New-Item -ItemType Directory -Path $source -Force | Out-Null
     try {
         Set-InstallStage 'uxplay-download' '正在下載 AirPlay 投影工具…'
-        Write-Info "Downloading pinned UxPlay $UxPlayVersion experimental source ($UxPlayCommit)."
-        Invoke-VerifiedDownload $UxPlayUrl $archive $UxPlaySha256 "UxPlay $UxPlayVersion source archive"
+        Write-Info "Downloading UxPlay $UxPlayVersion source ($UxPlayCommit)."
+        if ($UxPlaySha256) {
+            Invoke-VerifiedDownload $UxPlayUrl $archive $UxPlaySha256 "UxPlay $UxPlayVersion source archive"
+        } elseif ($AllowUnverifiedUxPlay) {
+            Write-Info "Downloading UxPlay ($UxPlayCommit) via HTTPS TLS 1.2+ without pinned SHA-256."
+            Enable-TlsSecurity
+            Invoke-HttpsDownloadStream $UxPlayUrl $archive "UxPlay $UxPlayVersion source archive"
+        } else {
+            Stop-Setup "Refusing to download UxPlay source without SHA-256 verification."
+        }
 
         $env:NEO_SETUP_ARCHIVE = ConvertTo-MsysPath $archive
         $env:NEO_SETUP_SOURCE = ConvertTo-MsysPath $source
@@ -1023,10 +1164,12 @@ function Install-UxPlay {
 }
 
 function Install-Scrcpy {
+    $onlyMode = (Get-Variable -Name Only -ValueOnly -ErrorAction SilentlyContinue)
     $scrcpyPath = Join-Path $script:EngineBin 'scrcpy.exe'
     $scrcpyServer = Join-Path $script:EngineBin 'scrcpy-server'
     $adbPath = Join-Path $script:EngineBin 'adb.exe'
-    if (-not $Upgrade -and (Test-Path -LiteralPath $scrcpyPath -PathType Leaf) -and
+    if (-not $Upgrade -and -not $script:ScrcpyCustomRequested -and $onlyMode -ne 'scrcpy' -and
+        (Test-Path -LiteralPath $scrcpyPath -PathType Leaf) -and
         (Test-Path -LiteralPath $adbPath -PathType Leaf) -and
         (Test-Path -LiteralPath $scrcpyServer -PathType Leaf) -and
         (Get-Item -LiteralPath $scrcpyServer -ErrorAction SilentlyContinue).Length -gt 0) {
@@ -1035,14 +1178,15 @@ function Install-Scrcpy {
         if (-not $scrcpyProbe.TimedOut -and $scrcpyProbe.ExitCode -eq 0 -and $scrcpyProbe.Output.Trim() -and
             -not $adbProbe.TimedOut -and $adbProbe.ExitCode -eq 0 -and $adbProbe.Output.Trim()) { return }
     }
+    $expectedScrcpySha = Resolve-ScrcpyOfficialSha256 $ScrcpyVersion $ScrcpyArchiveName $ScrcpyBuiltinSha256 $DefaultScrcpyVersion $ScrcpySha256Override
     $tempRoot = Join-Path $env:TEMP ([Guid]::NewGuid().ToString('N'))
-    $archive = Join-Path $tempRoot "scrcpy-win64-v$ScrcpyVersion.zip"
+    $archive = Join-Path $tempRoot $ScrcpyArchiveName
     $extract = Join-Path $tempRoot 'extract'
     New-Item -ItemType Directory -Path $extract -Force | Out-Null
     try {
         Set-InstallStage 'scrcpy-download' '正在下載 Android 投影工具…'
-        Write-Info "Downloading official scrcpy $ScrcpyVersion Windows distribution."
-        Invoke-VerifiedDownload $ScrcpyWin64Url $archive $ScrcpyWin64Sha256 "Official scrcpy $ScrcpyVersion Windows archive"
+        Write-Info "Downloading official scrcpy $ScrcpyVersion Windows distribution ($ScrcpyArchiveName)."
+        Invoke-VerifiedDownload $ScrcpyDownloadUrl $archive $expectedScrcpySha "Official scrcpy $ScrcpyVersion Windows archive"
         Expand-ZipArchiveSafely $archive $extract
         $bundle = Get-ChildItem -LiteralPath $extract -Directory | Select-Object -First 1
         if (-not $bundle) { Stop-Setup 'The official Windows scrcpy archive did not contain its distribution directory.' }
@@ -1412,38 +1556,81 @@ try {
         Assert-NotReparsePoint $MarkerFile
         Assert-NotReparsePoint $ResultFile
         Write-InstallMarker
-        Set-InstallStage 'checking' '正在檢查投影工具…'
-        Refresh-ProcessPath
-        $runtimeReady = Test-Runtime
-        $developmentReady = $true
-        if ($Development) { $developmentReady = Test-Development }
-        if ($runtimeReady -and $developmentReady -and -not $Upgrade) {
-            Write-Info 'All requested dependencies are already available.'
-        } else {
-            if (Test-NeedsElevation $runtimeReady $developmentReady) {
-                $elevatedExitCode = Invoke-ElevatedInstaller
-                if ($null -ne $elevatedExitCode -and $elevatedExitCode -ne 0) {
-                    Stop-Setup "System prerequisites installation failed with exit code $elevatedExitCode."
-                }
-                Refresh-ProcessPath
+        $onlyMode = (Get-Variable -Name Only -ValueOnly -ErrorAction SilentlyContinue)
+        if ($onlyMode -eq 'scrcpy') {
+            Set-InstallStage 'scrcpy-download' '正在準備切換 scrcpy 與 ADB 版本…'
+            Install-Scrcpy
+            Set-InstallStage 'verifying' '正在驗證已安裝的 scrcpy 與 ADB…'
+            $scrcpyTool = Get-EngineToolPath 'scrcpy'
+            $adbTool = Get-EngineToolPath 'adb'
+            if (-not $scrcpyTool -or -not $adbTool) { throw 'scrcpy or adb remains unavailable after installation.' }
+            $scrcpyProbe = Invoke-BoundedProbe $scrcpyTool '--version'
+            $adbProbe = Invoke-BoundedProbe $adbTool 'version'
+            if ($scrcpyProbe.TimedOut -or $scrcpyProbe.ExitCode -ne 0 -or $adbProbe.TimedOut -or $adbProbe.ExitCode -ne 0) {
+                throw 'Installed scrcpy or adb verification probe failed.'
             }
-            if (-not $runtimeReady -or $Upgrade) {
+            Set-InstallStage 'ready' '指定版本之 scrcpy 已就緒。'
+        } elseif ($onlyMode -eq 'uxplay') {
+            Refresh-ProcessPath
+            $msysCandidate = Get-MsysRoot
+            $hasCmake = $msysCandidate -and (Test-Path -LiteralPath (Join-Path $msysCandidate 'ucrt64\bin\cmake.exe') -PathType Leaf)
+            $hasGstPlugins = Test-Path -LiteralPath (Join-Path $script:EngineDirectory 'lib\gstreamer-1.0') -PathType Container
+            if ($hasCmake -and $hasGstPlugins) {
+                $script:MsysRoot = $msysCandidate
+                Set-ProcessMsysEnvironment $script:MsysRoot
+                Install-UxPlay
+            } else {
+                if (Test-NeedsElevation $false $true) {
+                    $elevatedExitCode = Invoke-ElevatedInstaller
+                    if ($null -ne $elevatedExitCode -and $elevatedExitCode -ne 0) {
+                        Stop-Setup "System prerequisites installation failed with exit code $elevatedExitCode."
+                    }
+                    Refresh-ProcessPath
+                }
                 $null = Ensure-WinGet
                 Install-Msys2
                 Set-InstalledEnvironment $script:MsysRoot
                 Install-UxPlay
-                Install-Scrcpy
                 Stage-MsysRuntime
             }
-            if ($Development -and -not $developmentReady) { Install-DevelopmentTools }
-            if ($script:MsysRoot) { Set-InstalledEnvironment $script:MsysRoot }
-            Set-InstallStage 'verifying' '正在驗證已安裝的投影工具…'
+            Set-InstallStage 'verifying' '正在驗證已安裝的 UxPlay…'
+            $uxplayTool = Get-EngineToolPath 'uxplay'
+            if (-not $uxplayTool) { throw 'UxPlay executable remains unavailable after installation.' }
+            Set-InstallStage 'ready' '指定版本之 UxPlay 已就緒。'
+        } else {
+            Set-InstallStage 'checking' '正在檢查投影工具…'
+            Refresh-ProcessPath
             $runtimeReady = Test-Runtime
             $developmentReady = $true
             if ($Development) { $developmentReady = Test-Development }
-            if (-not $runtimeReady -or -not $developmentReady) { throw 'One or more requested dependencies remain unavailable after installation.' }
+            if ($runtimeReady -and $developmentReady -and -not $Upgrade) {
+                Write-Info 'All requested dependencies are already available.'
+            } else {
+                if (Test-NeedsElevation $runtimeReady $developmentReady) {
+                    $elevatedExitCode = Invoke-ElevatedInstaller
+                    if ($null -ne $elevatedExitCode -and $elevatedExitCode -ne 0) {
+                        Stop-Setup "System prerequisites installation failed with exit code $elevatedExitCode."
+                    }
+                    Refresh-ProcessPath
+                }
+                if (-not $runtimeReady -or $Upgrade) {
+                    $null = Ensure-WinGet
+                    Install-Msys2
+                    Set-InstalledEnvironment $script:MsysRoot
+                    Install-UxPlay
+                    Install-Scrcpy
+                    Stage-MsysRuntime
+                }
+                if ($Development -and -not $developmentReady) { Install-DevelopmentTools }
+                if ($script:MsysRoot) { Set-InstalledEnvironment $script:MsysRoot }
+                Set-InstallStage 'verifying' '正在驗證已安裝的投影工具…'
+                $runtimeReady = Test-Runtime
+                $developmentReady = $true
+                if ($Development) { $developmentReady = Test-Development }
+                if (-not $runtimeReady -or -not $developmentReady) { throw 'One or more requested dependencies remain unavailable after installation.' }
+            }
+            Set-InstallStage 'ready' '投影工具已就緒。'
         }
-        Set-InstallStage 'ready' '投影工具已就緒。'
     }
 }
 catch {

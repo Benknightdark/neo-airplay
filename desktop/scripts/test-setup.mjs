@@ -1102,3 +1102,21 @@ test("Tauri runner still prioritizes prepared tools after a completed local boot
   assert.ok(calls[0].options.env.PATH.startsWith("/test/home/.local/bin:"));
   assert.equal(environment.PATH, "/usr/bin");
 });
+
+test("installer rejects invalid tool overrides and unverified custom UxPlay without explicit opt-in", { skip: shellChecksUnsupported }, () => {
+  const fixture = createScenario({ uname: "Linux" });
+  try {
+    for (const badArgs of [
+      ["--only", "gstreamer"],
+      ["--scrcpy-version", "5.0.1;id"],
+      ["--uxplay-ref", "../bad"],
+      ["--uxplay-sha256", "not-a-sha"],
+      ["--uxplay-ref", "v1.73.6"],
+    ]) {
+      const result = fixture.runInstaller(badArgs);
+      assert.notEqual(result.status, 0, `expected failure for ${badArgs.join(" ")}`);
+    }
+  } finally {
+    fixture.cleanup();
+  }
+});

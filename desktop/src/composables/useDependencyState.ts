@@ -9,6 +9,7 @@ import {
   type DependencyAction,
   type DependencySnapshot,
   type Result,
+  type ToolInstallRequest,
 } from "../domain";
 import { resolveDependencyUseCases } from "../presentation/di";
 
@@ -145,6 +146,18 @@ export function useDependencyState(options: UseDependencyStateOptions = {}) {
     await executeRequest(() => useCases.manageDependencies(action));
   }
 
+  /**
+   * 觸發安裝或切換單一投影工具至指定版本（共用請求世代鎖保護）。
+   *
+   * @param request 目標工具與版本參數。
+   * @returns 成功送出背景安裝請求時回傳 `true`。
+   */
+  async function installToolVersion(request: ToolInstallRequest): Promise<boolean> {
+    if (disposed || installing.value || unavailable.value) return false;
+    await executeRequest(() => useCases.installToolVersion(request));
+    return error.value.length === 0;
+  }
+
   onMounted(() => {
     void refresh();
     timer = window.setInterval(() => void refresh(), 1500);
@@ -164,5 +177,6 @@ export function useDependencyState(options: UseDependencyStateOptions = {}) {
     refresh,
     retry,
     runAction,
+    installToolVersion,
   };
 }
