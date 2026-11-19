@@ -409,17 +409,15 @@ fn stage_temp_file_atomic(
 /// 若為可執行的常規檔案（非符號連結）則回傳 `true`，否則回傳 `false`。
 pub fn is_executable_file(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|metadata| {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return false;
-        }
+        let is_regular_file = !metadata.file_type().is_symlink() && metadata.is_file();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            metadata.permissions().mode() & 0o111 != 0
+            is_regular_file && metadata.permissions().mode() & 0o111 != 0
         }
         #[cfg(not(unix))]
         {
-            true
+            is_regular_file
         }
     })
 }
