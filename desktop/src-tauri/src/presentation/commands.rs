@@ -48,12 +48,12 @@ pub fn install_dependencies(
     commands::install_dependencies(state.inner()).map_err(Into::into)
 }
 
-/// Tauri 命令：執行手動觸發的投影工具升級或重新安裝維護動作。
+/// Tauri 命令：執行手動觸發的投影工具升級、重新安裝或清除工具維護動作。
 ///
 /// # 參數
 /// - `app_state`: Tauri 託管的 `AppState`（用於維護前先停止運行中的投影服務）。
 /// - `dependencies`: Tauri 託管的 `DependencyManager` 狀態參考。
-/// - `action`: 前端指定的維護動作（`Upgrade` 或 `Reinstall`）。
+/// - `action`: 前端指定的維護動作（`Upgrade`、`Reinstall` 或 `Clear`）。
 ///
 /// # 回傳值
 /// 回傳維護啟動後的 `DependencySnapshot` 或錯誤字串。

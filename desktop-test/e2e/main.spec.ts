@@ -99,6 +99,8 @@ describe("Neo AirPlay 桌面流程", () => {
     await expect($("[data-testid='tools-platform-os']")).toBeDisplayed();
     await expect($("[data-testid='tools-catalog-list']")).toBeDisplayed();
     await expect($("[data-testid='tools-upgrade']")).toBeDisplayed();
+    await expect($("[data-testid='tools-reinstall']")).toBeDisplayed();
+    await expect($("[data-testid='tools-clear']")).toBeDisplayed();
 
     await $(`[data-testid='nav-overview']`).click();
     await expect($("[data-testid='dashboard-page']")).toBeDisplayed();

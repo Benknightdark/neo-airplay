@@ -786,3 +786,152 @@ fn rhel_gstreamer_query_is_bounded_and_read_only() {
     );
     assert_eq!(RHEL_GSTREAMER_QUERY_TIMEOUT, Duration::from_secs(15));
 }
+
+/// 驗證「清除工具」會移除 App 專用工具、GStreamer 快取、`tool-versions.json` 與過渡性標記，
+/// 並保留 `.GITKEEP`、`.bundled-*`、`settings.json` 與 `install.log`，最後轉為 `failed` 與缺漏清單。
+#[test]
+fn clear_installed_tools_clears_tools_caches_and_preferences_while_preserving_logs_and_settings() {
+    let root = install_log_test_directory();
+    let engine = root.join("engine");
+    let cache = root.join("cache/gstreamer/registry.bin");
+    let config = root.join("config");
+    let setup = config.join("setup");
+
+    fs::create_dir_all(engine.join("bin")).unwrap();
+    fs::create_dir_all(engine.join("lib/gstreamer-1.0")).unwrap();
+    fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    fs::create_dir_all(&setup).unwrap();
+
+    fs::write(engine.join(".GITKEEP"), b"tracked\n").unwrap();
+    fs::write(engine.join(".bundled-0.2.5"), b"seeded\n").unwrap();
+    fs::write(engine.join("bin/uxplay"), b"fake-uxplay").unwrap();
+    fs::write(engine.join("bin/scrcpy"), b"fake-scrcpy").unwrap();
+    fs::write(engine.join("lib/gstreamer-1.0/libgst.so"), b"plugin").unwrap();
+    fs::write(&cache, b"registry-data").unwrap();
+    fs::write(
+        config.join("settings.json"),
+        b"{\"receiverName\":\"Living Room\"}",
+    )
+    .unwrap();
+    fs::write(
+        config.join(TOOL_VERSIONS_FILE),
+        b"{\"scrcpy\":{\"version\":\"4.1\",\"reference\":\"v4.1\",\"allowUnverified\":false}}",
+    )
+    .unwrap();
+    fs::write(setup.join(INSTALL_LOG), b"previous install log\n").unwrap();
+    fs::write(setup.join(INSTALL_MARKER), b"999999\n").unwrap();
+    fs::write(setup.join(INSTALL_RESULT), b"{\"pid\":1,\"exitCode\":0}").unwrap();
+    fs::write(
+        setup.join(INSTALL_LAUNCH),
+        b"{\"ownerPid\":1,\"startedAt\":1}",
+    )
+    .unwrap();
+    fs::write(
+        setup.join(INSTALL_PROGRESS),
+        b"{\"pid\":1,\"stage\":\"ready\",\"message\":\"done\"}",
+    )
+    .unwrap();
+    fs::write(setup.join("launch.sh"), b"#!/bin/bash\n").unwrap();
+
+    let snapshot = Arc::new(Mutex::new(DependencySnapshot {
+        status: "ready".into(),
+        operation: Some(DependencyOperation::Clear),
+        message: "正在準備清除已安裝的投影工具…".into(),
+        missing: Vec::new(),
+        log_path: setup.join(INSTALL_LOG).to_string_lossy().into_owned(),
+    }));
+
+    let outcome = clear_installed_tools(&engine, &cache, &setup, &config, &snapshot).unwrap();
+
+    assert_eq!(outcome.status, "failed");
+    assert!(outcome
+        .message
+        .contains("已清除所有 Neo AirPlay 專用工具與快取"));
+    assert!(!outcome.missing.is_empty());
+
+    assert!(engine.join(".GITKEEP").is_file());
+    assert!(engine.join(".bundled-0.2.5").is_file());
+    assert!(!engine.join("bin/uxplay").exists());
+    assert!(!engine.join("bin/scrcpy").exists());
+    assert!(!engine.join("lib").exists());
+    assert!(!cache.exists());
+    assert!(!config.join(TOOL_VERSIONS_FILE).exists());
+    assert!(!setup.join(INSTALL_MARKER).exists());
+    assert!(!setup.join(INSTALL_RESULT).exists());
+    assert!(!setup.join(INSTALL_LAUNCH).exists());
+    assert!(!setup.join(INSTALL_PROGRESS).exists());
+    assert!(!setup.join("launch.sh").exists());
+
+    assert_eq!(
+        fs::read_to_string(config.join("settings.json")).unwrap(),
+        "{\"receiverName\":\"Living Room\"}"
+    );
+    let log = fs::read_to_string(setup.join(INSTALL_LOG)).unwrap();
+    assert!(log.contains("previous install log"));
+    assert!(log.contains("已清除所有 Neo AirPlay 專用投影工具"));
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+/// 驗證透過 `DependencyManager::manage(DependencyAction::Clear, ...)` 能非同步完成清除並重置工具目錄狀態。
+#[test]
+fn dependency_manager_clear_action_executes_and_updates_snapshot() {
+    let root = install_log_test_directory();
+    let engine = root.join("engine");
+    let cache = root.join("cache/gstreamer/registry.bin");
+    let config = root.join("config");
+    fs::create_dir_all(engine.join("bin")).unwrap();
+    fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    fs::create_dir_all(&config).unwrap();
+    fs::write(engine.join("bin/uxplay"), b"fake").unwrap();
+    fs::write(&cache, b"registry").unwrap();
+
+    let manager = DependencyManager::new(engine.clone(), cache.clone(), &config, true);
+    let initial = manager
+        .manage(DependencyAction::Clear, &mut || Ok(()))
+        .unwrap();
+    assert_eq!(initial.operation, Some(DependencyOperation::Clear));
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while manager.worker_active.load(Ordering::Acquire) {
+        assert!(
+            Instant::now() < deadline,
+            "清除工具背景工作者未在期限內結束"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let final_snapshot = manager.snapshot().unwrap();
+    assert_eq!(final_snapshot.status, "failed");
+    assert_eq!(final_snapshot.operation, Some(DependencyOperation::Clear));
+    assert!(!final_snapshot.missing.is_empty());
+    assert!(!engine.join("bin/uxplay").exists());
+    assert!(!cache.exists());
+
+    let catalog = manager.tool_catalog().unwrap();
+    assert!(catalog
+        .tools
+        .iter()
+        .all(|tool| tool.installed_version.is_none()));
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+/// 驗證 `clear_transient_setup_files` 與 `clear_installed_tools` 拒絕符號連結路徑且不刪除外部目標檔案。
+#[cfg(unix)]
+#[test]
+fn clear_transient_setup_files_rejects_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let root = install_log_test_directory();
+    let setup = root.join("setup");
+    let outside = root.join("outside-keep.txt");
+    fs::create_dir_all(&setup).unwrap();
+    fs::write(&outside, b"keep").unwrap();
+    symlink(&outside, setup.join(INSTALL_MARKER)).unwrap();
+
+    assert!(clear_transient_setup_files(&setup).is_err());
+    assert_eq!(fs::read(&outside).unwrap(), b"keep");
+
+    fs::remove_dir_all(&root).unwrap();
+}

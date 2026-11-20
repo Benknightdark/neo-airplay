@@ -24,6 +24,10 @@ describe("DependencyUseCases 應用層用例", () => {
     expect(upgraded.isSuccess).toBe(true);
     expect(gateway.manageDependencies).toHaveBeenCalledWith("upgrade");
 
+    const cleared = await useCases.manageDependencies("clear");
+    expect(cleared.isSuccess).toBe(true);
+    expect(gateway.manageDependencies).toHaveBeenCalledWith("clear");
+
     const log = await useCases.readInstallLog();
     expect(log.isSuccess).toBe(true);
     expect(log.value).toContain("install started");

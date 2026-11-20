@@ -24,7 +24,7 @@ export function createTauriDependencyGateway(): DependencyGateway {
      */
     installDependencies: () => api.installDependencies(),
     /**
-     * 呼叫後端 `manage_dependencies` 命令執行升級或重裝。
+     * 呼叫後端 `manage_dependencies` 命令執行升級、重裝或清除工具。
      *
      * @param action 使用者觸發的維護動作。
      * @returns 依賴工具狀態快照 Promise。

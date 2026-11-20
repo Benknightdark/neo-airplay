@@ -11,6 +11,8 @@ pub enum DependencyAction {
     Upgrade,
     /// 移除並重新安裝投影依賴套件。
     Reinstall,
+    /// 僅清除先前已安裝的 Neo AirPlay 專用工具與快取（不立即重新安裝）。
+    Clear,
 }
 
 /// 依賴工具背景作業目前或最後一次執行的操作類型。
@@ -23,6 +25,8 @@ pub enum DependencyOperation {
     Upgrade,
     /// 重新安裝所有投影工具。
     Reinstall,
+    /// 清除所有先前已安裝的 Neo AirPlay 專用工具與快取。
+    Clear,
     /// 依使用者指定版本安裝或切換單一投影工具。
     InstallTool,
 }
@@ -39,6 +43,7 @@ impl From<DependencyAction> for DependencyOperation {
         match action {
             DependencyAction::Upgrade => Self::Upgrade,
             DependencyAction::Reinstall => Self::Reinstall,
+            DependencyAction::Clear => Self::Clear,
         }
     }
 }
@@ -85,9 +90,25 @@ impl SetupOutcome {
                 DependencyOperation::Install => "投影工具已就緒。".into(),
                 DependencyOperation::Upgrade => "投影工具升級完成。".into(),
                 DependencyOperation::Reinstall => "投影工具重新安裝完成。".into(),
+                DependencyOperation::Clear => "已清除所有投影工具與快取。".into(),
                 DependencyOperation::InstallTool => "指定版本的投影工具安裝完成。".into(),
             },
             missing: Vec::new(),
+        }
+    }
+
+    /// 依清除工具完成後的缺漏檢查清單建立「需要處理」結果。
+    ///
+    /// # 參數
+    /// - `missing`: 清除後偵測到的缺少投影工具清單。
+    ///
+    /// # 回傳值
+    /// 回傳 `status` 為 `"failed"` 且提示可重新檢查並安裝的 `SetupOutcome`。
+    pub fn cleared(missing: Vec<String>) -> Self {
+        Self {
+            status: "failed".into(),
+            message: "已清除所有 Neo AirPlay 專用工具與快取。請點擊「重新檢查並安裝」或個別安裝工具以恢復投影功能。".into(),
+            missing,
         }
     }
 

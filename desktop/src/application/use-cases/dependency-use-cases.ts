@@ -26,7 +26,7 @@ export interface DependencyUseCases {
    */
   installDependencies(): Promise<Result<DependencySnapshot>>;
   /**
-   * 執行工具升級或清除重新安裝作業。
+   * 執行工具升級、清除重新安裝或清除工具作業。
    *
    * @param action 使用者觸發的維護動作。
    * @returns 包含更新後 `DependencySnapshot` 的非同步 `Result`。

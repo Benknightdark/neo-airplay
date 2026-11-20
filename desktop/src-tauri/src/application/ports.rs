@@ -159,10 +159,10 @@ pub trait DependencyRuntime: Send + Sync {
     /// 回傳啟動檢查後的 `DependencySnapshot`。
     fn start_install(&self) -> DomainResult<DependencySnapshot>;
 
-    /// 執行手動觸發的升級或重新安裝維護動作。
+    /// 執行手動觸發的升級、重新安裝或清除工具維護動作。
     ///
     /// # 參數
-    /// - `action`: 要執行的維護動作（`Upgrade` 或 `Reinstall`）。
+    /// - `action`: 要執行的維護動作（`Upgrade`、`Reinstall` 或 `Clear`）。
     /// - `prepare`: 實際啟動維護作業前必須先完成的前置停止／清理閉包。
     ///
     /// # 回傳值

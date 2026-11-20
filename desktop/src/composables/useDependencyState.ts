@@ -136,9 +136,9 @@ export function useDependencyState(options: UseDependencyStateOptions = {}) {
   }
 
   /**
-   * 觸發升級或清除重裝維護動作（僅在非安裝中且依賴管理可用時生效）。
+   * 觸發升級、清除重裝或清除工具維護動作（僅在非安裝中且依賴管理可用時生效）。
    *
-   * @param action 使用者點選的維護動作（`upgrade` 或 `reinstall`）。
+   * @param action 使用者點選的維護動作（`upgrade`、`reinstall` 或 `clear`）。
    * @returns 請求完成後解析的 `Promise<void>`。
    */
   async function runAction(action: DependencyAction): Promise<void> {

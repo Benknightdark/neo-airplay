@@ -3,7 +3,7 @@
  */
 
 /** 使用者可主動觸發的工具維護動作。 */
-export type DependencyAction = "upgrade" | "reinstall";
+export type DependencyAction = "upgrade" | "reinstall" | "clear";
 /** 工具管理背景作業的操作種類（含自動安裝、單工具換版與手動維護）。 */
 export type DependencyOperation = "install" | DependencyAction | "installTool";
 /** 工具環境檢查或安裝作業目前的狀態機值。 */
@@ -171,6 +171,8 @@ export function dependencyOperationLabel(operation: DependencyOperation | null |
       return "升級工具";
     case "reinstall":
       return "清除並重新安裝";
+    case "clear":
+      return "清除工具";
     case "installTool":
       return "安裝指定工具版本";
     case "install":
