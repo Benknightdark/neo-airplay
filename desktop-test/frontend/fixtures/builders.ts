@@ -9,7 +9,10 @@ import type {
   DashboardSnapshot,
   DependencySnapshot,
   EngineSnapshot,
+  ManagedToolInfo,
   ReceiverSettings,
+  ToolCatalogSnapshot,
+  ToolReleaseOption,
 } from "../../../desktop/src/domain";
 
 /**
@@ -116,6 +119,113 @@ export function createDependencySnapshot(
     message: "投影工具已就緒。",
     missing: [],
     logPath: "/tmp/neo-airplay-install.log",
+    ...overrides,
+  };
+}
+
+/**
+ * 建立工具發行版選項之測試資料物件。
+ */
+export function createToolReleaseOption(
+  overrides: Partial<ToolReleaseOption> = {},
+): ToolReleaseOption {
+  return {
+    version: "5.0.1",
+    reference: "v5.0.1",
+    label: "v5.0.1（內建推薦驗證版）",
+    publishedAt: "2026-10-08",
+    prerelease: false,
+    recommended: true,
+    sha256: "9f969d30cc574816077edecda65719c1c70b0aee1df1ba5fa00779ac07b8fd6e",
+    ...overrides,
+  };
+}
+
+/**
+ * 建立單一受管理投影工具資訊之測試資料物件。
+ */
+export function createManagedToolInfo(
+  overrides: Partial<ManagedToolInfo> = {},
+): ManagedToolInfo {
+  return {
+    id: "scrcpy",
+    name: "scrcpy（內含 ADB）",
+    summary: "Android USB 畫面投影、ADB 偵測與壓縮包同步部署。",
+    sourceLabel: "GitHub 官方發行（macOS Apple Silicon 官方壓縮包）",
+    sourceUrl: "https://github.com/Genymobile/scrcpy/releases",
+    versionControl: "selectable",
+    installedVersion: "5.0.1",
+    bundledComponents: ["ADB 1.0.41"],
+    defaultVersion: "5.0.1",
+    defaultReference: "v5.0.1",
+    selectedVersion: null,
+    latestRemoteVersion: "5.0.1",
+    availableVersions: [createToolReleaseOption()],
+    supportsManualSha256: true,
+    autoVerifiesChecksum: true,
+    note: "切換版本時會自動從該發行版官方 SHA256SUMS.txt 驗證壓縮檔雜湊。",
+    ...overrides,
+  };
+}
+
+/**
+ * 建立跨作業系統工具目錄快照之測試資料物件。
+ */
+export function createToolCatalogSnapshot(
+  overrides: Partial<ToolCatalogSnapshot> = {},
+): ToolCatalogSnapshot {
+  const defaultTools: ManagedToolInfo[] = [
+    createManagedToolInfo({
+      id: "uxplay",
+      name: "UxPlay",
+      summary: "AirPlay 鏡像接收引擎。",
+      sourceLabel: "GitHub 原始碼（Apple Clang / CMake 編譯）",
+      sourceUrl: "https://github.com/FDH2/UxPlay",
+      installedVersion: "1.73.7",
+      bundledComponents: [],
+      defaultVersion: "1.73.7",
+      defaultReference: "df67c212a433cf6dda3676dd40c097900d24e645",
+      latestRemoteVersion: "1.73.7",
+      availableVersions: [
+        createToolReleaseOption({
+          version: "1.73.7",
+          reference: "df67c212a433cf6dda3676dd40c097900d24e645",
+          label: "v1.73.7（內建推薦驗證版）",
+          sha256: "168de53ed688f87c4022d79357ce91f9608ad5c53236bff95134d19b88efeb3f",
+        }),
+      ],
+      autoVerifiesChecksum: false,
+    }),
+    createManagedToolInfo(),
+    createManagedToolInfo({
+      id: "gstreamer",
+      name: "GStreamer 媒體管線",
+      summary: "UxPlay AirPlay 視訊／音訊解碼與渲染核心函式庫。",
+      sourceLabel: "Homebrew Formulae（gstreamer）",
+      sourceUrl: "https://formulae.brew.sh/formula/gstreamer",
+      versionControl: "packageManager",
+      installedVersion: "1.28.9",
+      bundledComponents: [],
+      defaultVersion: "1.28.9",
+      defaultReference: "package-manager",
+      latestRemoteVersion: "1.28.9",
+      availableVersions: [],
+      supportsManualSha256: false,
+      autoVerifiesChecksum: false,
+    }),
+  ];
+
+  return {
+    os: "macos",
+    arch: "aarch64",
+    platformLabel: "macOS (aarch64)",
+    packageManager: "Homebrew + GitHub 官方來源",
+    platformNotice: "macOS 會透過 Homebrew 維護 GStreamer 與編譯相依。",
+    platformWarning: null,
+    managementEnabled: true,
+    remoteFetchedAt: "2026-11-19T07:00:00Z",
+    remoteError: null,
+    tools: defaultTools,
     ...overrides,
   };
 }

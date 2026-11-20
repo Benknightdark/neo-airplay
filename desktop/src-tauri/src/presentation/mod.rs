@@ -6,3 +6,5 @@ pub mod autostart;
 pub mod bootstrap;
 /// 暴露給前端呼叫的 Tauri `invoke` 命令進入點。
 pub mod commands;
+/// 透過 `reqwest` 白名單 HTTPS 連線擷取工具官方版本清單的表現層配接器。
+pub mod tool_catalog;

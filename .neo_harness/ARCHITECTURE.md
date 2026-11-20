@@ -11,11 +11,11 @@
 | 前端 Domain 層 | 定義純 TypeScript 實體、值物件規則、狀態轉換、`Result<T>` 與錯誤正規化，零 Vue / Tauri 依賴。 | `desktop/src/domain/` |
 | 前端 Application 層 | 定義 `ReceiverGateway`、`DependencyGateway` Port 介面與 CQRS Use Cases，僅依賴 `domain/`。 | `desktop/src/application/` |
 | 前端 Infrastructure 層 | 以 Tauri `invoke` 封裝（`api.ts`）實作前端 Gateway 介面。 | `desktop/src/infrastructure/tauri/`、`desktop/src/api.ts`、`desktop/src-tauri/capabilities/default.json` |
-| 前端 Presentation 層 | Vue SFCs 與 Composables（`useAppState`、`useDependencyState`、`useInstallLogViewer`），透過 `presentation/di.ts` 解析用例；保留 `types.ts`、`lib/status.ts` 相容轉出。 | `desktop/src/App.vue`、`desktop/src/components/`、`desktop/src/composables/`、`desktop/src/presentation/di.ts` |
-| 後端 Domain 層 | 定義 `ReceiverName`、`VideoRenderer`、`ReceiverSettings`、`EngineKind`、`AndroidDevice`、`DependencySnapshot`、`AppLogEntry` 與 `DomainError`，不依賴 `tauri` 或 I/O。 | `desktop/src-tauri/src/domain/` |
-| 後端 Application 層 | 定義 `ReceiverRuntime`、`DependencyRuntime`、`SettingsRepository`、`AutostartGateway`、`LogRepository`、`EngineAccessGuard` 等 Port Traits 與 Command/Query 用例（含 `SaveSettingsUseCase` 交易與回滾）。 | `desktop/src-tauri/src/application/` |
-| 後端 Infrastructure 層 | 實作 `settings.json` 原子讀寫、每日 JSONL 記錄、`AppState`／`EngineController` 雙引擎控制、ADB 列舉、與 `DependencyManager` 背景工具檢查／安裝。 | `desktop/src-tauri/src/infrastructure/`、`desktop/scripts/` |
-| 後端 Presentation 層 | 註冊單一執行個體、`autostart`、系統匣、視窗關閉隱藏及薄型 `#[tauri::command]` 入口；組裝 `AppState` 與 `DependencyManager` 注入應用層。 | `desktop/src-tauri/src/lib.rs`、`desktop/src-tauri/src/presentation/` |
+| 前端 Presentation 層 | Vue SFCs 與 Composables（`useAppState`、`useDependencyState`、`useToolCatalog`、`useInstallLogViewer`），透過 `presentation/di.ts` 解析用例；保留 `types.ts`、`lib/status.ts` 相容轉出。 | `desktop/src/App.vue`、`desktop/src/components/`、`desktop/src/composables/`、`desktop/src/presentation/di.ts` |
+| 後端 Domain 層 | 定義 `ReceiverName`、`VideoRenderer`、`ReceiverSettings`、`EngineKind`、`AndroidDevice`、`DependencySnapshot`、`ToolCatalogSnapshot`、`AppLogEntry` 與 `DomainError`，不依賴 `tauri` 或 I/O。 | `desktop/src-tauri/src/domain/` |
+| 後端 Application 層 | 定義 `ReceiverRuntime`、`DependencyRuntime`、`ToolCatalogFetcher`、`SettingsRepository`、`AutostartGateway`、`LogRepository`、`EngineAccessGuard` 等 Port Traits 與 Command/Query 用例（含 `SaveSettingsUseCase` 交易與回滾）。 | `desktop/src-tauri/src/application/` |
+| 後端 Infrastructure 層 | 實作 `settings.json` 與 `tool-versions.json` 原子讀寫、每日 JSONL 記錄、`AppState`／`EngineController` 雙引擎控制、ADB 列舉、與 `DependencyManager` 背景工具檢查／安裝及單工具版本切換。 | `desktop/src-tauri/src/infrastructure/`、`desktop/scripts/` |
+| 後端 Presentation 層 | 註冊單一執行個體、`autostart`、系統匣、視窗關閉隱藏、白名單 HTTPS 版本爬蟲 `ReqwestToolCatalogFetcher` 及薄型 `#[tauri::command]` 入口（含 `get_tool_catalog`、`fetch_tool_versions`、`install_tool_version`、`reset_tool_versions`）；組裝 `AppState` 與 `DependencyManager` 注入應用層。 | `desktop/src-tauri/src/lib.rs`、`desktop/src-tauri/src/presentation/` |
 | 本機引擎目錄 | 僅 `.GITKEEP` 入版控；Debug 直接使用 `desktop/engine/`，Release 將打包資源寫入使用者資料目錄的 `engine/` 後執行。 | `desktop/engine/` |
 | 獨立測試專案 | 直接載入 `desktop` 與 `src-tauri` 模組，執行架構向內依賴檢查、Domain/Application/Infrastructure/Presentation 分層單元測試，以及帶 `wdio` feature 與假引擎的 WebdriverIO 桌面 E2E。 | `desktop-test/package.json`、`desktop-test/frontend/`、`desktop-test/backend/`、`desktop-test/e2e/` |
 | CI / CD 工作流程 | CI 驗證 `develop` 提交並維護 `develop -> main` PR；CD 在 `main` PR 合併後驗證四處版本與 tag、打包三平台安裝檔並發布 Release。 | `.github/workflows/ci.yml`、`.github/workflows/cd.yml`、`desktop/scripts/project-version.mjs` |
@@ -25,6 +25,7 @@
 - **執行路徑隔離**：App 只從目前模式的 `engine/` 啟動 `uxplay`、`adb`、`scrcpy` 與 GStreamer 檢查工具，子程序 `PATH` 僅含該目錄與其 Android 子目錄，不回退系統 `PATH`。
 - **引擎與鎖分離**：AirPlay 與 Android 各自持有程序與狀態，互不影響；設定變更（含 OS 登入啟動 transaction 鎖）、ADB 列舉與工具維護（阻擋引擎啟動與 ADB 刷新）各自以 Mutex 序列化。
 - **macOS 專屬管線**：GStreamer registry 存放於 Tauri app cache，函式庫路徑僅含 engine `lib`、Homebrew prefix `lib` 與繼承路徑；AirPlay 需經系統 `dns-sd` 找到設定的 `_airplay._tcp` 名稱才回報 `Running`。
+- **GStreamer 套件版本來源**：macOS 查 Homebrew API，Windows 查 MSYS2，Linux 依 `/etc/os-release` 查 Debian／Ubuntu、Fedora 與 Arch 官方套件頁；RHEL 執行有逾時上限的唯讀 `dnf repoquery`，不支援的發行版會在工具目錄顯示查詢錯誤。
 
 ## 驗證與 CI/CD 界線
 

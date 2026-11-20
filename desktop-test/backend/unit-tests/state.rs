@@ -309,6 +309,48 @@ fn executable_lookup_uses_only_the_engine_directory() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+/// 驗證 `find_executable` 與 `is_executable_file` 會拒絕符號連結執行檔及符號連結子目錄。
+#[cfg(unix)]
+#[test]
+fn executable_lookup_rejects_symlinks() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let directory = test_directory("symlink-lookup");
+    let engine_bin = directory.join("bin");
+    let outside_dir = directory.join("outside");
+    fs::create_dir_all(&engine_bin).unwrap();
+    fs::create_dir_all(&outside_dir).unwrap();
+
+    let outside_exec = outside_dir.join("uxplay");
+    fs::write(&outside_exec, b"outside").unwrap();
+    fs::set_permissions(&outside_exec, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let symlinked_exec = engine_bin.join("uxplay");
+    symlink(&outside_exec, &symlinked_exec).unwrap();
+    assert!(!is_executable_file(&symlinked_exec));
+    assert_eq!(find_executable(&directory, "uxplay", false), None);
+
+    let android_link = directory.join("android");
+    symlink(&outside_dir, &android_link).unwrap();
+    let outside_adb = outside_dir.join("adb");
+    fs::write(&outside_adb, b"adb").unwrap();
+    fs::set_permissions(&outside_adb, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(find_executable(&directory, "adb", true), None);
+
+    let symlinked_engine = test_directory("symlinked-engine-root");
+    symlink(&directory, &symlinked_engine).unwrap();
+    let real_uxplay = engine_bin.join("real-uxplay");
+    fs::write(&real_uxplay, b"real").unwrap();
+    fs::set_permissions(&real_uxplay, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        find_executable(&symlinked_engine, "real-uxplay", false),
+        None
+    );
+    let _ = fs::remove_file(&symlinked_engine);
+
+    fs::remove_dir_all(directory).unwrap();
+}
+
 /// 驗證管道輸出超過 1 MiB 上限時，`finish_pipe` 會安全拒絕並回傳容量超限錯誤。
 #[test]
 fn process_output_capture_rejects_overflow_after_draining_pipe() {
@@ -357,6 +399,39 @@ fn adb_refresh_error_does_not_hide_a_running_engine() {
     assert_eq!(controller.stop().status, EngineStatus::Stopped);
 
     drop(controller);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+/// 驗證 `AppLogger` 能將日誌寫入當日 `.jsonl` 檔案並在重新載入後保留既有與舊版偏移量格式紀錄。
+#[test]
+fn app_logger_persists_and_reloads_daily_jsonl_entries() {
+    let directory = test_directory("app-logger-roundtrip");
+    fs::create_dir_all(&directory).unwrap();
+
+    let logger = AppLogger::new(directory.clone());
+    logger.write(crate::domain::LogLevel::Information, "runtime started");
+    let expected_date = jiff::Zoned::now().strftime("%Y-%m-%d").to_string();
+    let daily_log_path = directory.join(format!("{expected_date}.jsonl"));
+    assert!(daily_log_path.is_file());
+
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&daily_log_path)
+        .unwrap();
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-11-13T12:00:00+08:00","level":"warning","message":"legacy line"}}"#
+    )
+    .unwrap();
+    drop(file);
+
+    let reloaded = AppLogger::new(directory.clone());
+    let recent = reloaded.recent();
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[0].message, "runtime started");
+    assert_eq!(recent[1].message, "legacy line");
+
     fs::remove_dir_all(directory).unwrap();
 }
 

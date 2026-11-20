@@ -1,15 +1,36 @@
-use crate::application::{DependencyRuntime, EngineAccessGuard};
+use crate::application::{DependencyRuntime, EngineAccessGuard, ToolCatalogFetcher};
 use crate::domain::{
-    first_useful_line, interrupted_install_detail, parse_missing_dependencies, DependencyAction,
+    build_tool_catalog_snapshot, first_useful_line, interrupted_install_detail,
+    parse_arch_gstreamer_version, parse_debian_gstreamer_version, parse_dnf_gstreamer_version,
+    parse_fedora_gstreamer_version, parse_github_releases_atom, parse_github_scrcpy_releases_json,
+    parse_github_uxplay_releases_json, parse_homebrew_gstreamer_version,
+    parse_installed_adb_version, parse_installed_gstreamer_version, parse_installed_scrcpy_version,
+    parse_installed_uxplay_version, parse_missing_dependencies, parse_msys2_gstreamer_version,
+    parse_ubuntu_gstreamer_version, validate_optional_sha256, validate_scrcpy_version,
+    validate_tool_install_request, validate_uxplay_ref, CatalogContext, DependencyAction,
     DependencyOperation, DependencySnapshot, DomainError, DomainResult, InstallProgress,
-    InstallResult, LaunchRecord, RuntimeCheck, SetupOutcome,
+    InstallResult, InstalledVersions, LaunchRecord, PinnedToolVersion, PlatformOs,
+    RemoteCatalogCache, RuntimeCheck, SetupOutcome, ToolCatalogSnapshot, ToolId,
+    ToolInstallRequest, ToolVersionPreferences, ValidatedToolInstall, ARCH_GSTREAMER_PACKAGES_URL,
+    FEDORA_GSTREAMER_PACKAGES_URL, HOMEBREW_GSTREAMER_API_URL, MSYS2_GSTREAMER_PAGE_URL,
+    SCRCPY_RELEASES_API_URL, SCRCPY_RELEASES_ATOM_URL, UXPLAY_RELEASES_API_URL,
+    UXPLAY_RELEASES_ATOM_URL, UXPLAY_TAGS_API_URL,
 };
 #[cfg(target_os = "windows")]
 use crate::infrastructure::process::background_command;
-use crate::infrastructure::process::{installer_path, run_with_timeout_in_path};
+#[cfg(target_os = "macos")]
+use crate::infrastructure::process::macos_library_path;
+use crate::infrastructure::process::{
+    ensure_safe_directory, find_executable, read_bounded_regular_file, reject_symlink_path,
+    resolved_path, run_with_timeout_env, run_with_timeout_in_path, write_file_atomic_secure,
+};
 use serde::Serialize;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+use std::ffi::OsStr;
+#[cfg(target_os = "macos")]
+use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Output};
@@ -21,18 +42,79 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(90);
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const RHEL_GSTREAMER_QUERY_TIMEOUT: Duration = Duration::from_secs(15);
+const RHEL_GSTREAMER_DNF_ARGS: &[&str] = &[
+    "--quiet",
+    "repoquery",
+    "--latest-limit=1",
+    "--queryformat=%{version}-%{release}",
+    "gstreamer1-tools",
+];
 #[cfg(target_os = "macos")]
 const GSTREAMER_REGISTRY_WARMUP_TIMEOUT: Duration = Duration::from_secs(100);
 const PROCESS_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const RESULT_GRACE: Duration = Duration::from_secs(5);
 const LAUNCH_GRACE: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+const MAX_INSTALL_LOG_READ_BYTES: usize = 1024 * 1024;
+const MAX_INSTALL_LOG_FILE_BYTES: u64 = 5 * 1024 * 1024;
+const MAX_INSTALL_METADATA_BYTES: u64 = 64 * 1024;
 
 const INSTALL_MARKER: &str = "install.pid";
 const INSTALL_RESULT: &str = "install-result.json";
 const INSTALL_LAUNCH: &str = "install-launch.json";
 const INSTALL_LOG: &str = "install.log";
 const INSTALL_PROGRESS: &str = "install-progress.json";
+const TOOL_VERSIONS_FILE: &str = "tool-versions.json";
+
+/// 傳遞給安裝腳本執行的目標範圍與自訂版本參數規格。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct InstallInvocationOptions {
+    pub only_tool: Option<ToolId>,
+    pub uxplay: Option<PinnedToolVersion>,
+    pub scrcpy: Option<PinnedToolVersion>,
+    pub validated_install: Option<ValidatedToolInstall>,
+}
+
+impl InstallInvocationOptions {
+    fn from_preferences(preferences: ToolVersionPreferences) -> Self {
+        Self {
+            only_tool: None,
+            uxplay: preferences.uxplay,
+            scrcpy: preferences.scrcpy,
+            validated_install: None,
+        }
+    }
+
+    fn from_validated(validated: ValidatedToolInstall) -> Self {
+        let pinned = (!validated.is_default).then(|| PinnedToolVersion {
+            version: validated.version.clone(),
+            reference: validated.reference.clone(),
+            sha256: validated.sha256.clone(),
+            allow_unverified: validated.allow_unverified,
+        });
+        match validated.tool {
+            ToolId::UxPlay => Self {
+                only_tool: Some(ToolId::UxPlay),
+                uxplay: pinned,
+                scrcpy: None,
+                validated_install: Some(validated),
+            },
+            ToolId::Scrcpy => Self {
+                only_tool: Some(ToolId::Scrcpy),
+                uxplay: None,
+                scrcpy: pinned,
+                validated_install: Some(validated),
+            },
+            ToolId::GStreamer => Self::default(),
+        }
+    }
+
+    fn expected_uxplay_version(&self) -> Option<&str> {
+        self.uxplay.as_ref().map(|pinned| pinned.version.as_str())
+    }
+}
 
 pub struct DependencyManager {
     snapshot: Arc<Mutex<DependencySnapshot>>,
@@ -41,6 +123,8 @@ pub struct DependencyManager {
     engine_dir: PathBuf,
     gstreamer_registry_path: PathBuf,
     setup_dir: PathBuf,
+    config_dir: PathBuf,
+    remote_catalog: Arc<Mutex<RemoteCatalogCache>>,
     enabled: bool,
 }
 
@@ -70,6 +154,8 @@ impl DependencyManager {
             engine_dir,
             gstreamer_registry_path,
             setup_dir,
+            config_dir: config_dir.to_path_buf(),
+            remote_catalog: Arc::new(Mutex::new(RemoteCatalogCache::default())),
             enabled,
         }
     }
@@ -82,17 +168,17 @@ impl DependencyManager {
     }
 
     pub fn read_install_log(&self) -> Result<String, String> {
-        fs::read_to_string(self.setup_dir.join(INSTALL_LOG)).map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                "尚無安裝記錄。".to_owned()
-            } else {
-                format!("無法讀取安裝記錄：{error}")
-            }
-        })
+        read_log_tail(
+            &self.setup_dir.join(INSTALL_LOG),
+            MAX_INSTALL_LOG_READ_BYTES,
+        )
     }
 
     pub fn start(&self) -> Result<DependencySnapshot, String> {
-        self.begin_operation(DependencyOperation::Install, true, &mut || Ok(()))
+        let options = InstallInvocationOptions::from_preferences(load_tool_version_preferences(
+            &self.config_dir,
+        ));
+        self.begin_operation(DependencyOperation::Install, true, options, &mut || Ok(()))
     }
 
     pub fn manage(
@@ -100,7 +186,128 @@ impl DependencyManager {
         action: DependencyAction,
         prepare: &mut dyn FnMut() -> Result<(), String>,
     ) -> Result<DependencySnapshot, String> {
-        self.begin_operation(action.into(), false, prepare)
+        let options = InstallInvocationOptions::from_preferences(load_tool_version_preferences(
+            &self.config_dir,
+        ));
+        self.begin_operation(action.into(), false, options, prepare)
+    }
+
+    /// 取得目前作業系統平台之工具目錄、已安裝版本與快取線上版本。
+    pub fn tool_catalog(&self) -> DomainResult<ToolCatalogSnapshot> {
+        let os = detect_platform_os();
+        let arch = detect_platform_arch();
+        let package_manager = detect_package_manager();
+        let installed = if self.enabled {
+            probe_installed_versions(&self.engine_dir)
+        } else {
+            InstalledVersions::default()
+        };
+        let preferences = load_tool_version_preferences(&self.config_dir);
+        let remote = self
+            .remote_catalog
+            .lock()
+            .map(|cache| cache.clone())
+            .unwrap_or_default();
+        Ok(build_tool_catalog_snapshot(&CatalogContext {
+            os,
+            arch,
+            package_manager,
+            management_enabled: self.enabled,
+            installed: &installed,
+            preferences: &preferences,
+            remote: &remote,
+        }))
+    }
+
+    /// 從白名單官方來源爬取工具版本清單，更新記憶體快取後回傳最新快照。
+    pub fn refresh_tool_catalog(
+        &self,
+        fetcher: &dyn ToolCatalogFetcher,
+    ) -> DomainResult<ToolCatalogSnapshot> {
+        let os = detect_platform_os();
+        let arch = detect_platform_arch();
+        let mut next = RemoteCatalogCache {
+            fetched_at: Some(jiff::Timestamp::now().to_string()),
+            ..RemoteCatalogCache::default()
+        };
+        let mut errors = Vec::new();
+
+        match fetch_scrcpy_releases(fetcher, os, arch) {
+            Ok(versions) => next.scrcpy = versions,
+            Err(error) => errors.push(format!("scrcpy：{}", error.message)),
+        }
+        match fetch_uxplay_releases(fetcher) {
+            Ok(versions) => next.uxplay = versions,
+            Err(error) => errors.push(format!("UxPlay：{}", error.message)),
+        }
+        match fetch_gstreamer_latest(fetcher, os) {
+            Ok(latest) => next.gstreamer_latest = latest,
+            Err(error) => errors.push(format!("GStreamer：{}", error.message)),
+        }
+
+        if !errors.is_empty() {
+            next.error = Some(errors.join("；"));
+        }
+
+        if let Ok(mut guard) = self.remote_catalog.lock() {
+            if next.scrcpy.is_empty() && !guard.scrcpy.is_empty() {
+                next.scrcpy = guard.scrcpy.clone();
+            }
+            if next.uxplay.is_empty() && !guard.uxplay.is_empty() {
+                next.uxplay = guard.uxplay.clone();
+            }
+            if next.gstreamer_latest.is_none() {
+                next.gstreamer_latest = guard.gstreamer_latest.clone();
+            }
+            *guard = next;
+        }
+
+        self.tool_catalog()
+    }
+
+    /// 驗證並啟動指定單一工具與版本之背景安裝／切換流程。
+    pub fn install_tool_version(
+        &self,
+        request: ToolInstallRequest,
+        prepare: &mut dyn FnMut() -> DomainResult<()>,
+    ) -> DomainResult<DependencySnapshot> {
+        if !self.enabled {
+            return Err(DomainError::dependency_disabled(
+                "此工作階段已停用工具管理。",
+            ));
+        }
+
+        let known_remote = self
+            .remote_catalog
+            .lock()
+            .map(|cache| match request.tool {
+                ToolId::UxPlay => cache.uxplay.clone(),
+                ToolId::Scrcpy => cache.scrcpy.clone(),
+                ToolId::GStreamer => Vec::new(),
+            })
+            .unwrap_or_default();
+
+        let validated = validate_tool_install_request(
+            &request,
+            detect_platform_os(),
+            detect_platform_arch(),
+            &known_remote,
+        )?;
+
+        let options = InstallInvocationOptions::from_validated(validated);
+        self.begin_operation(
+            DependencyOperation::InstallTool,
+            false,
+            options,
+            &mut || prepare().map_err(|error| error.message),
+        )
+        .map_err(DomainError::dependency_busy)
+    }
+
+    /// 清除所有自訂工具版本偏好並回傳最新目錄快照。
+    pub fn reset_tool_versions(&self) -> DomainResult<ToolCatalogSnapshot> {
+        reset_tool_version_preferences(&self.config_dir).map_err(DomainError::storage)?;
+        self.tool_catalog()
     }
 
     pub fn with_engine_access<T>(
@@ -121,6 +328,7 @@ impl DependencyManager {
         &self,
         operation: DependencyOperation,
         return_existing: bool,
+        options: InstallInvocationOptions,
         prepare: &mut dyn FnMut() -> Result<(), String>,
     ) -> Result<DependencySnapshot, String> {
         if !self.enabled {
@@ -158,6 +366,18 @@ impl DependencyManager {
                 DependencyOperation::Install => "正在檢查 UxPlay、GStreamer、ADB 與 scrcpy…".into(),
                 DependencyOperation::Upgrade => "正在準備升級投影工具…".into(),
                 DependencyOperation::Reinstall => "正在準備清除並重新安裝…".into(),
+                DependencyOperation::InstallTool => match options.validated_install.as_ref() {
+                    Some(validated) => format!(
+                        "正在準備安裝 {} {}…",
+                        match validated.tool {
+                            ToolId::UxPlay => "UxPlay",
+                            ToolId::Scrcpy => "scrcpy",
+                            ToolId::GStreamer => "GStreamer",
+                        },
+                        validated.version
+                    ),
+                    None => "正在準備安裝指定版本工具…".into(),
+                },
             };
         }
 
@@ -172,6 +392,7 @@ impl DependencyManager {
         let engine_dir = self.engine_dir.clone();
         let gstreamer_registry_path = self.gstreamer_registry_path.clone();
         let setup_dir = self.setup_dir.clone();
+        let config_dir = self.config_dir.clone();
         let spawned = thread::Builder::new()
             .name("neo-airplay-dependency-setup".into())
             .spawn(move || {
@@ -180,8 +401,10 @@ impl DependencyManager {
                         &engine_dir,
                         &gstreamer_registry_path,
                         &setup_dir,
+                        &config_dir,
                         &shared,
                         operation,
+                        &options,
                     )
                 }));
                 let outcome = match run {
@@ -301,6 +524,409 @@ impl DependencyRuntime for DependencyManager {
         })
         .map_err(DomainError::dependency_busy)
     }
+
+    fn tool_catalog(&self) -> DomainResult<ToolCatalogSnapshot> {
+        DependencyManager::tool_catalog(self)
+    }
+
+    fn refresh_tool_catalog(
+        &self,
+        fetcher: &dyn ToolCatalogFetcher,
+    ) -> DomainResult<ToolCatalogSnapshot> {
+        DependencyManager::refresh_tool_catalog(self, fetcher)
+    }
+
+    fn install_tool_version(
+        &self,
+        request: ToolInstallRequest,
+        prepare: &mut dyn FnMut() -> DomainResult<()>,
+    ) -> DomainResult<DependencySnapshot> {
+        DependencyManager::install_tool_version(self, request, prepare)
+    }
+
+    fn reset_tool_versions(&self) -> DomainResult<ToolCatalogSnapshot> {
+        DependencyManager::reset_tool_versions(self)
+    }
+}
+
+fn detect_platform_os() -> PlatformOs {
+    #[cfg(target_os = "macos")]
+    {
+        PlatformOs::Macos
+    }
+    #[cfg(target_os = "windows")]
+    {
+        PlatformOs::Windows
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        PlatformOs::Linux
+    }
+}
+
+fn detect_platform_arch() -> &'static str {
+    std::env::consts::ARCH
+}
+
+fn detect_package_manager() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "homebrew"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "winget-msys2"
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        if has_command_on_path("apt-get") {
+            "apt"
+        } else if has_command_on_path("dnf") {
+            "dnf"
+        } else if has_command_on_path("pacman") {
+            "pacman"
+        } else {
+            "linux-pkg"
+        }
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn has_command_on_path(binary: &str) -> bool {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&paths).any(|directory| {
+        let candidate = directory.join(binary);
+        fs::metadata(candidate).is_ok_and(|metadata| metadata.is_file())
+    })
+}
+
+fn probe_installed_versions(engine_dir: &Path) -> InstalledVersions {
+    let engine_path = resolved_path(engine_dir);
+    #[cfg(target_os = "macos")]
+    let dyld_path = macos_library_path(engine_dir);
+    #[cfg(target_os = "macos")]
+    let gst_plugins: OsString = engine_dir.join("lib/gstreamer-1.0").into_os_string();
+    #[cfg(target_os = "macos")]
+    let mac_env: [(&str, &OsStr); 3] = [
+        ("DYLD_LIBRARY_PATH", dyld_path.as_os_str()),
+        ("GST_PLUGIN_PATH_1_0", gst_plugins.as_os_str()),
+        ("GST_PLUGIN_SYSTEM_PATH_1_0", gst_plugins.as_os_str()),
+    ];
+
+    let run_probe = |executable: &Path, args: &[&str]| -> Option<String> {
+        let owned_args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+        #[cfg(target_os = "macos")]
+        let output = run_with_timeout_env(
+            executable,
+            &owned_args,
+            VERSION_PROBE_TIMEOUT,
+            Some(engine_path.as_os_str()),
+            &mac_env,
+        )
+        .ok()?;
+        #[cfg(not(target_os = "macos"))]
+        let output = run_with_timeout_env(
+            executable,
+            &owned_args,
+            VERSION_PROBE_TIMEOUT,
+            Some(engine_path.as_os_str()),
+            &[],
+        )
+        .ok()?;
+        Some(combined_output(&output))
+    };
+
+    InstalledVersions {
+        uxplay: find_executable(engine_dir, "uxplay", false)
+            .and_then(|exe| run_probe(&exe, &["-v"]))
+            .and_then(|out| parse_installed_uxplay_version(&out)),
+        scrcpy: find_executable(engine_dir, "scrcpy", true)
+            .and_then(|exe| run_probe(&exe, &["--version"]))
+            .and_then(|out| parse_installed_scrcpy_version(&out)),
+        adb: find_executable(engine_dir, "adb", true)
+            .and_then(|exe| run_probe(&exe, &["version"]))
+            .and_then(|out| parse_installed_adb_version(&out)),
+        gstreamer: find_executable(engine_dir, "gst-inspect-1.0", false)
+            .and_then(|exe| run_probe(&exe, &["--version"]))
+            .and_then(|out| parse_installed_gstreamer_version(&out)),
+    }
+}
+
+fn fetch_scrcpy_releases(
+    fetcher: &dyn ToolCatalogFetcher,
+    os: PlatformOs,
+    arch: &str,
+) -> DomainResult<Vec<crate::domain::ToolReleaseOption>> {
+    match fetcher.fetch_text(SCRCPY_RELEASES_API_URL) {
+        Ok(body) => parse_github_scrcpy_releases_json(&body, os, arch),
+        Err(api_error) => {
+            let atom_body = fetcher
+                .fetch_text(SCRCPY_RELEASES_ATOM_URL)
+                .map_err(|_| api_error)?;
+            let fallback = parse_github_releases_atom(&atom_body, ToolId::Scrcpy);
+            if fallback.is_empty() {
+                Err(DomainError::external_process(
+                    "無法解析 scrcpy 線上發行清單。",
+                ))
+            } else {
+                Ok(fallback)
+            }
+        }
+    }
+}
+
+fn fetch_uxplay_releases(
+    fetcher: &dyn ToolCatalogFetcher,
+) -> DomainResult<Vec<crate::domain::ToolReleaseOption>> {
+    match fetcher.fetch_text(UXPLAY_RELEASES_API_URL) {
+        Ok(body) => {
+            let tags_body = fetcher.fetch_text(UXPLAY_TAGS_API_URL).ok();
+            parse_github_uxplay_releases_json(&body, tags_body.as_deref())
+        }
+        Err(api_error) => {
+            let atom_body = fetcher
+                .fetch_text(UXPLAY_RELEASES_ATOM_URL)
+                .map_err(|_| api_error)?;
+            let fallback = parse_github_releases_atom(&atom_body, ToolId::UxPlay);
+            if fallback.is_empty() {
+                Err(DomainError::external_process(
+                    "無法解析 UxPlay 線上發行清單。",
+                ))
+            } else {
+                Ok(fallback)
+            }
+        }
+    }
+}
+
+fn fetch_gstreamer_latest(
+    fetcher: &dyn ToolCatalogFetcher,
+    os: PlatformOs,
+) -> DomainResult<Option<String>> {
+    match os {
+        PlatformOs::Macos => {
+            let body = fetcher.fetch_text(HOMEBREW_GSTREAMER_API_URL)?;
+            parse_homebrew_gstreamer_version(&body)
+                .map(Some)
+                .ok_or_else(|| DomainError::external_process("無法解析 Homebrew GStreamer 版本。"))
+        }
+        PlatformOs::Windows => {
+            let body = fetcher.fetch_text(MSYS2_GSTREAMER_PAGE_URL)?;
+            parse_msys2_gstreamer_version(&body)
+                .map(Some)
+                .ok_or_else(|| DomainError::external_process("無法解析 MSYS2 GStreamer 版本。"))
+        }
+        PlatformOs::Linux => {
+            let os_release = fs::read_to_string("/etc/os-release").map_err(|error| {
+                DomainError::external_process(format!("無法讀取 Linux 發行版資訊：{error}"))
+            })?;
+            let distribution = parse_linux_distribution(&os_release)?;
+            fetch_linux_gstreamer_latest(fetcher, &distribution, detect_platform_arch()).map(Some)
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LinuxDistribution {
+    Debian { codename: String },
+    Ubuntu { codename: String },
+    Fedora { release: String },
+    Rhel,
+    Arch,
+}
+
+fn parse_linux_distribution(os_release: &str) -> DomainResult<LinuxDistribution> {
+    let id = os_release_value(os_release, "ID")
+        .map(|value| value.to_ascii_lowercase())
+        .ok_or_else(|| DomainError::external_process("Linux 發行版資訊缺少 ID 欄位。"))?;
+
+    match id.as_str() {
+        "debian" => {
+            let codename = os_release_value(os_release, "VERSION_CODENAME")
+                .map(|value| value.to_ascii_lowercase())
+                .filter(|value| is_safe_linux_release_segment(value))
+                .ok_or_else(|| {
+                    DomainError::external_process("Debian 發行版資訊缺少有效的版本代號。")
+                })?;
+            Ok(LinuxDistribution::Debian { codename })
+        }
+        "ubuntu" => {
+            let codename = os_release_value(os_release, "VERSION_CODENAME")
+                .or_else(|| os_release_value(os_release, "UBUNTU_CODENAME"))
+                .map(|value| value.to_ascii_lowercase())
+                .filter(|value| is_safe_linux_release_segment(value))
+                .ok_or_else(|| {
+                    DomainError::external_process("Ubuntu 發行版資訊缺少有效的版本代號。")
+                })?;
+            Ok(LinuxDistribution::Ubuntu { codename })
+        }
+        "fedora" => {
+            let release = os_release_value(os_release, "VERSION_ID")
+                .filter(|value| !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit()))
+                .ok_or_else(|| {
+                    DomainError::external_process("Fedora 發行版資訊缺少有效的版本號。")
+                })?;
+            Ok(LinuxDistribution::Fedora { release })
+        }
+        "rhel" => Ok(LinuxDistribution::Rhel),
+        "arch" => Ok(LinuxDistribution::Arch),
+        _ => Err(DomainError::external_process(format!(
+            "尚未支援 Linux 發行版「{id}」的 GStreamer 版本查詢。"
+        ))),
+    }
+}
+
+fn os_release_value(os_release: &str, key: &str) -> Option<String> {
+    os_release.lines().find_map(|line| {
+        let (field, raw_value) = line.split_once('=')?;
+        if field != key {
+            return None;
+        }
+        let raw_value = raw_value.trim();
+        let value = if raw_value.starts_with('"') {
+            raw_value.strip_prefix('"')?.strip_suffix('"')?
+        } else if raw_value.starts_with('\'') {
+            raw_value.strip_prefix('\'')?.strip_suffix('\'')?
+        } else {
+            raw_value.split('#').next()?.trim()
+        };
+        (!value.is_empty()).then(|| value.to_owned())
+    })
+}
+
+fn is_safe_linux_release_segment(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+        })
+}
+
+fn fetch_linux_gstreamer_latest(
+    fetcher: &dyn ToolCatalogFetcher,
+    distribution: &LinuxDistribution,
+    arch: &str,
+) -> DomainResult<String> {
+    match distribution {
+        LinuxDistribution::Debian { codename } => {
+            let url = format!("https://packages.debian.org/{codename}/utils/gstreamer1.0-tools");
+            let body = fetcher.fetch_text(&url)?;
+            parse_debian_gstreamer_version(&body).ok_or_else(|| {
+                DomainError::external_process("無法解析 Debian 官方 GStreamer 套件版本。")
+            })
+        }
+        LinuxDistribution::Ubuntu { codename } => {
+            let url = format!("https://packages.ubuntu.com/{codename}/utils/gstreamer1.0-tools");
+            let body = fetcher.fetch_text(&url)?;
+            parse_ubuntu_gstreamer_version(&body).ok_or_else(|| {
+                DomainError::external_process("無法解析 Ubuntu 官方 GStreamer 套件版本。")
+            })
+        }
+        LinuxDistribution::Fedora { release } => {
+            let body = fetcher.fetch_text(FEDORA_GSTREAMER_PACKAGES_URL)?;
+            parse_fedora_gstreamer_version(&body, release).ok_or_else(|| {
+                DomainError::external_process(format!(
+                    "無法解析 Fedora {release} 官方 GStreamer 套件版本。"
+                ))
+            })
+        }
+        LinuxDistribution::Rhel => fetch_rhel_gstreamer_latest(),
+        LinuxDistribution::Arch if arch == "x86_64" => {
+            let body = fetcher.fetch_text(ARCH_GSTREAMER_PACKAGES_URL)?;
+            parse_arch_gstreamer_version(&body).ok_or_else(|| {
+                DomainError::external_process("無法解析 Arch Linux 官方 GStreamer 套件版本。")
+            })
+        }
+        LinuxDistribution::Arch => Err(DomainError::external_process(format!(
+            "Arch Linux 官方 GStreamer 版本頁不支援目前的 {arch} 架構。"
+        ))),
+    }
+}
+
+fn fetch_rhel_gstreamer_latest() -> DomainResult<String> {
+    let executable = Path::new("/usr/bin/dnf");
+    if !executable.is_file() {
+        return Err(DomainError::external_process(
+            "找不到 /usr/bin/dnf，無法查詢 RHEL GStreamer 套件版本。",
+        ));
+    }
+    let args = RHEL_GSTREAMER_DNF_ARGS
+        .iter()
+        .map(|arg| (*arg).to_owned())
+        .collect::<Vec<_>>();
+    let output = run_with_timeout_env(executable, &args, RHEL_GSTREAMER_QUERY_TIMEOUT, None, &[])
+        .map_err(|error| {
+        DomainError::external_process(format!("RHEL DNF 版本查詢失敗：{error}"))
+    })?;
+    if !output.status.success() {
+        let detail = first_useful_line(&combined_output(&output))
+            .unwrap_or_else(|| format!("結束代碼 {}", output.status));
+        return Err(DomainError::external_process(format!(
+            "RHEL DNF 版本查詢失敗：{detail}"
+        )));
+    }
+    parse_dnf_gstreamer_version(&String::from_utf8_lossy(&output.stdout))
+        .ok_or_else(|| DomainError::external_process("RHEL DNF 未回傳有效的 GStreamer 套件版本。"))
+}
+
+/// 從 `config_dir/tool-versions.json` 安全讀取使用者自訂版本偏好，遇到符號連結或無效內容時安全退回預設。
+pub(crate) fn load_tool_version_preferences(config_dir: &Path) -> ToolVersionPreferences {
+    let path = config_dir.join(TOOL_VERSIONS_FILE);
+    let Ok(bytes) = read_bounded_regular_file(&path, MAX_INSTALL_METADATA_BYTES) else {
+        return ToolVersionPreferences::default();
+    };
+    let Ok(mut preferences) = serde_json::from_slice::<ToolVersionPreferences>(&bytes) else {
+        return ToolVersionPreferences::default();
+    };
+    preferences.uxplay = preferences.uxplay.filter(|pin| {
+        validate_uxplay_ref(&pin.reference).is_ok()
+            && validate_uxplay_ref(&pin.version).is_ok()
+            && validate_optional_sha256(pin.sha256.as_deref()).is_ok()
+    });
+    preferences.scrcpy = preferences.scrcpy.filter(|pin| {
+        validate_scrcpy_version(&pin.version).is_ok()
+            && validate_optional_sha256(pin.sha256.as_deref()).is_ok()
+    });
+    preferences
+}
+
+/// 將已驗證通過的工具版本選擇原子寫入 `config_dir/tool-versions.json`（若為推薦預設版則清除該工具覆寫）。
+pub(crate) fn save_tool_version_preference(
+    config_dir: &Path,
+    validated: &ValidatedToolInstall,
+) -> Result<(), String> {
+    ensure_safe_directory(config_dir, false)
+        .map_err(|error| format!("無法建立或驗證設定目錄：{error}"))?;
+    let path = config_dir.join(TOOL_VERSIONS_FILE);
+    reject_symlink_path(&path).map_err(|error| format!("工具版本設定路徑不安全：{error}"))?;
+
+    let mut preferences = load_tool_version_preferences(config_dir);
+    let next_pin = (!validated.is_default).then(|| PinnedToolVersion {
+        version: validated.version.clone(),
+        reference: validated.reference.clone(),
+        sha256: validated.sha256.clone(),
+        allow_unverified: validated.allow_unverified,
+    });
+    match validated.tool {
+        ToolId::UxPlay => preferences.uxplay = next_pin,
+        ToolId::Scrcpy => preferences.scrcpy = next_pin,
+        ToolId::GStreamer => {}
+    }
+
+    if preferences.uxplay.is_none() && preferences.scrcpy.is_none() {
+        remove_file_if_exists(&path)
+    } else {
+        write_json_atomic(&path, &preferences)
+    }
+}
+
+/// 安全刪除 `config_dir/tool-versions.json` 以還原各作業系統內建推薦版。
+pub(crate) fn reset_tool_version_preferences(config_dir: &Path) -> Result<(), String> {
+    let path = config_dir.join(TOOL_VERSIONS_FILE);
+    reject_symlink_path(&path).map_err(|error| format!("工具版本設定路徑不安全：{error}"))?;
+    remove_file_if_exists(&path)
 }
 
 /// 在背景執行緒執行的完整檢查、清理、安裝與結果驗證工作流程。
@@ -318,10 +944,15 @@ fn run_setup(
     engine_dir: &Path,
     gstreamer_registry_path: &Path,
     setup_dir: &Path,
+    config_dir: &Path,
     snapshot: &Arc<Mutex<DependencySnapshot>>,
     operation: DependencyOperation,
+    options: &InstallInvocationOptions,
 ) -> Result<SetupOutcome, String> {
-    fs::create_dir_all(setup_dir).map_err(|error| format!("無法建立安裝記錄目錄：{error}"))?;
+    ensure_safe_directory(setup_dir, true)
+        .map_err(|error| format!("無法建立安裝記錄目錄：{error}"))?;
+    ensure_safe_directory(engine_dir, false)
+        .map_err(|error| format!("無法建立或驗證工具目錄：{error}"))?;
 
     let marker_path = setup_dir.join(INSTALL_MARKER);
     let result_path = setup_dir.join(INSTALL_RESULT);
@@ -410,8 +1041,10 @@ fn run_setup(
     }
 
     stage_installer(setup_dir)?;
-    let runtime = check_runtime(engine_dir, setup_dir)?;
+    let expected_uxplay = options.expected_uxplay_version();
+    let runtime = check_runtime(engine_dir, setup_dir, expected_uxplay)?;
     if runtime.is_ready() && operation == DependencyOperation::Install {
+        stage_installer(setup_dir)?;
         warm_gstreamer_registry(engine_dir, gstreamer_registry_path, setup_dir, snapshot);
         remove_if_exists(&launch_path);
         return Ok(SetupOutcome::ready(operation));
@@ -429,19 +1062,56 @@ fn run_setup(
         }
         DependencyOperation::Upgrade => "正在更新平台相依套件與 Neo AirPlay 工具…".into(),
         DependencyOperation::Reinstall => "正在更新平台相依套件並重新安裝工具…".into(),
+        DependencyOperation::InstallTool => match options.validated_install.as_ref() {
+            Some(validated) => format!(
+                "正在背景下載並安裝 {} {}…",
+                match validated.tool {
+                    ToolId::UxPlay => "UxPlay",
+                    ToolId::Scrcpy => "scrcpy",
+                    ToolId::GStreamer => "GStreamer",
+                },
+                validated.version
+            ),
+            None => "正在安裝指定版本的投影工具…".into(),
+        },
     };
     publish_installing(snapshot, &message);
 
+    stage_installer(setup_dir)?;
     let result = install_dependencies(
         setup_dir,
         engine_dir,
         snapshot,
-        operation != DependencyOperation::Install,
+        matches!(
+            operation,
+            DependencyOperation::Upgrade | DependencyOperation::Reinstall
+        ),
+        options,
     );
-    let final_check = check_runtime(engine_dir, setup_dir)?;
+    let final_check = check_runtime(engine_dir, setup_dir, expected_uxplay)?;
     let installer_succeeded = result.as_ref().is_ok_and(|result| result.exit_code == 0);
-    if final_check.is_ready() && (operation == DependencyOperation::Install || installer_succeeded)
+    if operation == DependencyOperation::InstallTool {
+        if installer_succeeded && target_tool_present(engine_dir, options.only_tool) {
+            if let Some(validated) = options.validated_install.as_ref() {
+                save_tool_version_preference(config_dir, validated)?;
+            }
+            stage_installer(setup_dir)?;
+            remove_if_exists(&launch_path);
+            if final_check.is_ready() {
+                warm_gstreamer_registry(engine_dir, gstreamer_registry_path, setup_dir, snapshot);
+                return Ok(SetupOutcome::ready(operation));
+            }
+            let partial_message = format!(
+                "指定版本工具已安裝，但目前環境仍缺少 {}。",
+                final_check.missing.join("、")
+            );
+            append_log(&setup_dir.join(INSTALL_LOG), &partial_message);
+            return Ok(SetupOutcome::failed(partial_message, final_check.missing));
+        }
+    } else if final_check.is_ready()
+        && (operation == DependencyOperation::Install || installer_succeeded)
     {
+        stage_installer(setup_dir)?;
         warm_gstreamer_registry(engine_dir, gstreamer_registry_path, setup_dir, snapshot);
         remove_if_exists(&launch_path);
         return Ok(SetupOutcome::ready(operation));
@@ -459,6 +1129,17 @@ fn run_setup(
     let message = format!("{install_detail}；{missing_detail}請查看安裝記錄後重試。");
     append_log(&setup_dir.join(INSTALL_LOG), &message);
     Ok(SetupOutcome::failed(message, final_check.missing))
+}
+
+fn target_tool_present(engine_dir: &Path, only_tool: Option<ToolId>) -> bool {
+    match only_tool {
+        Some(ToolId::UxPlay) => find_executable(engine_dir, "uxplay", false).is_some(),
+        Some(ToolId::Scrcpy) => {
+            find_executable(engine_dir, "scrcpy", true).is_some()
+                && find_executable(engine_dir, "adb", true).is_some()
+        }
+        Some(ToolId::GStreamer) | None => false,
+    }
 }
 
 /// 在 macOS 上於首次就緒或快取失效時預熱 GStreamer registry 快取，加速後續 UxPlay 啟動。
@@ -495,7 +1176,7 @@ fn warm_gstreamer_registry(
             Path::new("/bin/bash"),
             &args,
             GSTREAMER_REGISTRY_WARMUP_TIMEOUT,
-            Some(installer_path(engine_dir).as_os_str()),
+            None,
         );
         match output {
             Ok(output) => {
@@ -532,26 +1213,31 @@ fn warm_gstreamer_registry(
     let _ = (engine_dir, registry_path, setup_dir, snapshot);
 }
 
-/// 將編譯時嵌入二進位檔的平台安裝腳本釋放至 `setup_dir`。
+/// 將編譯時嵌入二進位檔的平台安裝腳本安全釋放至受保護的 `setup_dir`（原子寫入並拒絕符號連結）。
 ///
 /// # 參數
 /// - `setup_dir`: 目標腳本存放目錄。
 ///
 /// # 回傳值
-/// 成功釋放回傳腳本檔案路徑 `Ok(PathBuf)`；寫入失敗回傳錯誤字串。
-fn stage_installer(setup_dir: &Path) -> Result<PathBuf, String> {
+/// 成功釋放回傳腳本檔案路徑 `Ok(PathBuf)`；遇到符號連結或寫入失敗回傳錯誤字串。
+pub(crate) fn stage_installer(setup_dir: &Path) -> Result<PathBuf, String> {
+    ensure_safe_directory(setup_dir, true)
+        .map_err(|error| format!("無法準備工具安裝目錄：{error}"))?;
     #[cfg(target_os = "windows")]
-    let (path, contents) = (
+    let (path, contents, mode) = (
         setup_dir.join("install.ps1"),
         include_str!("../../../scripts/install.ps1"),
+        0o600,
     );
     #[cfg(not(target_os = "windows"))]
-    let (path, contents) = (
+    let (path, contents, mode) = (
         setup_dir.join("install.sh"),
         include_str!("../../../scripts/install.sh"),
+        0o700,
     );
 
-    fs::write(&path, contents).map_err(|error| format!("無法準備工具安裝程序：{error}"))?;
+    write_file_atomic_secure(&path, contents.as_bytes(), mode)
+        .map_err(|error| format!("無法準備工具安裝程序：{error}"))?;
     Ok(path)
 }
 
@@ -563,11 +1249,14 @@ fn stage_installer(setup_dir: &Path) -> Result<PathBuf, String> {
 ///
 /// # 回傳值
 /// 回傳包含缺少項目清單的 `RuntimeCheck`；檢查指令無法啟動或逾時則回傳錯誤字串。
-fn check_runtime(engine_dir: &Path, setup_dir: &Path) -> Result<RuntimeCheck, String> {
-    let path = installer_path(engine_dir);
+fn check_runtime(
+    engine_dir: &Path,
+    setup_dir: &Path,
+    expect_uxplay_version: Option<&str>,
+) -> Result<RuntimeCheck, String> {
     #[cfg(target_os = "windows")]
-    let (executable, args) = (
-        PathBuf::from("powershell.exe"),
+    let (executable, mut args) = (
+        windows_powershell_executable(),
         vec![
             "-NoProfile".into(),
             "-ExecutionPolicy".into(),
@@ -580,7 +1269,7 @@ fn check_runtime(engine_dir: &Path, setup_dir: &Path) -> Result<RuntimeCheck, St
         ],
     );
     #[cfg(not(target_os = "windows"))]
-    let (executable, args) = (
+    let (executable, mut args) = (
         PathBuf::from("/bin/bash"),
         vec![
             setup_dir.join("install.sh").to_string_lossy().into_owned(),
@@ -589,14 +1278,19 @@ fn check_runtime(engine_dir: &Path, setup_dir: &Path) -> Result<RuntimeCheck, St
             engine_dir.to_string_lossy().into_owned(),
         ],
     );
+    if let Some(version) = expect_uxplay_version {
+        #[cfg(target_os = "windows")]
+        args.extend(["-ExpectUxPlayVersion".into(), version.to_owned()]);
+        #[cfg(not(target_os = "windows"))]
+        args.extend(["--expect-uxplay-version".into(), version.to_owned()]);
+    }
 
     let output =
-        run_with_timeout_in_path(&executable, &args, CHECK_TIMEOUT, Some(path.as_os_str()))
-            .map_err(|error| {
-                let detail = format!("工具依賴檢查無法完成：{error}");
-                append_log(&setup_dir.join(INSTALL_LOG), &detail);
-                detail
-            })?;
+        run_with_timeout_in_path(&executable, &args, CHECK_TIMEOUT, None).map_err(|error| {
+            let detail = format!("工具依賴檢查無法完成：{error}");
+            append_log(&setup_dir.join(INSTALL_LOG), &detail);
+            detail
+        })?;
     let output_text = combined_output(&output);
     if !output_text.trim().is_empty() {
         append_log(&setup_dir.join(INSTALL_LOG), output_text.trim());
@@ -629,11 +1323,13 @@ fn install_dependencies(
     engine_dir: &Path,
     snapshot: &Arc<Mutex<DependencySnapshot>>,
     force_upgrade: bool,
+    options: &InstallInvocationOptions,
 ) -> Result<InstallResult, String> {
     let log_path = setup_dir.join(INSTALL_LOG);
     let marker_path = setup_dir.join(INSTALL_MARKER);
     let result_path = setup_dir.join(INSTALL_RESULT);
     let launch_path = setup_dir.join(INSTALL_LAUNCH);
+    rotate_install_log_if_oversized(&log_path)?;
     remove_if_exists(&marker_path);
     remove_if_exists(&result_path);
     remove_if_exists(&setup_dir.join(INSTALL_PROGRESS));
@@ -646,36 +1342,51 @@ fn install_dependencies(
 
     #[cfg(target_os = "macos")]
     {
+        struct LaunchScriptCleanup<'a>(&'a Path);
+        impl Drop for LaunchScriptCleanup<'_> {
+            fn drop(&mut self) {
+                remove_if_exists(self.0);
+            }
+        }
+
         let script = setup_dir.join("install.sh");
         let launch_script = setup_dir.join("launch.sh");
-        let upgrade_argument = if force_upgrade { " --upgrade" } else { "" };
-        fs::write(
-            &launch_script,
-            format!("#!/bin/bash\nset -u\nexec > >(tee -a \"$2\") 2>&1\nexec /bin/bash \"$1\" --gui --engine-dir \"$3\" --marker-file \"$4\" --result-file \"$5\"{upgrade_argument}\n"),
-        )
-        .map_err(|error| format!("無法準備終端安裝程序：{error}"))?;
-        let command_line = [
-            Path::new("/bin/bash"),
-            launch_script.as_path(),
+        for path in [
             script.as_path(),
+            launch_script.as_path(),
             log_path.as_path(),
             engine_dir,
             marker_path.as_path(),
             result_path.as_path(),
-        ]
-        .into_iter()
-        .map(|path| shell_quote(&path.to_string_lossy()))
-        .collect::<Vec<_>>()
-        .join(" ");
-        let applescript = format!(
-            "tell application \"Terminal\" to do script \"{}\"",
-            command_line.replace('\\', "\\\\").replace('"', "\\\"")
-        );
+        ] {
+            validate_terminal_path(path)?;
+        }
+        let launch_contents = "#!/bin/bash\nset -euo pipefail\nif [ -L \"$1\" ] || [ -L \"$2\" ]; then\n  printf 'Refusing symlinked installer or log target.\\n' >&2\n  exit 1\nfi\nexec > >(tee -a \"$2\") 2>&1\ninstaller=\"$1\"\nengine=\"$3\"\nmarker=\"$4\"\nresult=\"$5\"\nshift 5\nexec /bin/bash \"$installer\" --gui --engine-dir \"$engine\" --marker-file \"$marker\" --result-file \"$result\" \"$@\"\n";
+        write_file_atomic_secure(&launch_script, launch_contents.as_bytes(), 0o700)
+            .map_err(|error| format!("無法準備終端安裝程序：{error}"))?;
+        let _cleanup_launch_script = LaunchScriptCleanup(&launch_script);
+
+        let mut raw_args = vec![
+            "/bin/bash".to_owned(),
+            launch_script.to_string_lossy().into_owned(),
+            script.to_string_lossy().into_owned(),
+            log_path.to_string_lossy().into_owned(),
+            engine_dir.to_string_lossy().into_owned(),
+            marker_path.to_string_lossy().into_owned(),
+            result_path.to_string_lossy().into_owned(),
+        ];
+        raw_args.extend(unix_extra_installer_args(force_upgrade, options));
+        let command_line = raw_args
+            .into_iter()
+            .map(|value| shell_quote(&value))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let osascript_args = macos_terminal_osascript_args(&command_line)?;
         let output = run_with_timeout_in_path(
             Path::new("/usr/bin/osascript"),
-            &["-e".into(), applescript],
+            &osascript_args,
             Duration::from_secs(30),
-            Some(installer_path(engine_dir).as_os_str()),
+            None,
         );
         match output {
             Ok(output) if output.status.success() => {}
@@ -711,20 +1422,27 @@ fn install_dependencies(
         } else {
             "install.sh"
         });
-        let log = OpenOptions::new()
-            .create(true)
-            .append(true)
+        reject_symlink_path(&log_path)
+            .map_err(|error| format!("安裝記錄檔案路徑不安全：{error}"))?;
+        let mut log_options = OpenOptions::new();
+        log_options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            log_options.mode(0o600);
+        }
+        let log = log_options
             .open(&log_path)
             .map_err(|error| format!("無法建立安裝記錄：{error}"))?;
-        let mut command = installer_command(
+        let mut command = installer_command_with_options(
             &script,
             engine_dir,
             &marker_path,
             &result_path,
             force_upgrade,
+            options,
         );
         command
-            .env("PATH", installer_path(engine_dir))
             .stdin(Stdio::null())
             .stdout(Stdio::from(
                 log.try_clone()
@@ -749,18 +1467,81 @@ fn install_dependencies(
     }
 }
 
-/// 建構 Windows PowerShell 非互動式安裝命令。
-///
-/// # 參數
-/// - `script`: `install.ps1` 腳本檔案路徑。
-/// - `engine_dir`: 目標工具安裝目錄。
-/// - `marker`: PID 標記檔案路徑。
-/// - `result`: 結果輸出 JSON 檔案路徑。
-/// - `force_upgrade`: 是否附帶 `-Upgrade` 旗標。
-///
-/// # 回傳值
-/// 回傳設定完成參數的 Windows `Command`。
-#[cfg(target_os = "windows")]
+/// 組裝 Unix（macOS / Linux）傳遞給 `install.sh` 的額外旗標與安全驗證後之版本參數。
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
+pub(crate) fn unix_extra_installer_args(
+    force_upgrade: bool,
+    options: &InstallInvocationOptions,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    if force_upgrade {
+        args.push("--upgrade".into());
+    }
+    if let Some(only_tool) = options.only_tool {
+        args.push("--only".into());
+        args.push(only_tool.as_cli_value().into());
+    }
+    if let Some(uxplay) = options.uxplay.as_ref() {
+        args.push("--uxplay-ref".into());
+        args.push(uxplay.reference.clone());
+        args.push("--expect-uxplay-version".into());
+        args.push(uxplay.version.clone());
+        if let Some(sha) = uxplay.sha256.as_ref() {
+            args.push("--uxplay-sha256".into());
+            args.push(sha.clone());
+        } else if uxplay.allow_unverified {
+            args.push("--allow-unverified-uxplay".into());
+        }
+    }
+    if let Some(scrcpy) = options.scrcpy.as_ref() {
+        args.push("--scrcpy-version".into());
+        args.push(scrcpy.version.clone());
+        if let Some(sha) = scrcpy.sha256.as_ref() {
+            args.push("--scrcpy-sha256".into());
+            args.push(sha.clone());
+        }
+    }
+    args
+}
+
+/// 組裝 Windows 傳遞給 `install.ps1` 的額外旗標與安全驗證後之版本參數。
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn windows_extra_installer_args(
+    force_upgrade: bool,
+    options: &InstallInvocationOptions,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    if force_upgrade {
+        args.push("-Upgrade".into());
+    }
+    if let Some(only_tool) = options.only_tool {
+        args.push("-Only".into());
+        args.push(only_tool.as_cli_value().into());
+    }
+    if let Some(uxplay) = options.uxplay.as_ref() {
+        args.push("-UxPlayRef".into());
+        args.push(uxplay.reference.clone());
+        args.push("-ExpectUxPlayVersion".into());
+        args.push(uxplay.version.clone());
+        if let Some(sha) = uxplay.sha256.as_ref() {
+            args.push("-UxPlaySha256".into());
+            args.push(sha.clone());
+        } else if uxplay.allow_unverified {
+            args.push("-AllowUnverifiedUxPlay".into());
+        }
+    }
+    if let Some(scrcpy) = options.scrcpy.as_ref() {
+        args.push("-ScrcpyVersionOverride".into());
+        args.push(scrcpy.version.clone());
+        if let Some(sha) = scrcpy.sha256.as_ref() {
+            args.push("-ScrcpySha256".into());
+            args.push(sha.clone());
+        }
+    }
+    args
+}
+
+#[cfg(all(target_os = "linux", test))]
 pub(crate) fn installer_command(
     script: &Path,
     engine_dir: &Path,
@@ -768,7 +1549,26 @@ pub(crate) fn installer_command(
     result: &Path,
     force_upgrade: bool,
 ) -> Command {
-    let mut command = background_command("powershell.exe");
+    installer_command_with_options(
+        script,
+        engine_dir,
+        marker,
+        result,
+        force_upgrade,
+        &InstallInvocationOptions::default(),
+    )
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn installer_command_with_options(
+    script: &Path,
+    engine_dir: &Path,
+    marker: &Path,
+    result: &Path,
+    force_upgrade: bool,
+    options: &InstallInvocationOptions,
+) -> Command {
+    let mut command = background_command(windows_powershell_executable());
     command.args([
         "-NoProfile",
         "-NonInteractive",
@@ -789,30 +1589,19 @@ pub(crate) fn installer_command(
         .arg(result.with_file_name(INSTALL_PROGRESS))
         .arg("-LogFile")
         .arg(result.with_file_name(INSTALL_LOG));
-    if force_upgrade {
-        command.arg("-Upgrade");
-    }
+    command.args(windows_extra_installer_args(force_upgrade, options));
     command
 }
 
 /// 建構 Linux Bash 安裝命令。
-///
-/// # 參數
-/// - `script`: `install.sh` 腳本檔案路徑。
-/// - `engine_dir`: 目標工具安裝目錄。
-/// - `marker`: PID 標記檔案路徑。
-/// - `result`: 結果輸出 JSON 檔案路徑。
-/// - `force_upgrade`: 是否附帶 `--upgrade` 旗標。
-///
-/// # 回傳值
-/// 回傳設定完成參數的 Linux `Command`。
 #[cfg(target_os = "linux")]
-pub(crate) fn installer_command(
+pub(crate) fn installer_command_with_options(
     script: &Path,
     engine_dir: &Path,
     marker: &Path,
     result: &Path,
     force_upgrade: bool,
+    options: &InstallInvocationOptions,
 ) -> Command {
     let mut command = Command::new("/bin/bash");
     command
@@ -823,9 +1612,7 @@ pub(crate) fn installer_command(
         .arg(marker)
         .arg("--result-file")
         .arg(result);
-    if force_upgrade {
-        command.arg("--upgrade");
-    }
+    command.args(unix_extra_installer_args(force_upgrade, options));
     command
 }
 
@@ -976,7 +1763,7 @@ pub(crate) fn wait_for_install(
 /// # 回傳值
 /// 檔案不存在回傳 `Ok(None)`；有效進度回傳 `Ok(Some(InstallProgress))`；格式或讀取異常回傳錯誤字串。
 fn read_install_progress(path: &Path) -> Result<Option<InstallProgress>, String> {
-    match fs::read(path) {
+    match read_bounded_regular_file(path, MAX_INSTALL_METADATA_BYTES) {
         Ok(contents) => {
             let progress: InstallProgress = serde_json::from_slice(&contents)
                 .map_err(|error| format!("安裝階段記錄格式無效：{error}"))?;
@@ -995,14 +1782,19 @@ fn read_install_progress(path: &Path) -> Result<Option<InstallProgress>, String>
 /// # 回傳值
 /// 檔案不存在回傳 `Ok(None)`；有效非零 PID 回傳 `Ok(Some(u32))`；內容無效或讀取失敗回傳錯誤字串。
 fn read_install_marker(path: &Path) -> Result<Option<u32>, String> {
-    match fs::read_to_string(path) {
-        Ok(value) => value
-            .trim()
-            .parse::<u32>()
-            .ok()
-            .filter(|pid| *pid != 0)
-            .map(Some)
-            .ok_or_else(|| "安裝程序 PID 記錄格式無效；為避免啟動重複安裝，請檢查記錄。".into()),
+    match read_bounded_regular_file(path, MAX_INSTALL_METADATA_BYTES) {
+        Ok(bytes) => {
+            let value = String::from_utf8(bytes).map_err(|_| {
+                "安裝程序 PID 記錄格式無效；為避免啟動重複安裝，請檢查記錄。".to_owned()
+            })?;
+            value
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|pid| *pid != 0)
+                .map(Some)
+                .ok_or_else(|| "安裝程序 PID 記錄格式無效；為避免啟動重複安裝，請檢查記錄。".into())
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(format!("無法讀取安裝程序 PID 記錄：{error}")),
     }
@@ -1016,7 +1808,7 @@ fn read_install_marker(path: &Path) -> Result<Option<u32>, String> {
 /// # 回傳值
 /// 檔案不存在回傳 `Ok(None)`；有效結果回傳 `Ok(Some(InstallResult))`；格式或 PID 無效回傳錯誤字串。
 fn read_install_result(path: &Path) -> Result<Option<InstallResult>, String> {
-    match fs::read(path) {
+    match read_bounded_regular_file(path, MAX_INSTALL_METADATA_BYTES) {
         Ok(contents) => {
             let result: InstallResult = serde_json::from_slice(&contents)
                 .map_err(|error| format!("安裝程序完成記錄格式無效：{error}"))?;
@@ -1038,7 +1830,7 @@ fn read_install_result(path: &Path) -> Result<Option<InstallResult>, String> {
 /// # 回傳值
 /// 檔案不存在回傳 `Ok(None)`；讀取或反序列化成功回傳 `Ok(Some(LaunchRecord))`；失敗回傳錯誤字串。
 fn read_launch_record(path: &Path) -> Result<Option<LaunchRecord>, String> {
-    match fs::read(path) {
+    match read_bounded_regular_file(path, MAX_INSTALL_METADATA_BYTES) {
         Ok(contents) => serde_json::from_slice(&contents)
             .map(Some)
             .map_err(|error| format!("安裝程序啟動記錄格式無效：{error}")),
@@ -1062,7 +1854,7 @@ enum ProcessPresence {
 ///
 /// # 參數
 /// - `pid`: 欲探測的作業系統行程識別碼。
-/// - `_engine_dir`: 投影工具目錄（Windows 上用於組裝 `tasklist.exe` 查詢環境 PATH）。
+/// - `_engine_dir`: 保留參數（Windows 改用系統 `System32` 絕對路徑呼叫 `tasklist.exe`）。
 ///
 /// # 回傳值
 /// 回傳 `ProcessPresence::Alive`、`Dead` 或 `Unknown`。
@@ -1094,7 +1886,7 @@ fn process_presence(pid: u32, _engine_dir: &Path) -> ProcessPresence {
     #[cfg(target_os = "windows")]
     {
         let output = run_with_timeout_in_path(
-            Path::new("tasklist.exe"),
+            &windows_tasklist_executable(),
             &[
                 "/FI".into(),
                 format!("PID eq {pid}"),
@@ -1103,7 +1895,7 @@ fn process_presence(pid: u32, _engine_dir: &Path) -> ProcessPresence {
                 "/NH".into(),
             ],
             PROCESS_PROBE_TIMEOUT,
-            Some(installer_path(_engine_dir).as_os_str()),
+            None,
         );
         match output {
             Ok(output) if output.status.success() && tasklist_contains_pid(&output, pid) => {
@@ -1113,6 +1905,45 @@ fn process_presence(pid: u32, _engine_dir: &Path) -> ProcessPresence {
             Ok(_) | Err(_) => ProcessPresence::Unknown,
         }
     }
+}
+
+/// 解析 Windows `SystemRoot` 環境變數以取得受保護的 `System32` 目錄路徑，忽略相對或 UNC 路徑。
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn windows_system32_dir_from(system_root: Option<&OsStr>) -> PathBuf {
+    let valid_root = system_root
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.to_str())
+        .filter(|text| {
+            !text.starts_with(r"\\")
+                && !text.starts_with("//")
+                && (text.starts_with('/')
+                    || (text.len() >= 3
+                        && text.as_bytes()[0].is_ascii_alphabetic()
+                        && text.as_bytes()[1] == b':'
+                        && matches!(text.as_bytes()[2], b'\\' | b'/')))
+        })
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    valid_root.join("System32")
+}
+
+/// 依 `SystemRoot` 組裝內建 Windows PowerShell 5.1 的絕對執行路徑，防止 PATH 劫持。
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn windows_powershell_executable_from(system_root: Option<&OsStr>) -> PathBuf {
+    windows_system32_dir_from(system_root)
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe")
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn windows_powershell_executable() -> PathBuf {
+    windows_powershell_executable_from(std::env::var_os("SystemRoot").as_deref())
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn windows_tasklist_executable() -> PathBuf {
+    windows_system32_dir_from(std::env::var_os("SystemRoot").as_deref()).join("tasklist.exe")
 }
 
 /// 解析 Windows `tasklist.exe /FO CSV /NH` 輸出，判斷目標 PID 是否仍在執行清單中。
@@ -1144,7 +1975,7 @@ fn launch_is_recent(record: &LaunchRecord) -> bool {
     unix_time_seconds().saturating_sub(record.started_at) < LAUNCH_GRACE.as_secs()
 }
 
-/// 以暫存檔寫入並更名的方式原子性將資料序列化為 JSON 檔案。
+/// 以唯一暫存檔與原子更名方式將資料序列化為 JSON 檔案，並拒絕覆寫符號連結。
 ///
 /// # 參數
 /// - `path`: 目標 JSON 檔案路徑。
@@ -1154,12 +1985,7 @@ fn launch_is_recent(record: &LaunchRecord) -> bool {
 /// 成功回傳 `Ok(())`；序列化、寫入或更名失敗時回傳錯誤字串。
 pub(crate) fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<(), String> {
     let bytes = serde_json::to_vec(value).map_err(|error| error.to_string())?;
-    let temporary_path = path.with_extension(format!("tmp-{}", std::process::id()));
-    fs::write(&temporary_path, bytes).map_err(|error| error.to_string())?;
-    fs::rename(&temporary_path, path).map_err(|error| {
-        let _ = fs::remove_file(&temporary_path);
-        error.to_string()
-    })
+    write_file_atomic_secure(path, &bytes, 0o600).map_err(|error| error.to_string())
 }
 
 /// 若目標檔案存在則盡力移除，忽略不存在或其他刪除錯誤（用於清理非關鍵標記檔）。
@@ -1190,15 +2016,24 @@ pub(crate) fn clear_app_tools(
     clear_gstreamer_registry(gstreamer_registry_path)
 }
 
-/// 移除指定的 GStreamer registry 快取檔案（若路徑非空）。
+/// 移除指定的 GStreamer registry 快取檔案（若路徑非空），並拒絕符號連結路徑與父目錄。
 ///
 /// # 參數
 /// - `path`: GStreamer registry 快取檔案路徑。
 ///
 /// # 回傳值
-/// 成功移除或檔案本不存在回傳 `Ok(())`；刪除失敗回傳錯誤字串。
+/// 成功移除或檔案本不存在回傳 `Ok(())`；遇到符號連結或刪除失敗回傳錯誤字串。
 pub(crate) fn clear_gstreamer_registry(path: &Path) -> Result<(), String> {
     if !path.as_os_str().is_empty() {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            reject_symlink_path(parent)
+                .map_err(|_| "GStreamer 快取目錄不是安全的資料夾，未移除任何檔案。".to_owned())?;
+        }
+        reject_symlink_path(path)
+            .map_err(|_| "GStreamer 快取檔案不可為符號連結，未移除任何檔案。".to_owned())?;
         remove_file_if_exists(path)?;
     }
     Ok(())
@@ -1212,12 +2047,8 @@ pub(crate) fn clear_gstreamer_registry(path: &Path) -> Result<(), String> {
 /// # 回傳值
 /// 清理成功回傳 `Ok(())`；目錄無效或遭遇系統權限錯誤回傳錯誤字串。
 fn clear_engine_directory(path: &Path) -> Result<(), String> {
-    fs::create_dir_all(path).map_err(|error| format!("無法建立工具目錄：{error}"))?;
-    let metadata =
-        fs::symlink_metadata(path).map_err(|error| format!("無法檢查工具目錄：{error}"))?;
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return Err("工具目錄不是安全的資料夾，未移除任何工具。".into());
-    }
+    ensure_safe_directory(path, false)
+        .map_err(|_| "工具目錄不是安全的資料夾，未移除任何工具。".to_owned())?;
 
     for entry in fs::read_dir(path).map_err(|error| format!("無法讀取工具目錄：{error}"))?
     {
@@ -1257,13 +2088,74 @@ fn remove_file_if_exists(path: &Path) -> Result<(), String> {
     }
 }
 
-/// 將單行診斷或腳本輸出附加寫入安裝日誌檔尾端。
+/// 安全讀取安裝日誌檔案（最多僅回傳尾端 `max_bytes`），拒絕符號連結或非一般檔案。
+fn read_log_tail(path: &Path, max_bytes: usize) -> Result<String, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err("尚無安裝記錄。".to_owned());
+        }
+        Err(error) => return Err(format!("無法讀取安裝記錄：{error}")),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("安裝記錄檔案路徑不安全。".to_owned());
+    }
+    if metadata.len() <= max_bytes as u64 {
+        let bytes = fs::read(path).map_err(|error| format!("無法讀取安裝記錄：{error}"))?;
+        return Ok(String::from_utf8_lossy(&bytes).into_owned());
+    }
+    let mut file = fs::File::open(path).map_err(|error| format!("無法讀取安裝記錄：{error}"))?;
+    file.seek(SeekFrom::End(-(max_bytes as i64)))
+        .map_err(|error| format!("無法讀取安裝記錄：{error}"))?;
+    let mut bytes = Vec::with_capacity(max_bytes);
+    file.take(max_bytes as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("無法讀取安裝記錄：{error}"))?;
+    let text = String::from_utf8_lossy(&bytes);
+    let aligned = match text.find('\n') {
+        Some(index) => &text[index + 1..],
+        None => text.as_ref(),
+    };
+    Ok(format!(
+        "[已省略較早記錄，僅顯示最後 1 MiB 內容]\n{aligned}"
+    ))
+}
+
+/// 在啟動新一輪安裝前，若既有 `install.log` 超過大小上限，原子保留最後 1 MiB 內容以防止磁碟無限制膨脹。
+fn rotate_install_log_if_oversized(path: &Path) -> Result<(), String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("無法檢查安裝記錄：{error}")),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("安裝記錄檔案路徑不安全。".to_owned());
+    }
+    if metadata.len() <= MAX_INSTALL_LOG_FILE_BYTES {
+        return Ok(());
+    }
+    let tail = read_log_tail(path, MAX_INSTALL_LOG_READ_BYTES)?;
+    write_file_atomic_secure(path, tail.as_bytes(), 0o600)
+        .map_err(|error| format!("無法修剪過大的安裝記錄：{error}"))
+}
+
+/// 將單行診斷或腳本輸出附加寫入安裝日誌檔尾端，並拒絕追蹤符號連結。
 ///
 /// # 參數
 /// - `path`: 安裝日誌檔案（`install.log`）路徑。
 /// - `message`: 欲附加的文字內容。
 fn append_log(path: &Path, message: &str) {
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+    if reject_symlink_path(path).is_err() {
+        return;
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    if let Ok(mut file) = options.open(path) {
         let _ = writeln!(file, "{message}");
     }
 }
@@ -1310,6 +2202,37 @@ fn unix_time_seconds() -> u64 {
         .as_secs()
 }
 
+/// 驗證傳遞給 macOS 終端機安裝器的路徑不含控制字元（NUL、LF、CR）。
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn validate_terminal_path(path: &Path) -> Result<(), String> {
+    let text = path.to_string_lossy();
+    if text.chars().any(|ch| matches!(ch, '\0' | '\n' | '\r')) {
+        return Err("終端機安裝路徑包含不安全的控制字元。".into());
+    }
+    Ok(())
+}
+
+/// 建構使用 `on run argv` 安全傳遞參數給 Terminal.app 的 `osascript` 命令列參數。
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn macos_terminal_osascript_args(command_line: &str) -> Result<Vec<String>, String> {
+    if command_line
+        .chars()
+        .any(|ch| matches!(ch, '\0' | '\n' | '\r'))
+    {
+        return Err("終端機安裝命令包含不安全的控制字元。".into());
+    }
+    Ok(vec![
+        "-e".into(),
+        "on run argv".into(),
+        "-e".into(),
+        "tell application \"Terminal\" to do script (item 1 of argv)".into(),
+        "-e".into(),
+        "end run".into(),
+        "--".into(),
+        command_line.to_owned(),
+    ])
+}
+
 /// 在 macOS 下為 shell 命令參數加上單引號跳脫保護，防止空白或特殊字元被 Shell 誤解析。
 ///
 /// # 參數
@@ -1317,7 +2240,7 @@ fn unix_time_seconds() -> u64 {
 ///
 /// # 回傳值
 /// 回傳經過單引號跳脫包覆的安全字串。
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }

@@ -1,12 +1,17 @@
 import { spawnSync } from "node:child_process";
-import { resolve } from "node:path";
+import { resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 if (process.env.NEO_AIRPLAY_SKIP_SETUP !== "1") {
   const windows = process.platform === "win32";
   const script = fileURLToPath(new URL(`./install.${windows ? "ps1" : "sh"}`, import.meta.url));
   const engineDirectory = resolve(fileURLToPath(new URL("../engine/", import.meta.url)));
-  const result = spawnSync(windows ? "powershell.exe" : "/bin/bash", windows
+  const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
+  const safeRoot = /^[a-zA-Z]:[\\/]/.test(systemRoot) ? systemRoot : "C:\\Windows";
+  const executable = windows
+    ? win32.join(safeRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    : "/bin/bash";
+  const result = spawnSync(executable, windows
     ? ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-EngineDirectory", engineDirectory]
     : [script, "--engine-dir", engineDirectory], {
     stdio: "inherit",

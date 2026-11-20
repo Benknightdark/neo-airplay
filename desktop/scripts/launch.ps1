@@ -13,7 +13,9 @@ if ($Mode -eq 'bundle' -and $Arguments.Count -gt 0) {
     exit 2
 }
 $setupScript = Join-Path $PSScriptRoot 'setup.ps1'
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $setupScript
+$systemRoot = if ($env:SystemRoot -and ($env:SystemRoot -match '^[a-zA-Z]:[\\/]')) { $env:SystemRoot } else { 'C:\Windows' }
+$powershellExecutable = Join-Path $systemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+& $powershellExecutable -NoProfile -ExecutionPolicy Bypass -File $setupScript
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $desktopDirectory = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path

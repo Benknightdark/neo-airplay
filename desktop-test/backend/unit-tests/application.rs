@@ -1,14 +1,18 @@
 //! 後端應用層使用案例（設定儲存回滾、引擎存取守衛、維護作業前置停止）的單元測試與假物件定義。
 
 use super::commands::{
-    manage_dependencies, refresh_android_devices, start_airplay, start_android_mirror,
-    SaveSettingsUseCase,
+    install_tool_version, manage_dependencies, refresh_android_devices, start_airplay,
+    start_android_mirror, SaveSettingsUseCase,
 };
 use super::contracts::DashboardSnapshot;
-use super::ports::{AutostartGateway, DependencyRuntime, EngineAccessGuard, ReceiverRuntime};
+use super::ports::{
+    AutostartGateway, DependencyRuntime, EngineAccessGuard, ReceiverRuntime, ToolCatalogFetcher,
+};
 use crate::domain::{
-    AndroidDevice, DependencyAction, DependencyOperation, DependencySnapshot, DomainError,
-    DomainResult, EngineSnapshot, EngineStatus, ErrorKind, ReceiverSettings,
+    build_tool_catalog_snapshot, AndroidDevice, CatalogContext, DependencyAction,
+    DependencyOperation, DependencySnapshot, DomainError, DomainResult, EngineSnapshot,
+    EngineStatus, ErrorKind, InstalledVersions, PlatformOs, ReceiverSettings, RemoteCatalogCache,
+    ToolCatalogSnapshot, ToolInstallRequest, ToolVersionPreferences,
 };
 use std::sync::Mutex;
 
@@ -216,6 +220,8 @@ impl EngineAccessGuard for FakeGuard {
 struct FakeDependencyRuntime {
     /// 記錄成功通過前置準備並執行的 `DependencyAction` 清單。
     managed_actions: Mutex<Vec<DependencyAction>>,
+    /// 記錄成功通過前置準備並執行的工具版本安裝請求清單。
+    installed_requests: Mutex<Vec<ToolInstallRequest>>,
 }
 
 impl FakeDependencyRuntime {
@@ -226,6 +232,7 @@ impl FakeDependencyRuntime {
     fn new() -> Self {
         Self {
             managed_actions: Mutex::new(Vec::new()),
+            installed_requests: Mutex::new(Vec::new()),
         }
     }
 }
@@ -283,6 +290,45 @@ impl DependencyRuntime for FakeDependencyRuntime {
             missing: Vec::new(),
             log_path: String::new(),
         })
+    }
+
+    fn tool_catalog(&self) -> DomainResult<ToolCatalogSnapshot> {
+        Ok(build_tool_catalog_snapshot(&CatalogContext {
+            os: PlatformOs::Macos,
+            arch: "aarch64",
+            package_manager: "homebrew",
+            management_enabled: true,
+            installed: &InstalledVersions::default(),
+            preferences: &ToolVersionPreferences::default(),
+            remote: &RemoteCatalogCache::default(),
+        }))
+    }
+
+    fn refresh_tool_catalog(
+        &self,
+        _fetcher: &dyn ToolCatalogFetcher,
+    ) -> DomainResult<ToolCatalogSnapshot> {
+        self.tool_catalog()
+    }
+
+    fn install_tool_version(
+        &self,
+        request: ToolInstallRequest,
+        prepare: &mut dyn FnMut() -> DomainResult<()>,
+    ) -> DomainResult<DependencySnapshot> {
+        prepare()?;
+        self.installed_requests.lock().unwrap().push(request);
+        Ok(DependencySnapshot {
+            status: "installing".into(),
+            operation: Some(DependencyOperation::InstallTool),
+            message: "執行中".into(),
+            missing: Vec::new(),
+            log_path: String::new(),
+        })
+    }
+
+    fn reset_tool_versions(&self) -> DomainResult<ToolCatalogSnapshot> {
+        self.tool_catalog()
     }
 }
 
@@ -361,6 +407,35 @@ fn manage_dependencies_stops_both_engines_and_blocks_if_faulted() {
     assert_eq!(err.kind, ErrorKind::ExternalProcess);
     assert!(err.message.contains("工具檔案未移除"));
     assert_eq!(deps.managed_actions.lock().unwrap().len(), 1);
+}
+
+/// 驗證指定工具版本安裝前同樣會先停止雙引擎，若停止異常則阻擋版本切換。
+#[test]
+fn install_tool_version_stops_both_engines_and_blocks_if_faulted() {
+    let runtime = FakeRuntime::new(ReceiverSettings::default());
+    let deps = FakeDependencyRuntime::new();
+    let request = ToolInstallRequest {
+        tool: crate::domain::ToolId::Scrcpy,
+        version: "4.1".into(),
+        sha256: None,
+        allow_unverified: false,
+    };
+
+    let snapshot = install_tool_version(&runtime, &deps, request.clone()).unwrap();
+    assert_eq!(snapshot.operation, Some(DependencyOperation::InstallTool));
+    assert_eq!(
+        *runtime.stopped_order.lock().unwrap(),
+        vec!["airplay", "android"]
+    );
+    assert_eq!(
+        *deps.installed_requests.lock().unwrap(),
+        vec![request.clone()]
+    );
+
+    *runtime.android_stop_snapshot.lock().unwrap() = EngineSnapshot::faulted("無法停止", None);
+    let err = install_tool_version(&runtime, &deps, request).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::ExternalProcess);
+    assert_eq!(deps.installed_requests.lock().unwrap().len(), 1);
 }
 
 /// 驗證當依賴背景作業進行中時 `EngineAccessGuard` 會攔截引擎啟動與裝置掃描請求，並檢查空序號驗證規則。

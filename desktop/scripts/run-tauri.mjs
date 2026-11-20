@@ -8,11 +8,17 @@ const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultDesktopDirectory = resolve(scriptDirectory, "..");
 const nodeVersion = readFileSync(join(defaultDesktopDirectory, ".node-version"), "utf8").trim();
 
-export function getSetupCommand(platform, scriptsDirectory) {
+export function getWindowsPowerShellPath(environment = process.env) {
+  const systemRoot = environment.SystemRoot || environment.SYSTEMROOT || "C:\\Windows";
+  const safeRoot = /^[a-zA-Z]:[\\/]/.test(systemRoot) ? systemRoot : "C:\\Windows";
+  return win32.join(safeRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+}
+
+export function getSetupCommand(platform, scriptsDirectory, environment = process.env) {
   const joinPath = platform === "win32" ? win32.join : posix.join;
   const setupScript = joinPath(scriptsDirectory, platform === "win32" ? "setup.ps1" : "setup.sh");
   return platform === "win32"
-    ? ["powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", setupScript]]
+    ? [getWindowsPowerShellPath(environment), ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", setupScript]]
     : ["/bin/bash", [setupScript]];
 }
 
@@ -70,7 +76,7 @@ export function runTauri(args, {
   const setupDisabled = childEnvironment.NEO_AIRPLAY_SKIP_SETUP === "1";
 
   if (!setupAlreadyCompleted && !setupDisabled) {
-    const [setupExecutable, setupArguments] = getSetupCommand(platform, scriptsDirectory);
+    const [setupExecutable, setupArguments] = getSetupCommand(platform, scriptsDirectory, childEnvironment);
     const setupResult = spawn(setupExecutable, setupArguments, {
       cwd: resolve(scriptsDirectory, ".."),
       env: childEnvironment,

@@ -10,15 +10,18 @@ pub mod ports;
 pub mod queries;
 
 pub use commands::{
-    install_dependencies, manage_dependencies, refresh_android_devices, start_airplay,
-    start_android_mirror, stop_airplay, stop_android_mirror, SaveSettingsUseCase,
+    install_dependencies, install_tool_version, manage_dependencies, refresh_android_devices,
+    reset_tool_versions, start_airplay, start_android_mirror, stop_airplay, stop_android_mirror,
+    SaveSettingsUseCase,
 };
 pub use contracts::DashboardSnapshot;
 pub use ports::{
     AutostartGateway, DependencyRuntime, EngineAccessGuard, LogRepository, ReceiverRuntime,
-    SettingsRepository,
+    SettingsRepository, ToolCatalogFetcher,
 };
-pub use queries::{get_dashboard, get_dependencies, read_install_log};
+pub use queries::{
+    fetch_tool_versions, get_dashboard, get_dependencies, get_tool_catalog, read_install_log,
+};
 
 #[cfg(test)]
 #[path = "../../../../desktop-test/backend/unit-tests/application.rs"]

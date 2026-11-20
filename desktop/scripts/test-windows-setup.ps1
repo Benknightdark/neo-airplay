@@ -24,7 +24,7 @@ $script:EngineDirectory = Join-Path $root 'engine'
 $script:EngineBin = Join-Path $script:EngineDirectory 'bin'
 $script:SetupUserProfile = Join-Path $root 'original user'
 $script:SetupLocalAppData = Join-Path $root 'original data'
-$script:SetupUserSid = 'original-sid'
+$script:SetupUserSid = 'S-1-5-21-1000-2000-3000-1001'
 $script:InstallStage = 'checking'
 $script:InstallMessage = 'Checking tools'
 $script:InstallFailure = $null
@@ -34,6 +34,7 @@ $Check = $false
 $Upgrade = $false
 $Development = $false
 $Elevated = $false
+$ElevatedPrerequisitesOnly = $false
 $Gui = $true
 $LogFile = Join-Path $root 'install.log'
 $ProgressFile = Join-Path $root 'install-progress.json'
@@ -276,8 +277,9 @@ try {
         } finally { $env:TEMP = $previousTemp }
     }
 
-    Invoke-Scenario 'Elevation keeps original-user paths and background log destinations' {
+    Invoke-Scenario 'Elevation runs only prerequisites and withholds user paths and engine directory' {
         $script:Upgrade = $true
+        $script:Development = $true
         function Test-Administrator { return $false }
         function Start-Process {
             param($FilePath, $ArgumentList, $Verb, $WindowStyle, [switch]$Wait, [switch]$PassThru)
@@ -288,13 +290,19 @@ try {
         }
         $code = Invoke-ElevatedInstaller
         Assert-True ($code -eq 5) 'Elevated exit code was lost'
+        Assert-True ($script:launchOptions.FilePath.EndsWith('System32\WindowsPowerShell\v1.0\powershell.exe')) 'Elevation must use full System32 powershell.exe path'
         Assert-True ($script:launchOptions.Verb -eq 'RunAs' -and $script:launchOptions.WindowStyle -eq 'Hidden') 'Elevation must keep UAC and hide its console'
         Assert-True ($script:launchOptions.ArgumentList.Contains('"-NonInteractive"')) 'Hidden elevation must not wait for console input'
-        Assert-True ($script:launchOptions.ArgumentList.Contains((ConvertTo-ProcessArgument '-Upgrade'))) 'Elevation lost the explicit upgrade mode'
-        foreach ($value in @($LogFile, $ProgressFile, $ResultFile, $MarkerFile, $script:SetupUserProfile, $script:SetupLocalAppData, $script:SetupUserSid)) {
-            Assert-True ($script:launchOptions.ArgumentList.Contains((ConvertTo-ProcessArgument $value))) 'Elevation lost an original-user path or record destination'
+        Assert-True ($script:launchOptions.ArgumentList.Contains('"-ElevatedPrerequisitesOnly"')) 'Elevation must be scoped to prerequisites only'
+        Assert-True (-not $script:launchOptions.ArgumentList.Contains('"-Upgrade"')) 'Elevation must not run upgrade steps'
+        foreach ($requiredValue in @($LogFile, $ProgressFile, $script:SetupUserSid)) {
+            Assert-True ($script:launchOptions.ArgumentList.Contains((ConvertTo-ProcessArgument $requiredValue))) 'Elevation lost a required log/progress/SID argument'
+        }
+        foreach ($withheldValue in @($ResultFile, $MarkerFile, $script:EngineDirectory, $script:SetupUserProfile, $script:SetupLocalAppData)) {
+            Assert-True (-not $script:launchOptions.ArgumentList.Contains((ConvertTo-ProcessArgument $withheldValue))) "Elevation leaked unprivileged path/marker: $withheldValue"
         }
         $script:Upgrade = $false
+        $script:Development = $false
     }
 
     Invoke-Scenario 'Cancellation produces a readable completion result' {
@@ -314,6 +322,128 @@ try {
         Assert-True ([IO.File]::ReadAllText($LogFile).Contains('stdout:')) 'Elevation must retain earlier log output'
     }
 
+    Invoke-Scenario 'Sync-MsysTrust preserves GPG verification and restores legacy SigLevel = Never' {
+        $msysFakeRoot = Join-Path $root 'msys-gpg-test'
+        $etcDir = Join-Path $msysFakeRoot 'etc'
+        $anchorsDir = Join-Path $etcDir 'pki\ca-trust\source\anchors'
+        New-Item -ItemType Directory -Path $anchorsDir -Force | Out-Null
+        $pacmanConf = Join-Path $etcDir 'pacman.conf'
+        [IO.File]::WriteAllText($pacmanConf, "[options]`nArchitecture = auto`nSigLevel = Never`n", [Text.UTF8Encoding]::new($false))
+        $previousMsysRoot = $script:MsysRoot
+        $script:MsysRoot = $msysFakeRoot
+        $script:msysCommands = [Collections.Generic.List[string]]::new()
+        function Invoke-Msys([string]$Command, [switch]$AllowFailure) {
+            $script:msysCommands.Add($Command)
+            if ($AllowFailure) { return @{ ExitCode = 0; Output = '' } }
+        }
+        try {
+            Sync-MsysTrust
+            $updated = [IO.File]::ReadAllText($pacmanConf)
+            Assert-True (-not ($updated -match '(?m)^SigLevel\s*=\s*Never\b')) 'SigLevel = Never must be restored'
+            Assert-True ($updated -match '(?m)^SigLevel\s*=\s*Required DatabaseOptional\b') 'SigLevel must be restored to Required DatabaseOptional'
+            Assert-True ($script:msysCommands.Contains('pacman-key --init && pacman-key --populate msys2')) 'pacman-key initialization was skipped'
+        } finally {
+            $script:MsysRoot = $previousMsysRoot
+        }
+    }
+
+    Invoke-Scenario 'SID validation and MSYS2 root lookup reject unsafe values and UNC paths' {
+        Assert-True (Test-ValidUserSid 'S-1-5-21-100-200-300-1001') 'Valid SID was rejected'
+        Assert-True (-not (Test-ValidUserSid 'original-sid')) 'Placeholder SID was accepted'
+        Assert-True (-not (Test-ValidUserSid 'S-1-5\..\evil')) 'Malformed SID was accepted'
+        $previousOverride = $env:NEO_AIRPLAY_MSYS2_ROOT
+        $env:NEO_AIRPLAY_MSYS2_ROOT = '\\attacker\share\msys64'
+        $rejected = $false
+        try {
+            $null = Get-MsysRoot
+        } catch {
+            $rejected = $_.Exception.Message.Contains('non-local')
+        } finally {
+            if ($null -eq $previousOverride) { Remove-Item Env:\NEO_AIRPLAY_MSYS2_ROOT -ErrorAction SilentlyContinue }
+            else { $env:NEO_AIRPLAY_MSYS2_ROOT = $previousOverride }
+        }
+        Assert-True $rejected 'UNC NEO_AIRPLAY_MSYS2_ROOT must be rejected'
+    }
+
+    Invoke-Scenario 'Invoke-VerifiedDownload rejects non-HTTPS URLs, deletes mismatched files, and accepts valid checksums' {
+        $downloadDir = Join-Path $root 'downloads'
+        New-Item -ItemType Directory -Path $downloadDir -Force | Out-Null
+        $destFile = Join-Path $downloadDir 'artifact.bin'
+        $validHash = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
+        $httpRejected = $false
+        try {
+            Invoke-VerifiedDownload 'http://example.com/artifact.bin' $destFile $validHash 'Insecure artifact'
+        } catch {
+            $httpRejected = $_.Exception.Message.Contains('non-HTTPS')
+        }
+        Assert-True $httpRejected 'HTTP URL must be rejected before network access'
+
+        $script:verifiedDownloadPayload = [Text.Encoding]::UTF8.GetBytes('verified payload')
+        $script:verifiedDownloadCalls = 0
+        $expectedSha = ([BitConverter]::ToString(([Security.Cryptography.SHA256]::Create()).ComputeHash($script:verifiedDownloadPayload)) -replace '-', '').ToLowerInvariant()
+        function Invoke-HttpsDownloadStream([string]$Uri, [string]$Destination, [string]$Label) {
+            $script:verifiedDownloadCalls++
+            [IO.File]::WriteAllBytes($Destination, $script:verifiedDownloadPayload)
+        }
+        $badHashRejected = $false
+        $checksumError = ''
+        try {
+            Invoke-VerifiedDownload 'https://example.com/artifact.bin' $destFile ('0' * 64) 'Mismatched artifact'
+        } catch {
+            $checksumError = $_.Exception.Message
+            $badHashRejected = $checksumError.Contains('SHA-256 verification failed')
+        }
+        Assert-True $badHashRejected "Checksum mismatch must throw SHA-256 error; actual error: $checksumError"
+        Assert-True ($script:verifiedDownloadCalls -eq 1) 'Download mock must be called once for the mismatched checksum'
+        Assert-True (-not (Test-Path -LiteralPath $destFile)) 'Failed download must not leave destination file'
+        Assert-True (@(Get-ChildItem -LiteralPath $downloadDir -Filter '*.download.*').Count -eq 0) 'Failed download must clean temporary file'
+
+        Invoke-VerifiedDownload 'https://example.com/artifact.bin' $destFile $expectedSha 'Valid artifact'
+        Assert-True ($script:verifiedDownloadCalls -eq 2) 'Download mock must be called once for the valid checksum'
+        Assert-True ([IO.File]::ReadAllText($destFile) -eq 'verified payload') 'Valid download did not write destination'
+    }
+
+    Invoke-Scenario 'Expand-ZipArchiveSafely blocks Zip Slip traversal and extracts valid entries' {
+        Add-Type -AssemblyName System.IO.Compression
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $zipDir = Join-Path $root 'zip-test'
+        $extractDir = Join-Path $zipDir 'extract'
+        New-Item -ItemType Directory -Path $zipDir -Force | Out-Null
+
+        $evilZip = Join-Path $zipDir 'evil.zip'
+        $zipStream = [IO.File]::Open($evilZip, [IO.FileMode]::Create)
+        $archive = [IO.Compression.ZipArchive]::new($zipStream, [IO.Compression.ZipArchiveMode]::Create)
+        $entry = $archive.CreateEntry('../../escaped.txt')
+        $writer = [IO.StreamWriter]::new($entry.Open())
+        $writer.Write('pwned')
+        $writer.Dispose()
+        $archive.Dispose()
+        $zipStream.Dispose()
+
+        $zipSlipBlocked = $false
+        try {
+            Expand-ZipArchiveSafely $evilZip $extractDir
+        } catch {
+            $zipSlipBlocked = $_.Exception.Message.Contains('escapes destination directory')
+        }
+        Assert-True $zipSlipBlocked 'Zip Slip traversal entry was not blocked'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $root 'escaped.txt'))) 'Zip Slip wrote outside destination'
+
+        $goodZip = Join-Path $zipDir 'good.zip'
+        $zipStream = [IO.File]::Open($goodZip, [IO.FileMode]::Create)
+        $archive = [IO.Compression.ZipArchive]::new($zipStream, [IO.Compression.ZipArchiveMode]::Create)
+        $entry = $archive.CreateEntry('bundle/tool.txt')
+        $writer = [IO.StreamWriter]::new($entry.Open())
+        $writer.Write('safe tool')
+        $writer.Dispose()
+        $archive.Dispose()
+        $zipStream.Dispose()
+
+        $goodExtract = Join-Path $zipDir 'good-extract'
+        Expand-ZipArchiveSafely $goodZip $goodExtract
+        Assert-True ([IO.File]::ReadAllText((Join-Path $goodExtract 'bundle/tool.txt')) -eq 'safe tool') 'Valid zip entry failed extraction'
+    }
+
     Invoke-Scenario 'Progress replacement remains readable and check mode is read-only' {
         Set-InstallStage 'packages' 'Installing tools'
         Set-InstallStage 'uxplay-build' 'Building tools'
@@ -323,6 +453,26 @@ try {
         $Check = $true
         Set-InstallStage 'checking' 'Read-only probe'
         Assert-True ([IO.File]::ReadAllText($ProgressFile) -ceq $before) 'Check mode changed progress records'
+    }
+
+    Invoke-Scenario 'Version/hash validators and SHA256SUMS manifest parser handle valid and malicious inputs' {
+        Assert-True ((Test-ValidScrcpyVersion 'v5.0.1') -eq '5.0.1') 'Valid scrcpy version failed'
+        $badScrcpy = $false
+        try { $null = Test-ValidScrcpyVersion '5.0.1; calc.exe' } catch { $badScrcpy = $true }
+        Assert-True $badScrcpy 'Malicious scrcpy version was not rejected'
+
+        $uxVer = Resolve-ValidatedUxPlayRef 'v1.73.6'
+        Assert-True ($uxVer.Version -eq '1.73.6' -and $uxVer.Ref -eq 'v1.73.6') 'Valid UxPlay version failed'
+        $badUx = $false
+        try { $null = Resolve-ValidatedUxPlayRef '../../etc/passwd' } catch { $badUx = $true }
+        Assert-True $badUx 'Malicious UxPlay ref was not rejected'
+
+        Assert-True (Test-ValidSha256 ('a' * 64)) 'Valid SHA256 rejected'
+        Assert-True (-not (Test-ValidSha256 'short')) 'Invalid SHA256 accepted'
+
+        $manifest = "16c3fc2068df64946f670e3504b4752073ebae47a416a45b46e79a5ab19c689b *./scrcpy-winarm64-v5.0.1.zip`nb12a2c4ee8be317422451fc7dcf8ee20a71b5ea7ef9ad73ddd825a25316227a5  scrcpy-win64-v5.0.1.zip"
+        Assert-True ((Find-ScrcpyChecksumInManifest $manifest 'scrcpy-win64-v5.0.1.zip') -eq 'b12a2c4ee8be317422451fc7dcf8ee20a71b5ea7ef9ad73ddd825a25316227a5') 'Failed to parse win64 hash'
+        Assert-True ((Find-ScrcpyChecksumInManifest $manifest 'scrcpy-winarm64-v5.0.1.zip') -eq '16c3fc2068df64946f670e3504b4752073ebae47a416a45b46e79a5ab19c689b') 'Failed to parse winarm64 hash'
     }
 
     Write-Host "$script:passed installer scenarios passed."

@@ -78,6 +78,7 @@ function createScenario(options = {}) {
   const gstInspectMarker = join(root, "gst-inspect-calls");
   const gstInspectEnvironmentMarker = join(root, "gst-inspect-environment");
   const gstTimeoutMarker = join(root, "gtimeout-calls");
+  const curlArgsMarker = join(root, "curl-args");
   mkdirSync(home);
   mkdirSync(fakeBin);
   mkdirSync(utilityBin);
@@ -160,8 +161,8 @@ exec "$@"
     node: '#!/bin/sh\nprintf "%s\\n" "$FAKE_NODE_VERSION"\n',
     sudo: '#!/bin/sh\nexec "$@"\n',
     "apt-get": `#!/bin/sh\nprintf '%s\\n' "$*" >> "$PACKAGE_MANAGER_MARKER"\nexit "\${FAKE_PACKAGE_MANAGER_STATUS:-97}"\n`,
-    dnf: `#!/bin/sh\nprintf '%s\\n' "$*" >> "$PACKAGE_MANAGER_MARKER"\nexit "\${FAKE_PACKAGE_MANAGER_STATUS:-97}"\n`,
-    curl: '#!/bin/sh\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "--output" ]; then shift; : > "$1"; fi\n  shift\ndone\nprintf download >> "$SCRCPY_DOWNLOAD_MARKER"\n',
+    dnf: `#!/bin/sh\nprintf '%s\\n' "$*" >> "$PACKAGE_MANAGER_MARKER"\nif [ "\${1:-}" = "repoquery" ] && [ "\${FAKE_DNF_MISSING_SCRCPY:-0}" = "1" ]; then exit 1; fi\nexit "\${FAKE_PACKAGE_MANAGER_STATUS:-97}"\n`,
+    curl: '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CURL_ARGS_MARKER"\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "--output" ]; then shift; : > "$1"; fi\n  shift\ndone\nprintf download >> "$SCRCPY_DOWNLOAD_MARKER"\n',
     sha256sum: '#!/bin/sh\ncase "$1" in *uxplay.tar.gz*) printf "168de53ed688f87c4022d79357ce91f9608ad5c53236bff95134d19b88efeb3f  %s\\n" "$1" ;; *) printf "%s  %s\\n" "$FAKE_SCRCPY_SHA256" "$1" ;; esac\n',
     tar: '#!/bin/sh\n[ "${1:-}" = "-xzf" ] || exit 1\nshift\nshift\n[ "${1:-}" = "-C" ] || exit 1\ndestination="$2"\nbundle="$destination/scrcpy-linux-x86_64-v5.0.1"\nmkdir -p "$bundle"\nprintf "#!/bin/sh\\nprintf \\\"scrcpy 5.0.1\\\\n\\\"\\n" > "$bundle/scrcpy"\nprintf "fake scrcpy server\\n" > "$bundle/scrcpy-server"\nprintf "#!/bin/sh\\nprintf \\\"Android Debug Bridge version 1.0.41\\\\n\\\"\\n" > "$bundle/adb"\nchmod 0755 "$bundle/scrcpy" "$bundle/adb"\n',
     brew: `#!/bin/sh\nprintf '%s\\n' "$*" >> "$BREW_MARKER"\nexit 97\n`,
@@ -198,7 +199,7 @@ exec "$@"
     GSTREAMER_PLUGINS: gstreamerPlugins,
     GSTREAMER_SCANNER_DIRECTORY: gstreamerScannerDirectory,
     FAKE_UNAME: options.uname ?? "Linux",
-    FAKE_ARCH: "x86_64",
+    FAKE_ARCH: options.arch ?? "x86_64",
     FAKE_UXPLAY_VERSION: options.uxplayVersion ?? "1.73.7",
     FAKE_BUN_VERSION: options.bunVersion ?? "1.4.2",
     FAKE_NODE_VERSION: options.nodeVersion ?? `v${pinnedNodeVersion}`,
@@ -210,14 +211,16 @@ exec "$@"
     AVAHI_ACTIVE: options.avahiActive === false ? "0" : "1",
     CLT_AVAILABLE: options.cltAvailable === false ? "0" : "1",
     FAKE_PACKAGE_MANAGER_STATUS: String(options.packageManagerStatus ?? 97),
+    FAKE_DNF_MISSING_SCRCPY: options.dnfMissingScrcpy ? "1" : "0",
     PACKAGE_MANAGER_MARKER: packageManagerMarker,
     BREW_MARKER: brewMarker,
     CLT_INSTALL_MARKER: cltInstallMarker,
     SCRCPY_DOWNLOAD_MARKER: scrcpyDownloadMarker,
+    CURL_ARGS_MARKER: curlArgsMarker,
     GST_INSPECT_MARKER: gstInspectMarker,
     GST_INSPECT_ENV_MARKER: gstInspectEnvironmentMarker,
     GST_TIMEOUT_MARKER: gstTimeoutMarker,
-    FAKE_SCRCPY_SHA256: "9f969d30cc574816077edecda65719c1c70b0aee1df1ba5fa00779ac07b8fd6e",
+    FAKE_SCRCPY_SHA256: options.scrcpySha256 ?? "9f969d30cc574816077edecda65719c1c70b0aee1df1ba5fa00779ac07b8fd6e",
   };
 
   return {
@@ -227,14 +230,15 @@ exec "$@"
     brewMarker,
     cltInstallMarker,
     scrcpyDownloadMarker,
+    curlArgsMarker,
     gstInspectMarker,
     gstInspectEnvironmentMarker,
     gstTimeoutMarker,
     engineDirectory,
     engineSnapshot,
     temporaryFiles,
-    runInstaller(args, scriptPath = installerPath) {
-      return spawnSync("/bin/bash", [scriptPath, "--engine-dir", engineDirectory, ...args], {
+    runInstaller(args, scriptPath = installerPath, customEngineDirectory = engineDirectory) {
+      return spawnSync("/bin/bash", [scriptPath, "--engine-dir", customEngineDirectory, ...args], {
         cwd: root,
         env: environment,
         encoding: "utf8",
@@ -921,9 +925,9 @@ test("Tauri runner prepares development tools before invoking the CLI", () => {
   assert.match(calls[1].options.env.PATH, /\/test\/home\/\.cargo\/bin/);
 });
 
-test("Tauri runner uses the PowerShell setup entry on Windows", () => {
-  const [command, args] = getSetupCommand("win32", "C:\\project\\desktop\\scripts");
-  assert.equal(command, "powershell.exe");
+test("Tauri runner uses the full System32 PowerShell setup entry on Windows", () => {
+  const [command, args] = getSetupCommand("win32", "C:\\project\\desktop\\scripts", { SystemRoot: "D:\\Windows" });
+  assert.equal(command, "D:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
   assert.deepEqual(args, [
     "-NoProfile",
     "-ExecutionPolicy",
@@ -931,12 +935,107 @@ test("Tauri runner uses the PowerShell setup entry on Windows", () => {
     "-File",
     "C:\\project\\desktop\\scripts\\setup.ps1",
   ]);
+  const [uncFallback] = getSetupCommand("win32", "C:\\project\\desktop\\scripts", { SystemRoot: "\\\\attacker\\share" });
+  assert.equal(uncFallback, "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
   const environment = withDevelopmentPath({
     LOCALAPPDATA: "C:\\Users\\Tester\\AppData\\Local",
     PATH: "C:\\Windows\\System32",
     USERPROFILE: "C:\\Users\\Tester",
   }, "win32", "C:\\project\\desktop");
   assert.ok(environment.PATH.includes(`NeoAirPlay\\node-v${pinnedNodeVersion}`), environment.PATH);
+});
+
+test("install.sh rejects a symlinked engine directory before inspecting or staging files", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({ uname: "Linux" });
+  const symlinkEngine = join(scenario.root, "symlink-engine");
+  symlinkSync(scenario.engineDirectory, symlinkEngine);
+  try {
+    const result = scenario.runInstaller(["--check"], installerPath, symlinkEngine);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /must not be a symbolic link/);
+    assertReadOnly(scenario);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("install.sh downloads with HTTPS-only redirect flags and cleans temporary directories on checksum failure", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({
+    uname: "Linux",
+    missingScrcpyServer: true,
+    packageManagerStatus: 0,
+    scrcpySha256: "0".repeat(64),
+  });
+  try {
+    const result = scenario.runInstaller([]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /SHA-256 checksum verification failed/);
+    const curlArgs = readFileSync(scenario.curlArgsMarker, "utf8");
+    assert.match(curlArgs, /--proto =https/);
+    assert.match(curlArgs, /--proto-redir =https/);
+    assert.match(curlArgs, /--tlsv1\.2/);
+    assert.match(curlArgs, /--max-redirs 5/);
+    assert.deepEqual(readdirSync(scenario.temporaryFiles), [], "temporary work directories must be cleaned up after failed checksum verification");
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("install.sh refuses to overwrite a symlink planted inside engine/bin", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({
+    uname: "Linux",
+    missingScrcpyServer: true,
+    packageManagerStatus: 0,
+  });
+  const outsideTarget = join(scenario.root, "outside-secret.txt");
+  writeFileSync(outsideTarget, "untouched");
+  symlinkSync(outsideTarget, join(scenario.engineDirectory, "bin", "scrcpy-server"));
+  try {
+    const result = scenario.runInstaller([]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Refusing to overwrite symbolic link/);
+    assert.equal(readFileSync(outsideTarget, "utf8"), "untouched");
+    assert.deepEqual(readdirSync(scenario.temporaryFiles), []);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("install.sh refuses to enable third-party COPR repositories on non-x86_64 Fedora", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({
+    uname: "Linux",
+    arch: "aarch64",
+    missingCommands: ["apt-get", "scrcpy"],
+    missingScrcpyServer: true,
+    packageManagerStatus: 0,
+    dnfMissingScrcpy: true,
+  });
+  try {
+    const result = scenario.runInstaller([]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Official DNF repositories do not provide scrcpy/);
+    const dnfCalls = readFileSync(scenario.packageManagerMarker, "utf8");
+    assert.doesNotMatch(dnfCalls, /copr/);
+  } finally {
+    scenario.cleanup();
+  }
+});
+
+test("install.sh does not let binaries in engine/bin shadow system utilities", { skip: shellChecksUnsupported }, () => {
+  const scenario = createScenario({ uname: "Linux" });
+  const poisonedMarker = join(scenario.root, "poisoned-uname-ran");
+  writeFileSync(
+    join(scenario.engineDirectory, "bin", "uname"),
+    `#!/bin/sh\nprintf pwned > "${poisonedMarker}"\nexit 99\n`,
+  );
+  chmodSync(join(scenario.engineDirectory, "bin", "uname"), 0o755);
+  try {
+    const result = scenario.runInstaller(["--check"]);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(existsSync(poisonedMarker), false, "engine/bin must not shadow system commands");
+  } finally {
+    scenario.cleanup();
+  }
 });
 
 test("Tauri runner stops when setup fails", () => {
@@ -1002,4 +1101,22 @@ test("Tauri runner still prioritizes prepared tools after a completed local boot
   assert.equal(calls[0].command, "node");
   assert.ok(calls[0].options.env.PATH.startsWith("/test/home/.local/bin:"));
   assert.equal(environment.PATH, "/usr/bin");
+});
+
+test("installer rejects invalid tool overrides and unverified custom UxPlay without explicit opt-in", { skip: shellChecksUnsupported }, () => {
+  const fixture = createScenario({ uname: "Linux" });
+  try {
+    for (const badArgs of [
+      ["--only", "gstreamer"],
+      ["--scrcpy-version", "5.0.1;id"],
+      ["--uxplay-ref", "../bad"],
+      ["--uxplay-sha256", "not-a-sha"],
+      ["--uxplay-ref", "v1.73.6"],
+    ]) {
+      const result = fixture.runInstaller(badArgs);
+      assert.notEqual(result.status, 0, `expected failure for ${badArgs.join(" ")}`);
+    }
+  } finally {
+    fixture.cleanup();
+  }
 });

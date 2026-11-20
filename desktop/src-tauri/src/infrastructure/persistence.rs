@@ -5,7 +5,7 @@ use crate::domain::{
     push_recent, AppLogEntry, DomainError, DomainResult, LogLevel, ReceiverSettings,
     MAX_RECENT_LOGS,
 };
-use chrono::Local;
+use jiff::{tz::TimeZone, Zoned};
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -108,7 +108,7 @@ impl AppLogger {
     /// # 回傳值
     /// 回傳初始化完成的 `AppLogger`。
     pub fn new(log_dir: PathBuf) -> Self {
-        let log_path = log_dir.join(format!("{}.jsonl", Local::now().format("%Y-%m-%d")));
+        let log_path = log_dir.join(format!("{}.jsonl", Zoned::now().strftime("%Y-%m-%d")));
         let mut entries = VecDeque::new();
         if let Ok(file) = fs::File::open(log_path) {
             for line in BufReader::new(file).lines().map_while(Result::ok) {
@@ -176,7 +176,8 @@ impl LogRepository for AppLogger {
 /// - `log_dir`: 日誌存放目錄路徑。
 /// - `entry`: 欲寫入磁碟的日誌項目參考。
 fn append_log(log_dir: &Path, entry: &AppLogEntry) {
-    let path = log_dir.join(format!("{}.jsonl", entry.timestamp.format("%Y-%m-%d")));
+    let local_time = entry.timestamp.to_zoned(TimeZone::system());
+    let path = log_dir.join(format!("{}.jsonl", local_time.strftime("%Y-%m-%d")));
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         if let Ok(line) = serde_json::to_vec(entry) {
             let _ = file.write_all(&line);

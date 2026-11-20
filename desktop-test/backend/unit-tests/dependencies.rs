@@ -348,11 +348,441 @@ fn tasklist_pid_matching_does_not_accept_prefixes() {
 }
 
 /// 驗證 macOS 終端指令參數跳脫函式會正確保護空白與反引號／命令替換字元。
-#[cfg(target_os = "macos")]
 #[test]
 fn terminal_paths_are_shell_quoted() {
     assert_eq!(
         shell_quote("/tmp/a b/'$(touch injected)'"),
         "'/tmp/a b/'\\''$(touch injected)'\\'''"
     );
+}
+
+/// 驗證 macOS `osascript` 會透過 `on run argv` 傳遞命令列並拒絕換行與 NUL 控制字元。
+#[test]
+fn macos_terminal_osascript_uses_argv_and_rejects_control_characters() {
+    let args = macos_terminal_osascript_args("/bin/bash '/tmp/safe path/launch.sh'").unwrap();
+    assert_eq!(args[0], "-e");
+    assert_eq!(args[1], "on run argv");
+    assert_eq!(
+        args[3],
+        "tell application \"Terminal\" to do script (item 1 of argv)"
+    );
+    assert_eq!(args[6], "--");
+    assert_eq!(args[7], "/bin/bash '/tmp/safe path/launch.sh'");
+
+    assert!(macos_terminal_osascript_args("echo hi\nrm -rf /").is_err());
+    assert!(macos_terminal_osascript_args("echo hi\rwhoami").is_err());
+    assert!(macos_terminal_osascript_args("echo hi\0bad").is_err());
+    assert!(validate_terminal_path(Path::new("/tmp/bad\npath")).is_err());
+    assert!(validate_terminal_path(Path::new("/tmp/good path")).is_ok());
+}
+
+/// 驗證 Windows PowerShell 系統路徑解析會採用 `SystemRoot\System32` 並忽略 UNC 或相對路徑。
+#[test]
+fn windows_powershell_path_ignores_unc_and_relative_system_roots() {
+    let default_path = windows_powershell_executable_from(None);
+    assert!(default_path.to_string_lossy().contains("WindowsPowerShell"));
+    assert!(default_path.to_string_lossy().ends_with("powershell.exe"));
+
+    let custom_path = windows_powershell_executable_from(Some(OsStr::new(r"D:\Windows")));
+    assert!(custom_path.to_string_lossy().starts_with(r"D:\Windows"));
+
+    let unc_fallback = windows_powershell_executable_from(Some(OsStr::new(r"\\attacker\share")));
+    assert!(unc_fallback.to_string_lossy().starts_with(r"C:\Windows"));
+
+    let rel_fallback = windows_powershell_executable_from(Some(OsStr::new("Windows")));
+    assert!(rel_fallback.to_string_lossy().starts_with(r"C:\Windows"));
+}
+
+/// 驗證 `read_install_log` 會保留正常大小日誌並截斷超過 1 MiB 的超大日誌。
+#[test]
+fn read_install_log_caps_oversized_logs_to_tail() {
+    let config_dir = install_log_test_directory();
+    let setup_dir = config_dir.join("setup");
+    fs::create_dir_all(&setup_dir).unwrap();
+    let line = "0123456789abcdef0123456789abcdef\n";
+    let repeated = line.repeat(40_000);
+    assert!(repeated.len() > MAX_INSTALL_LOG_READ_BYTES);
+    fs::write(setup_dir.join(INSTALL_LOG), &repeated).unwrap();
+    let manager = DependencyManager::new(
+        PathBuf::from("unused"),
+        PathBuf::from("unused-cache"),
+        &config_dir,
+        true,
+    );
+
+    let read_back = manager.read_install_log().unwrap();
+    assert!(read_back.starts_with("[已省略較早記錄，僅顯示最後 1 MiB 內容]\n"));
+    assert!(read_back.len() <= MAX_INSTALL_LOG_READ_BYTES + 128);
+    assert!(read_back.ends_with(line));
+    fs::remove_dir_all(config_dir).unwrap();
+}
+
+/// 驗證 `stage_installer` 在 Unix 會套用 `0700` 目錄／腳本權限且拒絕符號連結路徑與目標。
+#[cfg(unix)]
+#[test]
+fn stage_installer_enforces_permissions_and_rejects_symlinks() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let root = install_log_test_directory();
+    let setup_dir = root.join("setup");
+    let staged = stage_installer(&setup_dir).unwrap();
+    let dir_mode = fs::symlink_metadata(&setup_dir)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    let file_mode = fs::symlink_metadata(&staged).unwrap().permissions().mode() & 0o777;
+    assert_eq!(dir_mode, 0o700);
+    assert_eq!(file_mode, 0o700);
+
+    let outside_target = root.join("outside.txt");
+    fs::write(&outside_target, b"original").unwrap();
+    fs::remove_file(&staged).unwrap();
+    symlink(&outside_target, &staged).unwrap();
+    assert!(stage_installer(&setup_dir).is_err());
+    assert_eq!(fs::read(&outside_target).unwrap(), b"original");
+
+    let symlink_setup = root.join("symlink-setup");
+    symlink(&setup_dir, &symlink_setup).unwrap();
+    assert!(stage_installer(&symlink_setup).is_err());
+
+    let symlink_log = setup_dir.join(INSTALL_LOG);
+    symlink(&outside_target, &symlink_log).unwrap();
+    let manager = DependencyManager::new(
+        PathBuf::from("unused"),
+        PathBuf::from("unused-cache"),
+        &root,
+        true,
+    );
+    assert!(manager.read_install_log().is_err());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// 驗證 `clear_engine_directory` 拒絕懸空符號連結且 `clear_gstreamer_registry` 拒絕符號連結快取路徑。
+#[cfg(unix)]
+#[test]
+fn cleanup_rejects_dangling_and_symlinked_paths() {
+    use std::os::unix::fs::symlink;
+
+    let root = install_log_test_directory();
+    fs::create_dir_all(&root).unwrap();
+    let dangling_engine = root.join("dangling-engine");
+    symlink(root.join("missing-target"), &dangling_engine).unwrap();
+    assert!(clear_engine_directory(&dangling_engine).is_err());
+
+    let real_cache_dir = root.join("cache");
+    fs::create_dir_all(&real_cache_dir).unwrap();
+    let target_file = root.join("outside-keep.txt");
+    fs::write(&target_file, b"keep").unwrap();
+    let symlink_registry = real_cache_dir.join("registry.bin");
+    symlink(&target_file, &symlink_registry).unwrap();
+    assert!(clear_gstreamer_registry(&symlink_registry).is_err());
+    assert_eq!(fs::read(&target_file).unwrap(), b"keep");
+
+    let symlink_cache_dir = root.join("symlink-cache");
+    symlink(&real_cache_dir, &symlink_cache_dir).unwrap();
+    assert!(clear_gstreamer_registry(&symlink_cache_dir.join("registry.bin")).is_err());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// 驗證 `seed_bundled_engine_in_dir` 會安全複製常規檔案、略過來源符號連結並拒絕目的地符號連結。
+#[cfg(unix)]
+#[test]
+fn seed_bundled_engine_ignores_source_symlinks_and_rejects_destination_symlinks() {
+    use crate::infrastructure::process::seed_bundled_engine_in_dir;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let root = install_log_test_directory();
+    let bundled = root.join("bundled");
+    let engine = root.join("engine");
+    let outside = root.join("outside-secret");
+    fs::create_dir_all(bundled.join("bin")).unwrap();
+    fs::write(&outside, b"secret").unwrap();
+    fs::write(bundled.join("bin/uxplay"), b"binary").unwrap();
+    fs::set_permissions(
+        bundled.join("bin/uxplay"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    symlink(&outside, bundled.join("bin/smuggled")).unwrap();
+
+    seed_bundled_engine_in_dir(&bundled, &engine, "0.2.5").unwrap();
+    assert!(engine.join("bin/uxplay").is_file());
+    assert!(!engine.join("bin/smuggled").exists());
+    assert!(engine.join(".bundled-0.2.5").is_file());
+
+    let tampered_engine = root.join("tampered-engine");
+    fs::create_dir_all(tampered_engine.join("bin")).unwrap();
+    symlink(&outside, tampered_engine.join("bin/uxplay")).unwrap();
+    assert!(seed_bundled_engine_in_dir(&bundled, &tampered_engine, "0.2.5").is_err());
+    assert_eq!(fs::read(&outside).unwrap(), b"secret");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// 驗證 Unix 與 Windows 安裝器引數建構函式正確傳遞 `--only`、自訂版本、SHA-256 與 `--allow-unverified-uxplay` 參數。
+#[test]
+fn extra_installer_args_encode_selected_tool_versions_without_shell_interpolation() {
+    use super::{
+        unix_extra_installer_args, windows_extra_installer_args, InstallInvocationOptions,
+    };
+    use crate::domain::{PinnedToolVersion, ToolId};
+
+    let options = InstallInvocationOptions {
+        only_tool: Some(ToolId::UxPlay),
+        uxplay: Some(PinnedToolVersion {
+            version: "1.73.6".into(),
+            reference: "v1.73.6".into(),
+            sha256: None,
+            allow_unverified: true,
+        }),
+        scrcpy: Some(PinnedToolVersion {
+            version: "4.1".into(),
+            reference: "v4.1".into(),
+            sha256: Some("a".repeat(64)),
+            allow_unverified: false,
+        }),
+        validated_install: None,
+    };
+
+    let unix = unix_extra_installer_args(false, &options);
+    assert_eq!(
+        unix,
+        vec![
+            "--only",
+            "uxplay",
+            "--uxplay-ref",
+            "v1.73.6",
+            "--expect-uxplay-version",
+            "1.73.6",
+            "--allow-unverified-uxplay",
+            "--scrcpy-version",
+            "4.1",
+            "--scrcpy-sha256",
+            &"a".repeat(64),
+        ]
+    );
+
+    let windows = windows_extra_installer_args(true, &options);
+    assert_eq!(
+        windows,
+        vec![
+            "-Upgrade",
+            "-Only",
+            "uxplay",
+            "-UxPlayRef",
+            "v1.73.6",
+            "-ExpectUxPlayVersion",
+            "1.73.6",
+            "-AllowUnverifiedUxPlay",
+            "-ScrcpyVersionOverride",
+            "4.1",
+            "-ScrcpySha256",
+            &"a".repeat(64),
+        ]
+    );
+}
+
+/// 驗證 `tool-versions.json` 安全持久化（寫入、讀取、恢復預設、拒絕符號連結）與 API 失敗回退 Atom XML 爬取流程。
+#[test]
+fn tool_version_preferences_and_catalog_atom_fallback_work() {
+    use super::{
+        load_tool_version_preferences, reset_tool_version_preferences, save_tool_version_preference,
+    };
+    use crate::application::ToolCatalogFetcher;
+    use crate::domain::{DomainError, DomainResult, ToolId, ValidatedToolInstall};
+
+    let config_dir = install_log_test_directory();
+    fs::create_dir_all(&config_dir).unwrap();
+
+    let custom_scrcpy = ValidatedToolInstall {
+        tool: ToolId::Scrcpy,
+        version: "4.1".into(),
+        reference: "v4.1".into(),
+        sha256: None,
+        allow_unverified: false,
+        is_default: false,
+    };
+    save_tool_version_preference(&config_dir, &custom_scrcpy).unwrap();
+    let loaded = load_tool_version_preferences(&config_dir);
+    assert_eq!(loaded.scrcpy.as_ref().unwrap().version, "4.1");
+
+    reset_tool_version_preferences(&config_dir).unwrap();
+    assert!(load_tool_version_preferences(&config_dir).scrcpy.is_none());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let outside = config_dir.join("outside.json");
+        fs::write(&outside, b"{}").unwrap();
+        symlink(&outside, config_dir.join(super::TOOL_VERSIONS_FILE)).unwrap();
+        assert!(save_tool_version_preference(&config_dir, &custom_scrcpy).is_err());
+        assert!(reset_tool_version_preferences(&config_dir).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"{}");
+    }
+
+    struct FallbackFetcher;
+    impl ToolCatalogFetcher for FallbackFetcher {
+        fn fetch_text(&self, url: &str) -> DomainResult<String> {
+            if url.contains("api.github.com") {
+                return Err(DomainError::external_process("HTTP 403 rate limited"));
+            }
+            if url.contains("scrcpy/releases.atom") {
+                return Ok(r#"<feed><entry><link href="https://github.com/Genymobile/scrcpy/releases/tag/v5.0.1"/><updated>2026-10-08T00:00:00Z</updated></entry></feed>"#.into());
+            }
+            if url.contains("UxPlay/releases.atom") {
+                return Ok(r#"<feed><entry><link href="https://github.com/FDH2/UxPlay/releases/tag/v1.73.7"/><updated>2026-09-10T00:00:00Z</updated></entry></feed>"#.into());
+            }
+            Ok(r#"{"versions":{"stable":"1.28.9"}}"#.into())
+        }
+    }
+
+    let manager = DependencyManager::new(
+        config_dir.join("engine"),
+        config_dir.join("cache/registry.bin"),
+        &config_dir,
+        false,
+    );
+    let catalog = manager.refresh_tool_catalog(&FallbackFetcher).unwrap();
+    assert!(catalog.remote_fetched_at.is_some());
+    assert_eq!(
+        catalog.tools[0].latest_remote_version.as_deref(),
+        Some("1.73.7")
+    );
+    assert_eq!(catalog.tools[1].available_versions[0].version, "5.0.1");
+
+    fs::remove_dir_all(&config_dir).unwrap();
+}
+
+/// 驗證受支援 Linux 發行版從 `/etc/os-release` 解析版本代號，並拒絕未支援衍生版與不安全路徑片段。
+#[test]
+fn linux_distribution_detection_uses_supported_ids_and_safe_release_values() {
+    assert_eq!(
+        parse_linux_distribution("ID=debian\nVERSION_CODENAME=trixie\n").unwrap(),
+        LinuxDistribution::Debian {
+            codename: "trixie".into()
+        }
+    );
+    assert_eq!(
+        parse_linux_distribution("ID=ubuntu\nUBUNTU_CODENAME=noble\n").unwrap(),
+        LinuxDistribution::Ubuntu {
+            codename: "noble".into()
+        }
+    );
+    assert_eq!(
+        parse_linux_distribution("ID=fedora\nVERSION_ID=45\n").unwrap(),
+        LinuxDistribution::Fedora {
+            release: "45".into()
+        }
+    );
+    assert_eq!(
+        parse_linux_distribution("ID=rhel\nVERSION_ID=10.0\n").unwrap(),
+        LinuxDistribution::Rhel
+    );
+    assert_eq!(
+        parse_linux_distribution("ID=arch\n").unwrap(),
+        LinuxDistribution::Arch
+    );
+    assert!(parse_linux_distribution("ID=rocky\nID_LIKE=rhel fedora\n").is_err());
+    assert!(parse_linux_distribution("ID=ubuntu\nVERSION_CODENAME=../noble\n").is_err());
+}
+
+/// 驗證 Linux 各發行版選用白名單官方 GStreamer 套件頁並取得平台套件版本。
+#[test]
+fn linux_gstreamer_queries_use_official_distribution_sources() {
+    use crate::application::ToolCatalogFetcher;
+    use crate::domain::{DomainResult, ARCH_GSTREAMER_PACKAGES_URL, FEDORA_GSTREAMER_PACKAGES_URL};
+
+    struct FixtureFetcher {
+        expected_url: &'static str,
+        body: &'static str,
+    }
+    impl ToolCatalogFetcher for FixtureFetcher {
+        fn fetch_text(&self, url: &str) -> DomainResult<String> {
+            assert_eq!(url, self.expected_url);
+            Ok(self.body.into())
+        }
+    }
+
+    assert_eq!(
+        fetch_linux_gstreamer_latest(
+            &FixtureFetcher {
+                expected_url: "https://packages.debian.org/trixie/utils/gstreamer1.0-tools",
+                body: "<h1>Package: gstreamer1.0-tools (1.26.2-2)</h1>",
+            },
+            &LinuxDistribution::Debian {
+                codename: "trixie".into()
+            },
+            "x86_64",
+        )
+        .unwrap(),
+        "1.26.2-2"
+    );
+    assert_eq!(
+        fetch_linux_gstreamer_latest(
+            &FixtureFetcher {
+                expected_url: "https://packages.ubuntu.com/noble/utils/gstreamer1.0-tools",
+                body: "<h1>Package: gstreamer1.0-tools (1.24.2-1ubuntu0.1 and others)</h1>",
+            },
+            &LinuxDistribution::Ubuntu {
+                codename: "noble".into()
+            },
+            "aarch64",
+        )
+        .unwrap(),
+        "1.24.2-1ubuntu0.1"
+    );
+    assert_eq!(
+        fetch_linux_gstreamer_latest(
+            &FixtureFetcher {
+                expected_url: FEDORA_GSTREAMER_PACKAGES_URL,
+                body: "<table><tr><td>Fedora 45</td><td><a>1.28.9-1.fc45</a></td></tr></table>",
+            },
+            &LinuxDistribution::Fedora {
+                release: "45".into()
+            },
+            "x86_64",
+        )
+        .unwrap(),
+        "1.28.9-1.fc45"
+    );
+    assert_eq!(
+        fetch_linux_gstreamer_latest(
+            &FixtureFetcher {
+                expected_url: ARCH_GSTREAMER_PACKAGES_URL,
+                body: "<h2>gstreamer 1.28.9-3</h2>",
+            },
+            &LinuxDistribution::Arch,
+            "x86_64",
+        )
+        .unwrap(),
+        "1.28.9-3"
+    );
+    assert!(fetch_linux_gstreamer_latest(
+        &FixtureFetcher {
+            expected_url: ARCH_GSTREAMER_PACKAGES_URL,
+            body: "<h2>gstreamer 1.28.9-3</h2>",
+        },
+        &LinuxDistribution::Arch,
+        "aarch64",
+    )
+    .is_err());
+}
+
+/// 驗證 RHEL 版本查詢只呼叫唯讀 `dnf repoquery` 並限制輸出、參數與執行時間。
+#[test]
+fn rhel_gstreamer_query_is_bounded_and_read_only() {
+    assert_eq!(
+        RHEL_GSTREAMER_DNF_ARGS,
+        [
+            "--quiet",
+            "repoquery",
+            "--latest-limit=1",
+            "--queryformat=%{version}-%{release}",
+            "gstreamer1-tools",
+        ]
+    );
+    assert_eq!(RHEL_GSTREAMER_QUERY_TIMEOUT, Duration::from_secs(15));
 }

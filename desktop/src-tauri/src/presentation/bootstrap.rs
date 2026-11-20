@@ -1,6 +1,9 @@
 //! Tauri 桌面應用程式組裝進入點，負責外掛初始化、目錄解析、系統匣與視窗生命週期管理。
 
 use crate::application::SaveSettingsUseCase;
+use crate::infrastructure::process::ensure_safe_directory;
+#[cfg(not(debug_assertions))]
+use crate::infrastructure::process::seed_bundled_engine_in_dir;
 use crate::infrastructure::{AppState, DependencyManager};
 use crate::presentation::commands;
 use tauri::menu::{Menu, MenuItem};
@@ -59,7 +62,7 @@ pub fn run() {
             };
             std::fs::create_dir_all(&config_dir)?;
             std::fs::create_dir_all(&log_dir)?;
-            std::fs::create_dir_all(&engine_dir)?;
+            ensure_safe_directory(&engine_dir, false)?;
             let state = AppState::new(
                 config_dir.clone(),
                 log_dir,
@@ -139,6 +142,10 @@ pub fn run() {
             commands::install_dependencies,
             commands::manage_dependencies,
             commands::read_install_log,
+            commands::get_tool_catalog,
+            commands::fetch_tool_versions,
+            commands::install_tool_version,
+            commands::reset_tool_versions,
             commands::save_settings,
             commands::start_airplay,
             commands::stop_airplay,
@@ -163,43 +170,7 @@ fn seed_bundled_engine(
     bundled_engine: &std::path::Path,
     engine_dir: &std::path::Path,
 ) -> Result<(), std::io::Error> {
-    use std::fs;
-
-    let marker = engine_dir.join(format!(".bundled-{}", env!("CARGO_PKG_VERSION")));
-    if marker.exists() || !bundled_engine.is_dir() {
-        return Ok(());
-    }
-
-    /// 遞迴複製來源目錄內的所有子目錄、檔案與執行權限設定至目標目錄。
-    ///
-    /// # 參數
-    /// - `source`: 來源目錄路徑。
-    /// - `destination`: 目標目錄路徑。
-    ///
-    /// # 回傳值
-    /// 完成遞迴複製回傳 `Ok(())`，否則回傳 `std::io::Error`。
-    fn copy_contents(
-        source: &std::path::Path,
-        destination: &std::path::Path,
-    ) -> std::io::Result<()> {
-        fs::create_dir_all(destination)?;
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            let source_path = entry.path();
-            let destination_path = destination.join(entry.file_name());
-            let metadata = fs::metadata(&source_path)?;
-            if metadata.is_dir() {
-                copy_contents(&source_path, &destination_path)?;
-            } else if metadata.is_file() {
-                fs::copy(&source_path, &destination_path)?;
-                fs::set_permissions(&destination_path, metadata.permissions())?;
-            }
-        }
-        Ok(())
-    }
-
-    copy_contents(bundled_engine, engine_dir)?;
-    fs::write(marker, b"seeded\n")
+    seed_bundled_engine_in_dir(bundled_engine, engine_dir, env!("CARGO_PKG_VERSION"))
 }
 
 /// 顯示、取消最小化並將焦點帶至主視窗。

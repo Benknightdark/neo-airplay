@@ -3,7 +3,7 @@
 use crate::application::contracts::DashboardSnapshot;
 use crate::domain::{
     AndroidDevice, AppLogEntry, DependencyAction, DependencySnapshot, DomainResult, EngineSnapshot,
-    LogLevel, ReceiverSettings,
+    LogLevel, ReceiverSettings, ToolCatalogSnapshot, ToolInstallRequest,
 };
 
 /// 接收器設定持久化儲存介面。
@@ -127,6 +127,18 @@ pub trait EngineAccessGuard: Send + Sync {
     fn execute_if_available(&self, action: &mut dyn FnMut()) -> DomainResult<()>;
 }
 
+/// 從白名單官方來源擷取工具發行版本資訊文字（JSON / Atom XML / HTML）的抽象網路埠。
+pub trait ToolCatalogFetcher: Send + Sync {
+    /// 以安全強制 HTTPS TLS 1.2+ 與白名單檢查從指定官方網址下載文字回應。
+    ///
+    /// # 參數
+    /// - `url`: 目標官方版本來源網址。
+    ///
+    /// # 回傳值
+    /// 成功回傳回應純文字內容；網域不合法、逾時或回應過大則回傳 `DomainError`。
+    fn fetch_text(&self, url: &str) -> DomainResult<String>;
+}
+
 /// 投影依賴工具管理執行期介面，負責狀態查詢、自動安裝與升級／重裝流程。
 pub trait DependencyRuntime: Send + Sync {
     /// 取得目前依賴工具的檢查與安裝狀態快照。
@@ -160,4 +172,23 @@ pub trait DependencyRuntime: Send + Sync {
         action: DependencyAction,
         prepare: &mut dyn FnMut() -> DomainResult<()>,
     ) -> DomainResult<DependencySnapshot>;
+
+    /// 取得依目前作業系統組裝的工具清單、本機已裝版本與快取的線上版本快照。
+    fn tool_catalog(&self) -> DomainResult<ToolCatalogSnapshot>;
+
+    /// 透過 `ToolCatalogFetcher` 爬取官方線上版本清單、更新快取並回傳最新快照。
+    fn refresh_tool_catalog(
+        &self,
+        fetcher: &dyn ToolCatalogFetcher,
+    ) -> DomainResult<ToolCatalogSnapshot>;
+
+    /// 驗證並啟動指定工具與版本之背景安裝／切換流程。
+    fn install_tool_version(
+        &self,
+        request: ToolInstallRequest,
+        prepare: &mut dyn FnMut() -> DomainResult<()>,
+    ) -> DomainResult<DependencySnapshot>;
+
+    /// 清除所有自訂工具版本偏好設定，恢復使用內建推薦版。
+    fn reset_tool_versions(&self) -> DomainResult<ToolCatalogSnapshot>;
 }
