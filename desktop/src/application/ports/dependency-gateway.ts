@@ -23,9 +23,9 @@ export interface DependencyGateway {
    */
   installDependencies(): Promise<DependencySnapshot>;
   /**
-   * 執行升級或重新安裝維護動作。
+   * 執行升級、重新安裝或清除工具維護動作。
    *
-   * @param action 使用者觸發的維護動作（`upgrade` 或 `reinstall`）。
+   * @param action 使用者觸發的維護動作（`upgrade`、`reinstall` 或 `clear`）。
    * @returns 解析為維護開始後 `DependencySnapshot` 的非同步 Promise。
    */
   manageDependencies(action: DependencyAction): Promise<DependencySnapshot>;

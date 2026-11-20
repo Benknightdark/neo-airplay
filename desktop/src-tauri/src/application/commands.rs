@@ -173,12 +173,12 @@ fn stop_engines_for_maintenance(runtime: &dyn ReceiverRuntime) -> DomainResult<(
     Ok(())
 }
 
-/// 執行依賴工具升級或重新安裝維護流程，並在前置步驟先停止所有作用中的投影服務。
+/// 執行依賴工具升級、重新安裝或清除工具維護流程，並在前置步驟先停止所有作用中的投影服務。
 ///
 /// # 參數
 /// - `runtime`: 用於維護前停止 AirPlay 與 Android 投影的執行期埠。
 /// - `dependencies`: 依賴工具管理執行期埠。
-/// - `action`: 使用者請求的維護動作（升級或重裝）。
+/// - `action`: 使用者請求的維護動作（升級、重裝或清除）。
 ///
 /// # 回傳值
 /// 成功停止服務並啟動維護流程後回傳 `DependencySnapshot`；任一步驟失敗則回傳 `DomainError`。

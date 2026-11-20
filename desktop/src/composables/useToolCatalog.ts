@@ -97,7 +97,8 @@ export function useToolCatalog(options: UseToolCatalogOptions = {}) {
     watch(options.dependencyStatus, (nextStatus, prevStatus) => {
       const wasBusy = prevStatus === "checking" || prevStatus === "installing";
       const isDone = nextStatus === "ready" || nextStatus === "failed";
-      if (wasBusy && isDone) {
+      const changedState = prevStatus !== undefined && prevStatus !== nextStatus;
+      if (isDone && (wasBusy || changedState)) {
         void loadCatalog();
       }
     });

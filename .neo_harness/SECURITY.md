@@ -11,7 +11,7 @@
 
 - **無 Shell 參數執行與絕對系統路徑**：Rust 皆以 `std::process::Command` 引數陣列啟動 `uxplay`、`adb`、`scrcpy` 與 `/usr/bin/dns-sd`，並以 `%SystemRoot%\System32` 絕對路徑啟動 Windows `powershell.exe` 與 `tasklist.exe`（且不將 `engine/` 注入安裝或探測程序 `PATH`）。不接受前端傳入自訂安裝命令或下載 URL；macOS Terminal 安裝驗證路徑不含控制字元，並以 `osascript` `on run argv` 傳遞命令列，避免 AppleScript 字串內插。
 - **執行路徑與環境信任邊界**：引擎只從 Debug 的 `desktop/engine/` 或 Release 使用者資料目錄的 `engine/` 載入，不回退系統 `PATH`、MSYS2 或 WinGet；`find_executable` 與 `is_executable_file` 逐層檢查 `symlink_metadata` 拒絕符號連結目錄與符號連結執行檔。macOS／Linux 啟動時透過 `fix-path-env` 讀取使用者登入 shell 環境，因此本機 `engine/` 目錄與使用者 shell 啟動設定同屬程式碼執行信任邊界。
-- **輸入限制、檔案原子保護與日誌上限**：Android 只接受剛由 ADB 列舉且狀態為 `device` 的序號（不執行配對或 TCP/IP 連線）；AirPlay renderer 受平台 allowlist 限制。`setup/`（Unix `0700`）、釋放腳本（安裝前再次重寫以消除 TOCTOU）、狀態 JSON 與 `seed_bundled_engine_in_dir` 均採 `create_new` 原子寫入並拒絕符號連結；`clear_engine_directory` 與 `clear_gstreamer_registry` 預先拒絕符號連結（含懸空符號連結）。`read_install_log` 拒絕符號連結並限制回傳尾端 `1 MiB`，安裝啟動前若超過 `5 MiB` 自動截斷保留尾端。
+- **輸入限制、檔案原子保護與日誌上限**：Android 只接受剛由 ADB 列舉且狀態為 `device` 的序號（不執行配對或 TCP/IP 連線）；AirPlay renderer 受平台 allowlist 限制。`setup/`（Unix `0700`）、釋放腳本（安裝前再次重寫以消除 TOCTOU）、狀態 JSON 與 `seed_bundled_engine_in_dir` 均採 `create_new` 原子寫入並拒絕符號連結；`clear_engine_directory`、`clear_gstreamer_registry`、`reset_tool_version_preferences` 與 `clear_transient_setup_files` 均預先拒絕符號連結（含懸空符號連結），清除前僅以受控 `engine/` 內的非符號連結 `adb` 執行有逾時保護的 `kill-server`。`read_install_log` 拒絕符號連結並限制回傳尾端 `1 MiB`，安裝啟動前若超過 `5 MiB` 自動截斷保留尾端。
 - **診斷記錄隱私**：每日 JSONL 診斷記錄包含外部程序輸出及 Android 裝置型號／序號，對外提供記錄前應先檢視內容。
 
 ## 第三方供應鏈與發佈控制

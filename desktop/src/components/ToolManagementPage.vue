@@ -27,11 +27,13 @@ interface ToolSelectionDraft {
 
 /** 控制清除並重新安裝確認對話框是否開啟。 */
 const confirmingReinstall = ref(false);
+/** 控制僅清除所有已安裝工具確認對話框是否開啟。 */
+const confirmingClear = ref(false);
 /** 暫存待使用者明確確認（未附 SHA-256 的非預設 UxPlay）安裝項目。 */
 const pendingUnverifiedTool = ref<{ tool: ManagedToolInfo; version: string } | null>(null);
 
 /** 取得目前依賴工具狀態、忙碌鎖定狀態及維護操作方法。 */
-const { snapshot, error, installing, unavailable, runAction, installToolVersion } =
+const { snapshot, error, installing, unavailable, retry, runAction, installToolVersion } =
   useDependencyState();
 
 const dependencyStatus = computed(() => snapshot.value?.status);
@@ -40,6 +42,7 @@ const {
   fetchingRemote,
   catalogError,
   hasCustomVersions,
+  loadCatalog,
   fetchRemoteVersions,
   resetToolVersions,
 } = useToolCatalog({ dependencyStatus });
@@ -160,6 +163,28 @@ async function confirmReinstall(): Promise<void> {
 }
 
 /**
+ * 僅在工具未忙碌且功能可用時開啟「清除工具」二次確認對話框。
+ */
+function requestClear(): void {
+  if (!installing.value && !unavailable.value) confirmingClear.value = true;
+}
+
+/**
+ * 關閉確認對話框並觸發僅清除已安裝工具與快取流程。
+ */
+async function confirmClear(): Promise<void> {
+  confirmingClear.value = false;
+  const previousStatus = snapshot.value?.status;
+  await runAction("clear");
+  if (
+    snapshot.value?.status !== "installing" &&
+    snapshot.value?.status === previousStatus
+  ) {
+    await loadCatalog();
+  }
+}
+
+/**
  * 格式化爬取時間戳記為台灣 24 小時制簡短時間顯示。
  */
 function formatFetchedAt(timestamp: string | null | undefined): string {
@@ -200,6 +225,17 @@ function formatFetchedAt(timestamp: string | null | undefined): string {
         <li v-for="dependency in snapshot.missing" :key="dependency">{{ dependency }}</li>
       </ul>
       <InstallLogViewer v-if="snapshot?.logPath" :log-path="snapshot.logPath" />
+      <div v-if="snapshot?.status === 'failed' && !unavailable" class="tool-status-actions">
+        <button
+          class="button-secondary"
+          type="button"
+          :disabled="installing"
+          data-testid="tools-retry-install"
+          @click="retry"
+        >
+          重新檢查並安裝
+        </button>
+      </div>
       <p v-if="snapshot?.status === 'disabled'" class="tool-disabled-hint">此工作階段已停用工具管理。</p>
     </div>
 
@@ -381,6 +417,15 @@ function formatFetchedAt(timestamp: string | null | undefined): string {
           清除並重新安裝
         </button>
       </article>
+
+      <article class="tool-action-card tool-action-card-clear">
+        <div class="tool-action-icon tool-action-icon-clear" aria-hidden="true">✕</div>
+        <h3>清除工具</h3>
+        <p>先停止投影，再移除所有已安裝的 Neo AirPlay 專用工具、GStreamer 快取與自訂版本設定（不重新安裝）。系統套件、設定與記錄檔會保留。</p>
+        <button class="button-secondary button-danger-outline" type="button" :disabled="installing || unavailable" data-testid="tools-clear" @click="requestClear">
+          {{ installing && snapshot?.operation === 'clear' ? '正在清除…' : '清除工具' }}
+        </button>
+      </article>
     </div>
 
     <p v-if="catalog?.platformWarning" class="tool-package-warning" data-testid="tools-platform-warning">
@@ -394,6 +439,19 @@ function formatFetchedAt(timestamp: string | null | undefined): string {
         <div class="tool-confirmation-actions">
           <button class="button-secondary" type="button" data-testid="tools-reinstall-cancel" @click="confirmingReinstall = false">取消</button>
           <button class="button-primary" type="button" data-testid="tools-reinstall-confirm" @click="confirmReinstall">清除並重新安裝</button>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="confirmingClear" class="tool-confirmation-backdrop" data-testid="tools-clear-confirmation">
+      <section class="tool-confirmation" role="dialog" aria-modal="true" aria-labelledby="tools-clear-confirmation-title">
+        <h3 id="tools-clear-confirmation-title">清除所有已安裝工具？</h3>
+        <p>
+          此操作會先停止投影服務，並移除 <code>engine/</code> 內的 Neo AirPlay 專用工具、GStreamer 快取、過渡性安裝標記及自訂版本偏好，且不會自動重新安裝。系統套件、接收器設定與安裝／診斷記錄會保留。
+        </p>
+        <div class="tool-confirmation-actions">
+          <button class="button-secondary" type="button" data-testid="tools-clear-cancel" @click="confirmingClear = false">取消</button>
+          <button class="button-primary button-danger" type="button" data-testid="tools-clear-confirm" @click="confirmClear">確認清除工具</button>
         </div>
       </section>
     </div>
@@ -432,6 +490,7 @@ function formatFetchedAt(timestamp: string | null | undefined): string {
 .tool-operation-label { color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; }
 .tool-status-card p { margin: 8px 0 0; color: var(--text-secondary); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
 .tool-status-card :deep(.install-log-control) { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border-rust); }
+.tool-status-actions { margin-top: 12px; }
 .tool-missing-list { margin: 8px 0 0; padding-left: 19px; color: var(--crimson-alert); font-size: 12px; line-height: 1.7; }
 .tool-status-card .tool-disabled-hint { color: var(--text-muted); font-size: 11px; }
 
@@ -495,18 +554,23 @@ function formatFetchedAt(timestamp: string | null | undefined): string {
 .tool-advanced-details .field-block { margin-top: 10px; }
 .tool-version-note { margin: 12px 0 0; color: var(--text-muted); font-size: 11px; line-height: 1.6; }
 
-.tool-action-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 17px; }
+.tool-action-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 17px; }
 .tool-action-card {
-  position: relative; padding: 22px; border: 1px solid var(--border-rust); border-top: 2px solid var(--hazard-amber); border-radius: 2px;
+  position: relative; display: flex; flex-direction: column; align-items: flex-start; padding: 22px; border: 1px solid var(--border-rust); border-top: 2px solid var(--hazard-amber); border-radius: 2px;
   background: var(--bg-bunker); box-shadow: inset 0 1px rgba(255, 255, 255, .025);
 }
 .tool-action-card::after { content: "+"; position: absolute; top: 9px; right: 12px; color: var(--text-muted); font-family: var(--font-mono); font-size: 12px; pointer-events: none; }
-.tool-action-card-reinstall { border-top-color: var(--crimson-alert); }
+.tool-action-card-reinstall, .tool-action-card-clear { border-top-color: var(--crimson-alert); }
 .tool-action-card h3 { margin: 16px 0 8px; color: var(--text-primary); font-size: 15px; letter-spacing: .03em; }
-.tool-action-card p { min-height: 62px; margin: 0 0 20px; color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
+.tool-action-card p { margin: 0 0 20px; color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
+.tool-action-card > button { margin-top: auto; }
 .tool-action-icon { display: grid; width: 38px; height: 38px; place-items: center; border: 1px solid currentColor; border-radius: 2px; font-size: 23px; }
 .tool-action-icon-upgrade { color: var(--hazard-amber); background: var(--hazard-amber-dim); }
-.tool-action-icon-reinstall { color: var(--crimson-alert); background: var(--crimson-alert-dim); }
+.tool-action-icon-reinstall, .tool-action-icon-clear { color: var(--crimson-alert); background: var(--crimson-alert-dim); }
+.button-danger-outline { border-color: rgba(255, 87, 87, .45); border-left-color: var(--crimson-alert); color: var(--crimson-alert); }
+.button-danger-outline:hover:not(:disabled) { border-color: var(--crimson-alert); color: var(--bg-ash); background: var(--crimson-alert); }
+.button-danger { border-color: var(--crimson-alert); border-left-color: var(--crimson-alert); color: var(--crimson-alert); background: var(--crimson-alert-dim); }
+.button-danger:hover:not(:disabled) { border-color: var(--crimson-alert); color: var(--bg-ash); background: var(--crimson-alert); }
 .tool-package-warning { margin: 16px 0 0; padding: 10px 12px; border-left: 2px solid var(--hazard-amber); color: var(--text-secondary); background: var(--hazard-amber-dim); font-size: 11px; line-height: 1.7; }
 .tool-confirmation-backdrop { position: fixed; inset: 0; z-index: 5; display: grid; place-items: center; padding: 20px; background: rgba(3, 5, 7, .85); }
 .tool-confirmation { width: min(100%, 470px); padding: 24px; border: 1px solid var(--border-rust); border-top: 2px solid var(--crimson-alert); border-radius: 3px; background: var(--bg-bunker); box-shadow: 0 24px 80px rgba(0, 0, 0, .65); }
@@ -516,8 +580,7 @@ function formatFetchedAt(timestamp: string | null | undefined): string {
 .tool-confirmation code { font-family: var(--font-mono); color: var(--phosphor-cyan); }
 .tool-confirmation-actions { display: flex; justify-content: flex-end; gap: 10px; }
 
-@media (max-width: 700px) {
+@media (max-width: 960px) {
   .tool-action-grid { grid-template-columns: 1fr; }
-  .tool-action-card p { min-height: 0; }
 }
 </style>

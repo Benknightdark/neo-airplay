@@ -407,6 +407,19 @@ fn manage_dependencies_stops_both_engines_and_blocks_if_faulted() {
     assert_eq!(err.kind, ErrorKind::ExternalProcess);
     assert!(err.message.contains("工具檔案未移除"));
     assert_eq!(deps.managed_actions.lock().unwrap().len(), 1);
+
+    let clear_err = manage_dependencies(&runtime, &deps, DependencyAction::Clear).unwrap_err();
+    assert_eq!(clear_err.kind, ErrorKind::ExternalProcess);
+    assert!(clear_err.message.contains("工具檔案未移除"));
+    assert_eq!(deps.managed_actions.lock().unwrap().len(), 1);
+
+    *runtime.airplay_stop_snapshot.lock().unwrap() = EngineSnapshot::stopped("AirPlay 已停止。");
+    let cleared = manage_dependencies(&runtime, &deps, DependencyAction::Clear).unwrap();
+    assert_eq!(cleared.operation, Some(DependencyOperation::Clear));
+    assert_eq!(
+        *deps.managed_actions.lock().unwrap(),
+        vec![DependencyAction::Upgrade, DependencyAction::Clear]
+    );
 }
 
 /// 驗證指定工具版本安裝前同樣會先停止雙引擎，若停止異常則阻擋版本切換。

@@ -44,6 +44,7 @@ describe("投影工具依賴領域規則", () => {
   it("回傳正確的操作與狀態標籤", () => {
     expect(dependencyOperationLabel("upgrade")).toBe("升級工具");
     expect(dependencyOperationLabel("reinstall")).toBe("清除並重新安裝");
+    expect(dependencyOperationLabel("clear")).toBe("清除工具");
     expect(dependencyOperationLabel("installTool")).toBe("安裝指定工具版本");
     expect(dependencyOperationLabel("install")).toBe("準備工具");
     expect(dependencyOperationLabel(null)).toBe("工具狀態");

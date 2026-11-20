@@ -92,7 +92,69 @@ describe("工具管理頁", () => {
     wrapper.unmount();
   });
 
-  /** 驗證後端正在進行維護作業時，升級與重裝按鈕皆應維持停用且不觸發操作。 */
+  /** 驗證清除工具須先經二次確認；取消不呼叫後端，確認後送出 `"clear"`、更新目錄顯示為未偵測並提供重裝入口。 */
+  it("清除工具必須確認，確認後清除狀態、重載目錄並可重新檢查安裝", async () => {
+    const clearedSnapshot = createDependencySnapshot({
+      status: "failed",
+      operation: "clear",
+      message: "已清除所有 Neo AirPlay 專用工具與快取。",
+      missing: ["uxplay 1.73.7", "scrcpy"],
+    });
+    const clearedCatalog = createToolCatalogSnapshot({
+      tools: [
+        createManagedToolInfo({ id: "uxplay", name: "UxPlay", installedVersion: null, selectedVersion: null }),
+        createManagedToolInfo({ id: "scrcpy", installedVersion: null, selectedVersion: null }),
+      ],
+    });
+    const initialCatalog = createToolCatalogSnapshot({
+      tools: [
+        createManagedToolInfo({ id: "uxplay", name: "UxPlay", installedVersion: "1.73.7", selectedVersion: "1.73.6" }),
+        createManagedToolInfo({ id: "scrcpy", installedVersion: "5.0.1", selectedVersion: "4.1" }),
+      ],
+    });
+
+    const getToolCatalog = vi
+      .fn()
+      .mockResolvedValueOnce(initialCatalog)
+      .mockResolvedValueOnce(clearedCatalog);
+    const gateway = createFakeDependencyGateway({
+      getDependencies: vi.fn().mockResolvedValue(ready),
+      getToolCatalog,
+      manageDependencies: vi.fn().mockResolvedValue(clearedSnapshot),
+      installDependencies: vi.fn().mockResolvedValue(ready),
+    });
+    const wrapper = mountToolsPage(gateway);
+
+    await flushPromises();
+    expect(wrapper.find('[data-testid="tools-reset-versions"]').exists()).toBe(true);
+
+    await wrapper.get('[data-testid="tools-clear"]').trigger("click");
+    expect(wrapper.find('[data-testid="tools-clear-confirmation"]').exists()).toBe(true);
+    expect(gateway.manageDependencies).not.toHaveBeenCalled();
+
+    await wrapper.get('[data-testid="tools-clear-cancel"]').trigger("click");
+    expect(wrapper.find('[data-testid="tools-clear-confirmation"]').exists()).toBe(false);
+    expect(gateway.manageDependencies).not.toHaveBeenCalled();
+
+    await wrapper.get('[data-testid="tools-clear"]').trigger("click");
+    await wrapper.get('[data-testid="tools-clear-confirm"]').trigger("click");
+    await flushPromises();
+
+    expect(gateway.manageDependencies).toHaveBeenCalledWith("clear");
+    expect(getToolCatalog).toHaveBeenCalledTimes(2);
+    expect(wrapper.get('[data-testid="tools-status"]').text()).toContain("需要處理");
+    expect(wrapper.get('[data-testid="tools-message"]').text()).toBe("已清除所有 Neo AirPlay 專用工具與快取。");
+    expect(wrapper.get('[data-testid="tools-missing"]').text()).toContain("uxplay 1.73.7");
+    expect(wrapper.get('[data-testid="tool-card-uxplay"]').text()).toContain("尚未偵測");
+    expect(wrapper.find('[data-testid="tools-reset-versions"]').exists()).toBe(false);
+
+    await wrapper.get('[data-testid="tools-retry-install"]').trigger("click");
+    await flushPromises();
+    expect(gateway.installDependencies).toHaveBeenCalledOnce();
+    wrapper.unmount();
+  });
+
+  /** 驗證後端正在進行維護作業時，升級、重裝與清除按鈕皆應維持停用且不觸發操作。 */
   it("維護作業進行中時停用操作", async () => {
     const gateway = createFakeDependencyGateway({
       getDependencies: vi.fn().mockResolvedValue({
@@ -107,7 +169,10 @@ describe("工具管理頁", () => {
     await flushPromises();
     expect(wrapper.get('[data-testid="tools-upgrade"]').attributes("disabled")).toBeDefined();
     expect(wrapper.get('[data-testid="tools-reinstall"]').attributes("disabled")).toBeDefined();
+    expect(wrapper.get('[data-testid="tools-clear"]').attributes("disabled")).toBeDefined();
     await wrapper.get('[data-testid="tools-upgrade"]').trigger("click");
+    await wrapper.get('[data-testid="tools-clear"]').trigger("click");
+    expect(wrapper.find('[data-testid="tools-clear-confirmation"]').exists()).toBe(false);
     expect(gateway.manageDependencies).not.toHaveBeenCalled();
     wrapper.unmount();
   });

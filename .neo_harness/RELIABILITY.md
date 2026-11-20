@@ -19,4 +19,4 @@
 
 - **視窗關閉與程序終止**：關閉主視窗僅隱藏至系統匣；使用者按停止、系統匣結束 App 或 `EngineController` drop 時會終止並等待直接子程序（程序意外結束不自動重啟；OS 強制終止 App 時不保證子程序樹清理）。
 - **設定原子寫入**：設定先寫入同目錄暫存檔再重新命名為 `settings.json`；寫入失敗時回報錯誤且不更新記憶體狀態，並透過 transaction 鎖同步復原 OS 登入啟動項目。
-- **工具升級與重裝**：執行前先阻擋引擎啟動與 ADB 刷新、停止雙引擎並等待舊安裝程序結束，接著清除 GStreamer registry；「重新安裝」另清空目前模式 `engine/` 內的 App 專用檔案，但保留設定、診斷記錄與系統套件。
+- **工具升級、重裝與清除**：執行前先阻擋引擎啟動與 ADB 刷新、停止雙引擎並等待舊安裝程序結束；「升級」會清除 GStreamer registry；「重新安裝」另停止背景 ADB server 並清空目前模式 `engine/` 內的 App 專用檔案後重建；「清除工具」則停止背景 ADB server、清空 `engine/` 專用檔案與 GStreamer registry、移除 `tool-versions.json` 及過渡性 `setup` 標記（保留 `install.log`、設定、診斷記錄與系統套件），驗證缺漏後將狀態轉為 `failed`（需要處理）以供手動或重開 App 補裝。

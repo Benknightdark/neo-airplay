@@ -22,7 +22,8 @@ use crate::infrastructure::process::background_command;
 use crate::infrastructure::process::macos_library_path;
 use crate::infrastructure::process::{
     ensure_safe_directory, find_executable, read_bounded_regular_file, reject_symlink_path,
-    resolved_path, run_with_timeout_env, run_with_timeout_in_path, write_file_atomic_secure,
+    resolved_path, run_with_timeout, run_with_timeout_env, run_with_timeout_in_path,
+    write_file_atomic_secure,
 };
 use serde::Serialize;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
@@ -366,6 +367,7 @@ impl DependencyManager {
                 DependencyOperation::Install => "正在檢查 UxPlay、GStreamer、ADB 與 scrcpy…".into(),
                 DependencyOperation::Upgrade => "正在準備升級投影工具…".into(),
                 DependencyOperation::Reinstall => "正在準備清除並重新安裝…".into(),
+                DependencyOperation::Clear => "正在準備清除已安裝的投影工具…".into(),
                 DependencyOperation::InstallTool => match options.validated_install.as_ref() {
                     Some(validated) => format!(
                         "正在準備安裝 {} {}…",
@@ -924,6 +926,7 @@ pub(crate) fn save_tool_version_preference(
 
 /// 安全刪除 `config_dir/tool-versions.json` 以還原各作業系統內建推薦版。
 pub(crate) fn reset_tool_version_preferences(config_dir: &Path) -> Result<(), String> {
+    reject_symlink_path(config_dir).map_err(|error| format!("設定目錄路徑不安全：{error}"))?;
     let path = config_dir.join(TOOL_VERSIONS_FILE);
     reject_symlink_path(&path).map_err(|error| format!("工具版本設定路徑不安全：{error}"))?;
     remove_file_if_exists(&path)
@@ -1032,8 +1035,19 @@ fn run_setup(
         }
     }
 
+    if operation == DependencyOperation::Clear {
+        return clear_installed_tools(
+            engine_dir,
+            gstreamer_registry_path,
+            setup_dir,
+            config_dir,
+            snapshot,
+        );
+    }
+
     if operation == DependencyOperation::Reinstall {
         publish_installing(snapshot, "正在清除 Neo AirPlay 專用工具與快取…");
+        stop_adb_server_if_present(engine_dir);
         clear_app_tools(engine_dir, gstreamer_registry_path)?;
     } else if operation == DependencyOperation::Upgrade {
         publish_installing(snapshot, "正在升級投影工具並更新 GStreamer 快取…");
@@ -1062,6 +1076,7 @@ fn run_setup(
         }
         DependencyOperation::Upgrade => "正在更新平台相依套件與 Neo AirPlay 工具…".into(),
         DependencyOperation::Reinstall => "正在更新平台相依套件並重新安裝工具…".into(),
+        DependencyOperation::Clear => "正在清除已安裝的投影工具與快取…".into(),
         DependencyOperation::InstallTool => match options.validated_install.as_ref() {
             Some(validated) => format!(
                 "正在背景下載並安裝 {} {}…",
@@ -2000,7 +2015,71 @@ fn remove_if_exists(path: &Path) {
     }
 }
 
-/// 重新安裝前清除應用程式專用工具目錄內容與 GStreamer 快取檔案。
+const ADB_STOP_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// 盡力結束位於受控 `engine_dir` 內的背景 ADB daemon，避免 Windows 上檔案鎖定阻礙工具目錄清除。
+fn stop_adb_server_if_present(engine_dir: &Path) {
+    if let Some(adb_path) = find_executable(engine_dir, "adb", true) {
+        let _ = run_with_timeout(&adb_path, &["kill-server".to_owned()], ADB_STOP_TIMEOUT);
+    }
+}
+
+/// 安全清除 `setup_dir` 內的過渡性安裝標記與暫存腳本，同時保留 `install.log` 供診斷檢視。
+pub(crate) fn clear_transient_setup_files(setup_dir: &Path) -> Result<(), String> {
+    ensure_safe_directory(setup_dir, true)
+        .map_err(|error| format!("安裝記錄目錄不安全，未清除過渡性檔案：{error}"))?;
+    for file_name in [
+        INSTALL_MARKER,
+        INSTALL_RESULT,
+        INSTALL_LAUNCH,
+        INSTALL_PROGRESS,
+        "launch.sh",
+    ] {
+        let path = setup_dir.join(file_name);
+        reject_symlink_path(&path)
+            .map_err(|error| format!("過渡性安裝檔案路徑不安全（{file_name}）：{error}"))?;
+        remove_file_if_exists(&path)?;
+    }
+    Ok(())
+}
+
+/// 清除所有先前已安裝的 Neo AirPlay 專用工具、GStreamer 快取、過渡性標記與自訂版本設定，並檢查缺漏環境。
+///
+/// 保留系統套件管理器套件、接收器設定檔（`settings.json`）與安裝／診斷日誌（`install.log`、`*.jsonl`）。
+pub(crate) fn clear_installed_tools(
+    engine_dir: &Path,
+    gstreamer_registry_path: &Path,
+    setup_dir: &Path,
+    config_dir: &Path,
+    snapshot: &Arc<Mutex<DependencySnapshot>>,
+) -> Result<SetupOutcome, String> {
+    ensure_safe_directory(setup_dir, true)
+        .map_err(|error| format!("無法建立或驗證安裝記錄目錄：{error}"))?;
+    ensure_safe_directory(engine_dir, false)
+        .map_err(|error| format!("無法建立或驗證工具目錄：{error}"))?;
+    reject_symlink_path(config_dir).map_err(|error| format!("設定目錄路徑不安全：{error}"))?;
+
+    publish_installing(snapshot, "正在清除已安裝的投影工具與快取…");
+    stop_adb_server_if_present(engine_dir);
+    clear_app_tools(engine_dir, gstreamer_registry_path)?;
+    reset_tool_version_preferences(config_dir)?;
+    clear_transient_setup_files(setup_dir)?;
+
+    let summary = "已清除所有 Neo AirPlay 專用投影工具、GStreamer 快取與自訂版本偏好。";
+    append_log(&setup_dir.join(INSTALL_LOG), summary);
+
+    stage_installer(setup_dir)?;
+    let runtime = check_runtime(engine_dir, setup_dir, None)?;
+    if runtime.is_ready() {
+        let message = "清除工具後仍偵測到殘留的投影工具，請檢查目錄權限後重試。".to_owned();
+        append_log(&setup_dir.join(INSTALL_LOG), &message);
+        return Err(message);
+    }
+
+    Ok(SetupOutcome::cleared(runtime.missing))
+}
+
+/// 重新安裝或清除工具前，清除應用程式專用工具目錄內容與 GStreamer 快取檔案。
 ///
 /// # 參數
 /// - `engine_dir`: 應用程式管理的投影工具目錄。
