@@ -374,6 +374,7 @@ fn save_settings_sanitizes_and_logs_on_success() {
                 renderer: "invalid".to_owned(),
                 fullscreen: true,
                 start_on_login: true,
+                ..ReceiverSettings::default()
             },
         )
         .unwrap();

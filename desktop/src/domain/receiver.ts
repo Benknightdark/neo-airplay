@@ -23,6 +23,12 @@ export interface EngineSnapshot {
   processId: number | null;
 }
 
+/** AirPlay 區域網路連線 PIN 認證模式。 */
+export type AirplayAuthMode = "none" | "randomPin" | "fixedPin";
+
+/** 單一 AirPlay 廣播名稱允許的最大 UTF-8 位元組數（Bonjour / DNS-SD 實例名稱上限）。 */
+export const MAX_RECEIVER_NAME_UTF8_BYTES = 63;
+
 /** 投影接收器的可持久化設定結構。 */
 export interface ReceiverSettings {
   /** AirPlay 區網廣播名稱。 */
@@ -33,6 +39,14 @@ export interface ReceiverSettings {
   fullscreen: boolean;
   /** 是否於作業系統登入時自動啟動應用程式。 */
   startOnLogin: boolean;
+  /** AirPlay 區網連線 PIN 認證模式。 */
+  airplayAuthMode: AirplayAuthMode;
+  /** 固定 PIN 模式下的 4 位數字密碼（非固定模式時為空字串）。 */
+  airplayPin: string;
+  /** 啟動 Android 投影時是否停用電腦與裝置間的自動剪貼簿同步。 */
+  androidNoClipboardSync: boolean;
+  /** 啟動 Android 投影時是否限制為唯讀模式（禁止操控與檔案拖放安裝）。 */
+  androidReadOnly: boolean;
 }
 
 /** 儀表板畫面一次讀取所需的完整後端狀態快照。 */
@@ -96,43 +110,128 @@ export function airplayButtonLabel(status: EngineStatus): string {
   return "停止接收";
 }
 
+/** 控制字元與 Unicode 雙向（Bidi）方向覆寫字元正規運算式。 */
+const CONTROL_OR_BIDI_PATTERN =
+  // eslint-disable-next-line no-control-regex
+  /[\u0000-\u001F\u007F-\u009F\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+
 /**
- * 依據 AirPlay 狀態與接收器廣播名稱組合儀表板提示說明文字。
+ * 依 UTF-8 字元邊界截斷字串，確保不超過指定位元組上限。
+ */
+function truncateUtf8Bytes(value: string, maxBytes: number): string {
+  const encoder = new TextEncoder();
+  if (encoder.encode(value).length <= maxBytes) {
+    return value;
+  }
+  let result = "";
+  let usedBytes = 0;
+  for (const ch of value) {
+    const chBytes = encoder.encode(ch).length;
+    if (usedBytes + chBytes > maxBytes) {
+      break;
+    }
+    result += ch;
+    usedBytes += chBytes;
+  }
+  return result.trimEnd();
+}
+
+/**
+ * 移除控制與 Bidi 字元並修剪前後空白，作為接收器名稱正規化前處理。
+ */
+export function normalizeReceiverNameInput(name: string): string {
+  return name.replace(CONTROL_OR_BIDI_PATTERN, "").trim();
+}
+
+/**
+ * 計算正規化後接收器名稱的 UTF-8 位元組數。
+ */
+export function receiverNameUtf8Bytes(name: string): number {
+  return new TextEncoder().encode(normalizeReceiverNameInput(name)).length;
+}
+
+/**
+ * 驗證 AirPlay PIN 設定於固定 PIN 模式下是否為精確 4 位 ASCII 數字。
+ */
+export function isAirplayPinValid(mode: AirplayAuthMode, pin: string): boolean {
+  if (mode !== "fixedPin") {
+    return true;
+  }
+  return /^\d{4}$/.test(pin.trim());
+}
+
+/**
+ * 依據 AirPlay 狀態、接收器廣播名稱與 PIN 驗證模式組合儀表板提示說明文字。
  *
  * @param status AirPlay 引擎目前狀態。
  * @param receiverName 目前設定的接收器名稱。
+ * @param airplayAuthMode 目前設定的 AirPlay 認證模式。
  * @returns 對應狀態的使用指引或環境需求提示。
  */
-export function airplayHint(status: EngineStatus, receiverName: string): string {
+export function airplayHint(
+  status: EngineStatus,
+  receiverName: string,
+  airplayAuthMode: AirplayAuthMode = "none",
+): string {
   if (status === "starting") {
     return "正在等待 Bonjour 廣播；接收器出現在 iPhone 清單後即可連線。";
   }
   if (status === "running") {
-    return `請從 iPhone 的螢幕鏡像清單選擇「${receiverName}」。`;
+    const base = `請從 iPhone 的螢幕鏡像清單選擇「${receiverName}」。`;
+    if (airplayAuthMode === "randomPin") {
+      return `${base} 連線時請輸入診斷記錄顯示的一次性 PIN。`;
+    }
+    if (airplayAuthMode === "fixedPin") {
+      return `${base} 連線時請輸入設定的 4 位數字 PIN。`;
+    }
+    return base;
   }
   return "需要安裝 UxPlay 與影音執行環境";
 }
 
 /**
- * 驗證使用者輸入的接收器名稱在修剪前後空白後是否非空。
+ * 驗證使用者輸入的接收器名稱在清理控制／Bidi 字元並修剪前後空白後非空且不超過 63 UTF-8 位元組。
  *
  * @param name 待驗證的接收器名稱字串。
- * @returns 若包含至少一個非空白字元則回傳 `true`。
+ * @returns 若符合長度與內容要求則回傳 `true`。
  */
 export function isReceiverNameValid(name: string): boolean {
-  return name.trim().length > 0;
+  const normalized = normalizeReceiverNameInput(name);
+  if (normalized.length === 0) {
+    return false;
+  }
+  return receiverNameUtf8Bytes(normalized) <= MAX_RECEIVER_NAME_UTF8_BYTES;
 }
 
 /**
- * 清理接收器設定物件，確保 `receiverName` 若為全空白時退回 `"Neo AirPlay"`。
+ * 清理接收器設定物件，確保 `receiverName` 安全且不超過 63 UTF-8 位元組，並正規化 AirPlay PIN 與 Android 安全選項。
  *
  * @param settings 原始接收器設定物件。
  * @returns 正規化後的新 `ReceiverSettings` 物件（不突變輸入參數）。
  */
 export function sanitizeReceiverSettings(settings: ReceiverSettings): ReceiverSettings {
-  const trimmedName = settings.receiverName.trim();
+  const normalizedName = normalizeReceiverNameInput(settings.receiverName);
+  const boundedName = truncateUtf8Bytes(normalizedName, MAX_RECEIVER_NAME_UTF8_BYTES);
+  const trimmedPin = settings.airplayPin.trim();
+  const mode = settings.airplayAuthMode ?? "none";
+  let nextMode: AirplayAuthMode = "none";
+  let nextPin = "";
+  if (mode === "randomPin") {
+    nextMode = "randomPin";
+  } else if (mode === "fixedPin") {
+    if (/^\d{4}$/.test(trimmedPin)) {
+      nextMode = "fixedPin";
+      nextPin = trimmedPin;
+    } else {
+      nextMode = "randomPin";
+    }
+  }
   return {
     ...settings,
-    receiverName: trimmedName.length > 0 ? trimmedName : DEFAULT_RECEIVER_NAME,
+    receiverName: boundedName.length > 0 ? boundedName : DEFAULT_RECEIVER_NAME,
+    airplayAuthMode: nextMode,
+    airplayPin: nextPin,
+    androidNoClipboardSync: settings.androidNoClipboardSync ?? true,
+    androidReadOnly: settings.androidReadOnly ?? false,
   };
 }

@@ -1,9 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "主要視窗可使用 Tauri 核心 IPC",
+  "description": "主要視窗僅開放自訂應用指令，不額外授予核心系統外掛權限",
   "windows": ["main"],
-  "permissions": [
-    "core:default"
-  ]
+  "permissions": []
 }

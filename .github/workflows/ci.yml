@@ -38,6 +38,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -72,6 +74,13 @@ jobs:
       - name: Audit frontend dependencies
         working-directory: desktop
         run: bun audit
+
+      - name: Audit Rust dependencies
+        if: runner.os == 'Linux'
+        working-directory: desktop/src-tauri
+        run: |
+          cargo install cargo-audit --locked --version 0.23.0
+          cargo audit
 
       - name: Install desktop test dependencies
         working-directory: desktop-test
@@ -113,6 +122,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -135,6 +145,7 @@ jobs:
             echo "A newer develop commit exists; its CI run will handle the PR."
           fi
 
+          gh auth setup-git
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           ahead_commits="$(git rev-list --count "origin/main..${GITHUB_SHA}")"
           if [[ "$ahead_commits" == "0" ]]; then

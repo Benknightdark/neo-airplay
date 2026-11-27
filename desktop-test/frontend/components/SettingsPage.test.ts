@@ -33,4 +33,33 @@ describe("接收器設定", () => {
       "Saved Receiver",
     );
   });
+
+  /** 驗證固定 PIN 模式會驗證 4 位數字並在有效時提交 AirPlay 與 Android 安全設定。 */
+  it("支援設定 AirPlay PIN 模式與 Android 投影安全開關", async () => {
+    const wrapper = mount(SettingsPage, {
+      props: { settings, rendererOptions: ["Auto"], busy: false },
+    });
+
+    await wrapper.get('[data-testid="airplay-auth-mode"]').setValue("fixedPin");
+    const saveButton = wrapper.get('[data-testid="settings-save"]');
+    expect(saveButton.element).toHaveProperty("disabled", true);
+
+    await wrapper.get('[data-testid="airplay-pin"]').setValue("12a");
+    expect(saveButton.element).toHaveProperty("disabled", true);
+
+    await wrapper.get('[data-testid="airplay-pin"]').setValue("2468");
+    await wrapper.get('[data-testid="android-no-clipboard-toggle"]').setValue(false);
+    await wrapper.get('[data-testid="android-read-only-toggle"]').setValue(true);
+    expect(saveButton.element).toHaveProperty("disabled", false);
+
+    await wrapper.get("form").trigger("submit");
+    const emitted = wrapper.emitted("save");
+    expect(emitted).toHaveLength(1);
+    expect(emitted?.[0]?.[0]).toMatchObject({
+      airplayAuthMode: "fixedPin",
+      airplayPin: "2468",
+      androidNoClipboardSync: false,
+      androidReadOnly: true,
+    });
+  });
 });

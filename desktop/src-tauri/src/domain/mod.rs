@@ -15,7 +15,7 @@ pub mod settings;
 /// 跨作業系統投影工具目錄模型、版本與雜湊白名單驗證及上游版本解析邏輯。
 pub mod tool_catalog;
 
-pub use android::{parse_adb_devices, AndroidDevice, AndroidDeviceStatus};
+pub use android::{is_valid_android_serial, parse_adb_devices, AndroidDevice, AndroidDeviceStatus};
 pub use dependency::{
     first_useful_line, interrupted_install_detail, parse_missing_dependencies, stage_label,
     DependencyAction, DependencyOperation, DependencySnapshot, InstallProgress, InstallResult,
@@ -28,7 +28,8 @@ pub use engine::{
 };
 pub use error::{DomainError, DomainResult, ErrorKind};
 pub use settings::{
-    available_renderers, renderer_argument, ReceiverName, ReceiverSettings, VideoRenderer,
+    available_renderers, renderer_argument, sanitize_airplay_pin, AirplayAuthMode, ReceiverName,
+    ReceiverSettings, VideoRenderer,
 };
 pub use tool_catalog::{
     build_tool_catalog_snapshot, default_scrcpy_sha256, default_uxplay_spec,

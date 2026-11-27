@@ -169,6 +169,7 @@ $env:RUSTUP_HOME = Join-Path $script:SetupUserProfile '.rustup'
 $script:InstallStage = 'checking'
 $script:InstallMessage = '正在檢查投影工具…'
 $script:InstallFailure = $null
+$script:ResolvedUxPlaySha256 = ''
 $MsysPackages = @(
     'mingw-w64-ucrt-x86_64-cmake',
     'mingw-w64-ucrt-x86_64-gcc',
@@ -188,11 +189,62 @@ $MsysPackages = @(
 
 function Write-Info([string]$Message) {
     if ($LogFile -and -not $Check) {
+        Assert-NotReparsePoint $LogFile
         $stream = [IO.FileStream]::new($LogFile, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
         $writer = [IO.StreamWriter]::new($stream, [Text.UTF8Encoding]::new($false))
         try { $writer.WriteLine($Message) } finally { $writer.Dispose() }
     } else {
         Write-Host $Message
+    }
+}
+
+function Copy-FileAtomicSecure([string]$Source, [string]$Destination) {
+    Assert-NotReparsePoint $Source
+    Assert-NotReparsePoint $Destination
+    $sourceItem = Get-Item -LiteralPath $Source -Force -ErrorAction Stop
+    if ($sourceItem.PSIsContainer) {
+        Stop-Setup "Refusing non-file copy source: $Source"
+    }
+    $directory = Split-Path -Parent $Destination
+    if ($directory) {
+        Assert-NotReparsePoint $directory
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+        Assert-NotReparsePoint $directory
+    }
+    $temporary = "$Destination.stage.$([Guid]::NewGuid().ToString('N'))"
+    try {
+        Copy-Item -LiteralPath $Source -Destination $temporary -Force
+        Assert-NotReparsePoint $temporary
+        Assert-NotReparsePoint $Destination
+        if (Test-Path -LiteralPath $Destination -PathType Leaf) {
+            [IO.File]::Replace($temporary, $Destination, [NullString]::Value)
+        } else {
+            [IO.File]::Move($temporary, $Destination)
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Assert-AllowedDownloadHost([Uri]$Uri, [string]$Label) {
+    if ($Uri.Scheme -ne 'https') {
+        Stop-Setup "Refusing non-HTTPS URL for ${Label}: $Uri"
+    }
+    if (-not [string]::IsNullOrEmpty($Uri.UserInfo) -or -not $Uri.IsDefaultPort) {
+        Stop-Setup "Refusing URL with unexpected authority for ${Label}: $Uri"
+    }
+    $allowedHosts = @(
+        'github.com',
+        'codeload.github.com',
+        'objects.githubusercontent.com',
+        'release-assets.githubusercontent.com',
+        'raw.githubusercontent.com',
+        'static.rust-lang.org',
+        'nodejs.org'
+    )
+    $hostName = $Uri.Host.ToLowerInvariant()
+    if ($allowedHosts -notcontains $hostName) {
+        Stop-Setup "Refusing download host outside official allowlist for ${Label}: $hostName"
     }
 }
 
@@ -238,12 +290,10 @@ function Assert-MicrosoftSignedFile([string]$Path) {
     }
 }
 
-function Invoke-HttpsDownloadStream([string]$Uri, [string]$Destination, [string]$Label) {
+function Invoke-HttpsDownloadStream([string]$Uri, [string]$Destination, [string]$Label, [long]$MaxBytes = 268435456) {
     $currentUri = [Uri]$Uri
     for ($hop = 0; $hop -le 5; $hop++) {
-        if ($currentUri.Scheme -ne 'https') {
-            Stop-Setup "Refusing non-HTTPS URL for ${Label}: $currentUri"
-        }
+        Assert-AllowedDownloadHost $currentUri $Label
         $request = [Net.HttpWebRequest]::CreateHttp($currentUri)
         $request.AllowAutoRedirect = $false
         $request.Timeout = 30000
@@ -258,22 +308,36 @@ function Invoke-HttpsDownloadStream([string]$Uri, [string]$Destination, [string]
                     Stop-Setup "Redirect response missing Location header while downloading $Label."
                 }
                 $nextUri = [Uri]::new($currentUri, $location)
-                if ($nextUri.Scheme -ne 'https') {
-                    Stop-Setup "Refusing non-HTTPS redirect target for ${Label}: $nextUri"
-                }
+                Assert-AllowedDownloadHost $nextUri $Label
                 $currentUri = $nextUri
                 continue
             }
             if ($statusCode -lt 200 -or $statusCode -ge 300) {
                 Stop-Setup "Download failed for $Label with HTTP status $statusCode."
             }
+            if ($response.ContentLength -gt $MaxBytes) {
+                Stop-Setup "Download size ($($response.ContentLength) bytes) exceeds limit ($MaxBytes bytes) for $Label."
+            }
             $responseStream = $response.GetResponseStream()
+            $completed = $false
             try {
                 $fileStream = [IO.File]::Open($Destination, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
                 try {
-                    $responseStream.CopyTo($fileStream)
+                    $buffer = New-Object byte[] 65536
+                    [long]$totalBytes = 0
+                    while (($read = $responseStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                        $totalBytes += $read
+                        if ($totalBytes -gt $MaxBytes) {
+                            Stop-Setup "Download stream exceeded $MaxBytes byte limit for $Label."
+                        }
+                        $fileStream.Write($buffer, 0, $read)
+                    }
+                    $completed = $true
                 } finally {
                     $fileStream.Dispose()
+                    if (-not $completed -and (Test-Path -LiteralPath $Destination)) {
+                        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+                    }
                 }
             } finally {
                 $responseStream.Dispose()
@@ -353,7 +417,7 @@ function Resolve-ScrcpyOfficialSha256([string]$Version, [string]$AssetName, [str
     $temporary = Join-Path $env:TEMP ("scrcpy-sums-" + [Guid]::NewGuid().ToString('N') + '.txt')
     try {
         Enable-TlsSecurity
-        Invoke-HttpsDownloadStream $sumsUrl $temporary "Official scrcpy v$Version SHA256SUMS.txt"
+        Invoke-HttpsDownloadStream $sumsUrl $temporary "Official scrcpy v$Version SHA256SUMS.txt" 1048576
         $content = [IO.File]::ReadAllText($temporary)
         $resolved = Find-ScrcpyChecksumInManifest $content $AssetName
         if (-not $resolved) {
@@ -379,6 +443,9 @@ function Expand-ZipArchiveSafely([string]$ArchivePath, [string]$DestinationDirec
     try {
         foreach ($entry in $archive.Entries) {
             if ([string]::IsNullOrEmpty($entry.FullName)) { continue }
+            if ($entry.FullName -match '^[a-zA-Z]:|^[/\\]') {
+                Stop-Setup "Archive entry uses unsafe rooted path: $($entry.FullName)"
+            }
             $relativePath = $entry.FullName -replace '/', [IO.Path]::DirectorySeparatorChar
             $targetPath = [IO.Path]::GetFullPath((Join-Path $resolvedDestination $relativePath))
             if (-not $targetPath.StartsWith($resolvedDestination, $comparison)) {
@@ -576,11 +643,20 @@ function Ensure-WinGet {
 
     Write-Info 'Bootstrapping WinGet with the pinned and signed Microsoft PowerShell module.'
     $winGetClientVersion = '1.29.380'
-    Install-PackageProvider -Name NuGet -MinimumVersion '2.8.5.201' -Force -Confirm:$false | Out-Null
-    Install-Module -Name Microsoft.WinGet.Client -RequiredVersion $winGetClientVersion -Force -Repository PSGallery -Confirm:$false
+    Install-PackageProvider -Name NuGet -MinimumVersion '2.8.5.201' -Scope AllUsers -Force -Confirm:$false | Out-Null
+    Install-Module -Name Microsoft.WinGet.Client -RequiredVersion $winGetClientVersion -Scope AllUsers -Force -Repository PSGallery -Confirm:$false
     $module = Get-Module -ListAvailable -Name Microsoft.WinGet.Client | Where-Object { $_.Version -eq [Version]$winGetClientVersion } | Select-Object -First 1
     if (-not $module) {
         Stop-Setup "Pinned Microsoft.WinGet.Client $winGetClientVersion was not found after installation."
+    }
+    $programFilesRoot = [IO.Path]::GetFullPath($env:ProgramFiles)
+    if (-not $programFilesRoot.EndsWith([IO.Path]::DirectorySeparatorChar)) {
+        $programFilesRoot += [IO.Path]::DirectorySeparatorChar
+    }
+    $moduleBase = [IO.Path]::GetFullPath($module.ModuleBase)
+    Assert-NotReparsePoint $moduleBase
+    if (-not $moduleBase.StartsWith($programFilesRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        Stop-Setup "Refusing Microsoft.WinGet.Client outside ProgramFiles: $moduleBase"
     }
     foreach ($moduleFile in (Get-ChildItem -LiteralPath $module.ModuleBase -Include '*.psd1', '*.psm1', '*.ps1', '*.dll' -Recurse -File)) {
         Assert-MicrosoftSignedFile $moduleFile.FullName
@@ -625,10 +701,20 @@ function Get-MsysRoot {
     }
     foreach ($candidate in ($candidates | Select-Object -Unique)) {
         if (-not $candidate -or -not (Test-LocalSafePath $candidate)) { continue }
-        $item = Get-Item -LiteralPath $candidate -Force -ErrorAction SilentlyContinue
-        if ($null -ne $item -and (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { continue }
-        if (Test-Path -LiteralPath (Join-Path $candidate 'usr\bin\bash.exe') -PathType Leaf) {
-            return (Get-Item -LiteralPath $candidate).FullName
+        $candidateInfo = Get-Item -LiteralPath $candidate -Force -ErrorAction SilentlyContinue
+        if ($null -eq $candidateInfo -or (($candidateInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) { continue }
+        $bashPath = Join-Path $candidate 'usr\bin\bash.exe'
+        if (-not (Test-Path -LiteralPath $bashPath -PathType Leaf)) { continue }
+        $reparseDetected = $false
+        foreach ($rel in @('usr', 'usr\bin', 'usr\bin\bash.exe', 'ucrt64', 'ucrt64\bin')) {
+            $subItem = Get-Item -LiteralPath (Join-Path $candidate $rel) -Force -ErrorAction SilentlyContinue
+            if ($null -ne $subItem -and (($subItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)) {
+                $reparseDetected = $true
+                break
+            }
+        }
+        if (-not $reparseDetected) {
+            return $candidateInfo.FullName
         }
     }
     return $null
@@ -983,7 +1069,18 @@ function Sync-MsysTrust {
             }
         }
         if ($pemBuilder.Length -gt 0) {
-            [IO.File]::WriteAllText($pemFile, $pemBuilder.ToString(), [Text.UTF8Encoding]::new($false))
+            $pemTemp = "$pemFile.tmp.$([Guid]::NewGuid().ToString('N'))"
+            try {
+                [IO.File]::WriteAllText($pemTemp, $pemBuilder.ToString(), [Text.UTF8Encoding]::new($false))
+                Assert-NotReparsePoint $pemFile
+                if (Test-Path -LiteralPath $pemFile -PathType Leaf) {
+                    [IO.File]::Replace($pemTemp, $pemFile, [NullString]::Value)
+                } else {
+                    [IO.File]::Move($pemTemp, $pemFile)
+                }
+            } finally {
+                if (Test-Path -LiteralPath $pemTemp) { Remove-Item -LiteralPath $pemTemp -Force -ErrorAction SilentlyContinue }
+            }
             Invoke-Msys 'update-ca-trust'
         }
     }
@@ -991,10 +1088,17 @@ function Sync-MsysTrust {
     if (Test-Path -LiteralPath $pacmanConf -PathType Leaf) {
         Assert-NotReparsePoint $pacmanConf
         $confContent = Get-Content -LiteralPath $pacmanConf -Raw
-        if ($confContent -match '(?m)^SigLevel\s*=\s*Never\b') {
-            $confContent = [regex]::Replace($confContent, '(?m)^SigLevel\s*=\s*Never\b.*$', 'SigLevel = Required DatabaseOptional')
-            [IO.File]::WriteAllText($pacmanConf, $confContent, [Text.UTF8Encoding]::new($false))
-            Write-Info 'Restored MSYS2 pacman SigLevel from Never to Required DatabaseOptional.'
+        if ($confContent -match '(?im)^\s*SigLevel\s*=.*\b(Never|TrustAll)\b') {
+            $confContent = [regex]::Replace($confContent, '(?im)^\s*SigLevel\s*=.*\b(Never|TrustAll)\b.*$', 'SigLevel = Required DatabaseOptional')
+            $confTemp = "$pacmanConf.tmp.$([Guid]::NewGuid().ToString('N'))"
+            try {
+                [IO.File]::WriteAllText($confTemp, $confContent, [Text.UTF8Encoding]::new($false))
+                Assert-NotReparsePoint $pacmanConf
+                [IO.File]::Replace($confTemp, $pacmanConf, [NullString]::Value)
+            } finally {
+                if (Test-Path -LiteralPath $confTemp) { Remove-Item -LiteralPath $confTemp -Force -ErrorAction SilentlyContinue }
+            }
+            Write-Info 'Restored MSYS2 pacman SigLevel to Required DatabaseOptional.'
         }
     }
     Invoke-Msys 'pacman-key --init && pacman-key --populate msys2'
@@ -1096,19 +1200,22 @@ function Stage-MsysRuntime {
 
     if ($Upgrade) {
         foreach ($path in @($pluginTarget, $shareTarget)) {
-            if (Test-Path -LiteralPath $path -PathType Container) {
+            if (Test-Path -LiteralPath $path) {
+                Assert-NotReparsePoint $path
                 Remove-Item -LiteralPath $path -Recurse -Force
             }
         }
         foreach ($name in @('gst-inspect-1.0.exe', 'gst-plugin-scanner.exe')) {
-            Remove-Item -LiteralPath (Join-Path $script:EngineBin $name) -Force -ErrorAction SilentlyContinue
+            $targetExec = Join-Path $script:EngineBin $name
+            Assert-NotReparsePoint $targetExec
+            Remove-Item -LiteralPath $targetExec -Force -ErrorAction SilentlyContinue
         }
     }
 
     foreach ($library in (Get-ChildItem -LiteralPath $ucrtBin -Filter '*.dll' -File)) {
         $targetLibrary = Join-Path $script:EngineBin $library.Name
         if ($Upgrade -or -not (Test-Path -LiteralPath $targetLibrary -PathType Leaf) -or $library.Name -match '^(av|sw|postproc)') {
-            Copy-Item -LiteralPath $library.FullName -Destination $targetLibrary -Force
+            Copy-FileAtomicSecure $library.FullName $targetLibrary
         }
     }
     $libexecScanner = Join-Path $script:MsysRoot 'ucrt64\libexec\gstreamer-1.0\gst-plugin-scanner.exe'
@@ -1118,22 +1225,62 @@ function Stage-MsysRuntime {
         $libexecScanner
     )) {
         if (Test-Path -LiteralPath $source -PathType Leaf) {
-            Copy-Item -LiteralPath $source -Destination (Join-Path $script:EngineBin ([IO.Path]::GetFileName($source))) -Force
+            Copy-FileAtomicSecure $source (Join-Path $script:EngineBin ([IO.Path]::GetFileName($source)))
         }
     }
     if (Test-Path -LiteralPath $pluginSource -PathType Container) {
-        if ($Upgrade -and (Test-Path -LiteralPath $pluginTarget -PathType Container)) {
+        Assert-NotReparsePoint $pluginSource
+        if ($Upgrade -and (Test-Path -LiteralPath $pluginTarget)) {
+            Assert-NotReparsePoint $pluginTarget
             Remove-Item -LiteralPath $pluginTarget -Recurse -Force
         }
+        Assert-NotReparsePoint $pluginTarget
         New-Item -ItemType Directory -Path $pluginTarget -Force | Out-Null
+        Assert-NotReparsePoint $pluginTarget
         Get-ChildItem -LiteralPath $pluginSource -Force | Copy-Item -Destination $pluginTarget -Recurse -Force
     }
     if (Test-Path -LiteralPath $shareSource -PathType Container) {
-        if ($Upgrade -and (Test-Path -LiteralPath $shareTarget -PathType Container)) {
+        Assert-NotReparsePoint $shareSource
+        if ($Upgrade -and (Test-Path -LiteralPath $shareTarget)) {
+            Assert-NotReparsePoint $shareTarget
             Remove-Item -LiteralPath $shareTarget -Recurse -Force
         }
+        Assert-NotReparsePoint $shareTarget
         New-Item -ItemType Directory -Path $shareTarget -Force | Out-Null
+        Assert-NotReparsePoint $shareTarget
         Get-ChildItem -LiteralPath $shareSource -Force | Copy-Item -Destination $shareTarget -Recurse -Force
+    }
+}
+
+function Assert-SafeTarArchive([string]$ArchivePath) {
+    $env:NEO_SETUP_TAR_CHECK = ConvertTo-MsysPath $ArchivePath
+    try {
+        $command = @'
+set -euo pipefail
+list_output="$(LC_ALL=C LANG=C tar -tzf "$NEO_SETUP_TAR_CHECK")"
+while IFS= read -r entry; do
+  [ -z "$entry" ] && continue
+  case "$entry" in
+    /*) printf 'Archive entry uses absolute path: %s\n' "$entry" >&2; exit 1 ;;
+  esac
+  if printf '%s\n' "$entry" | grep -Eq '(^|/)\.\.(/|$)'; then
+    printf 'Archive entry escapes destination directory: %s\n' "$entry" >&2
+    exit 1
+  fi
+done <<< "$list_output"
+detail_output="$(LC_ALL=C LANG=C tar -tvzf "$NEO_SETUP_TAR_CHECK")"
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  case "$line" in
+    [lhbcp]*|*" link to "*)
+      printf 'Refusing unsafe link or special entry in archive: %s\n' "$line" >&2
+      exit 1 ;;
+  esac
+done <<< "$detail_output"
+'@
+        Invoke-Msys $command
+    } finally {
+        Remove-Item Env:\NEO_SETUP_TAR_CHECK -ErrorAction SilentlyContinue
     }
 }
 
@@ -1149,7 +1296,8 @@ function Install-UxPlay {
     $archive = Join-Path $tempRoot 'uxplay.tar.gz'
     $source = Join-Path $tempRoot 'source'
     $build = Join-Path $tempRoot 'build'
-    New-Item -ItemType Directory -Path $source -Force | Out-Null
+    $staged = Join-Path $tempRoot 'staged'
+    New-Item -ItemType Directory -Path $source, $staged -Force | Out-Null
     try {
         Set-InstallStage 'uxplay-download' '正在下載 AirPlay 投影工具…'
         Write-Info "Downloading UxPlay $UxPlayVersion source ($UxPlayCommit)."
@@ -1159,21 +1307,31 @@ function Install-UxPlay {
             Write-Info "Downloading UxPlay ($UxPlayCommit) via HTTPS TLS 1.2+ without pinned SHA-256."
             Enable-TlsSecurity
             Invoke-HttpsDownloadStream $UxPlayUrl $archive "UxPlay $UxPlayVersion source archive"
+            $script:ResolvedUxPlaySha256 = Get-FileSha256 $archive
         } else {
             Stop-Setup "Refusing to download UxPlay source without SHA-256 verification."
         }
 
+        Assert-SafeTarArchive $archive
         $env:NEO_SETUP_ARCHIVE = ConvertTo-MsysPath $archive
         $env:NEO_SETUP_SOURCE = ConvertTo-MsysPath $source
         $env:NEO_SETUP_BUILD = ConvertTo-MsysPath $build
         $env:NEO_SETUP_ENGINE = ConvertTo-MsysPath $script:EngineDirectory
+        $env:NEO_SETUP_STAGED = ConvertTo-MsysPath $staged
         Set-InstallStage 'uxplay-build' '正在編譯 AirPlay 投影工具…'
-        Invoke-Msys 'tar -xzf "$NEO_SETUP_ARCHIVE" -C "$NEO_SETUP_SOURCE" --strip-components=1 && /ucrt64/bin/cmake -S "$NEO_SETUP_SOURCE" -B "$NEO_SETUP_BUILD" -G Ninja -DCMAKE_C_COMPILER=/ucrt64/bin/gcc.exe -DCMAKE_CXX_COMPILER=/ucrt64/bin/g++.exe -DCMAKE_INSTALL_PREFIX="$NEO_SETUP_ENGINE" && /ucrt64/bin/cmake --build "$NEO_SETUP_BUILD" --parallel'
+        Invoke-Msys 'tar --no-same-owner --no-same-permissions -xzf "$NEO_SETUP_ARCHIVE" -C "$NEO_SETUP_SOURCE" --strip-components=1 && /ucrt64/bin/cmake -S "$NEO_SETUP_SOURCE" -B "$NEO_SETUP_BUILD" -G Ninja -DCMAKE_C_COMPILER=/ucrt64/bin/gcc.exe -DCMAKE_CXX_COMPILER=/ucrt64/bin/g++.exe -DCMAKE_INSTALL_PREFIX="$NEO_SETUP_ENGINE" && /ucrt64/bin/cmake --build "$NEO_SETUP_BUILD" --parallel'
         Set-InstallStage 'uxplay-install' '正在安裝 AirPlay 投影工具…'
-        Invoke-Msys 'cmake --install "$NEO_SETUP_BUILD"'
+        Invoke-Msys 'cmake --install "$NEO_SETUP_BUILD" --prefix "$NEO_SETUP_STAGED"'
+        $stagedUxPlay = Join-Path $staged 'bin\uxplay.exe'
+        if (-not (Test-Path -LiteralPath $stagedUxPlay -PathType Leaf)) {
+            $fallback = Join-Path $staged 'bin\uxplay'
+            if (Test-Path -LiteralPath $fallback -PathType Leaf) { $stagedUxPlay = $fallback }
+            else { Stop-Setup 'Built UxPlay executable was not found in staging directory.' }
+        }
+        Copy-FileAtomicSecure $stagedUxPlay (Join-Path $script:EngineBin ([IO.Path]::GetFileName($stagedUxPlay)))
     }
     finally {
-        Remove-Item Env:\NEO_SETUP_ARCHIVE, Env:\NEO_SETUP_SOURCE, Env:\NEO_SETUP_BUILD, Env:\NEO_SETUP_ENGINE -ErrorAction SilentlyContinue
+        Remove-Item Env:\NEO_SETUP_ARCHIVE, Env:\NEO_SETUP_SOURCE, Env:\NEO_SETUP_BUILD, Env:\NEO_SETUP_ENGINE, Env:\NEO_SETUP_STAGED -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
     }
 }
@@ -1215,10 +1373,7 @@ function Install-Scrcpy {
         New-Item -ItemType Directory -Path $script:EngineBin -Force | Out-Null
         Assert-NotReparsePoint $script:EngineBin
         foreach ($file in (Get-ChildItem -LiteralPath $bundle.FullName -File -Force)) {
-            Assert-NotReparsePoint $file.FullName
-            $targetFile = Join-Path $script:EngineBin $file.Name
-            Assert-NotReparsePoint $targetFile
-            Copy-Item -LiteralPath $file.FullName -Destination $targetFile -Force
+            Copy-FileAtomicSecure $file.FullName (Join-Path $script:EngineBin $file.Name)
         }
     }
     finally {
@@ -1341,9 +1496,9 @@ function Install-Bun {
         Assert-NotReparsePoint $source.FullName
         Assert-NotReparsePoint $bunRoot
         New-Item -ItemType Directory -Path $bunRoot -Force | Out-Null
+        Assert-NotReparsePoint $bunRoot
         $targetBun = Join-Path $bunRoot 'bun.exe'
-        Assert-NotReparsePoint $targetBun
-        Copy-Item -LiteralPath $source.FullName -Destination $targetBun -Force
+        Copy-FileAtomicSecure $source.FullName $targetBun
         Add-UserPathEntry $bunRoot
         $env:Path = "$bunRoot;$env:Path"
     } finally {
@@ -1379,7 +1534,18 @@ function Install-NodeBinary {
         }
         Assert-NotReparsePoint $nodeRoot
         New-Item -ItemType Directory -Path $nodeRoot -Force | Out-Null
-        Copy-Item -Path (Join-Path $sourceRoot.FullName '*') -Destination $nodeRoot -Recurse -Force
+        Assert-NotReparsePoint $nodeRoot
+        foreach ($nodeEntry in (Get-ChildItem -LiteralPath $sourceRoot.FullName -Recurse -Force)) {
+            Assert-NotReparsePoint $nodeEntry.FullName
+            $relative = $nodeEntry.FullName.Substring($sourceRoot.FullName.Length).TrimStart('\', '/')
+            $targetEntry = Join-Path $nodeRoot $relative
+            if ($nodeEntry.PSIsContainer) {
+                Assert-NotReparsePoint $targetEntry
+                New-Item -ItemType Directory -Path $targetEntry -Force | Out-Null
+            } else {
+                Copy-FileAtomicSecure $nodeEntry.FullName $targetEntry
+            }
+        }
         Add-UserPathEntry $nodeRoot
         $env:Path = "$nodeRoot;$env:Path"
     } finally {
@@ -1504,7 +1670,12 @@ function Complete-Install([int]$ExitCode) {
     if ($script:DelegatedToElevated -or (Test-ElevatedPrerequisitesMode)) { return }
     try {
         if ($ResultFile) {
-            Write-InstallJson $ResultFile @{ pid = $PID; exitCode = $ExitCode; stage = $script:InstallStage; message = $script:InstallFailure }
+            $payload = @{ pid = $PID; exitCode = $ExitCode; stage = $script:InstallStage; message = $script:InstallFailure }
+            $resolvedUxPlaySha = Get-Variable -Scope Script -Name ResolvedUxPlaySha256 -ValueOnly -ErrorAction SilentlyContinue
+            if ($ExitCode -eq 0 -and $resolvedUxPlaySha) {
+                $payload.resolvedSha256 = $resolvedUxPlaySha
+            }
+            Write-InstallJson $ResultFile $payload
         }
     } finally {
         if ($MarkerFile -and (Test-Path -LiteralPath $MarkerFile)) {

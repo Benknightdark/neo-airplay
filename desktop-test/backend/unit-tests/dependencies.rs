@@ -177,9 +177,32 @@ fn install_test_child_process() {
             exit_code: 0,
             stage: None,
             message: None,
+            resolved_sha256: None,
         },
     )
     .unwrap();
+}
+
+/// 同一測試程序內遞增的暫存目錄序號，避免 macOS 時鐘僅有微秒精度時平行測試取得相同路徑。
+static TEST_DIRECTORY_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 建立含 PID、時間戳與遞增序號的唯一暫存測試目錄路徑。
+///
+/// # 參數
+/// - `prefix`: 測試目錄名稱前綴。
+///
+/// # 回傳值
+/// 回傳位於系統暫存目錄下且不與平行測試衝突的 `PathBuf`。
+fn unique_test_directory(prefix: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let sequence = TEST_DIRECTORY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "{prefix}-{}-{nonce}-{sequence}",
+        std::process::id()
+    ))
 }
 
 /// 建立安裝日誌測試專用的隔離暫存目錄。
@@ -187,14 +210,7 @@ fn install_test_child_process() {
 /// # 回傳值
 /// 回傳位於系統暫存目錄下的唯一測試目錄 `PathBuf`。
 fn install_log_test_directory() -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "neo-install-log-test-{}-{nonce}",
-        std::process::id()
-    ))
+    unique_test_directory("neo-install-log-test")
 }
 
 /// 啟動執行 `install_test_child_process` 的子程序，並建立測試用暫存目錄與初始快照。
@@ -205,12 +221,7 @@ fn install_log_test_directory() -> PathBuf {
 /// # 回傳值
 /// 回傳 `(directory, snapshot, child)` 元組供安裝等待邏輯測試使用。
 fn install_test_process(mode: &str) -> (PathBuf, Arc<Mutex<DependencySnapshot>>, Child) {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let directory =
-        std::env::temp_dir().join(format!("neo-install-test-{}-{nonce}", std::process::id()));
+    let directory = unique_test_directory("neo-install-test");
     fs::create_dir_all(&directory).unwrap();
     let snapshot = Arc::new(Mutex::new(DependencySnapshot {
         status: "installing".into(),
@@ -238,14 +249,7 @@ fn install_test_process(mode: &str) -> (PathBuf, Arc<Mutex<DependencySnapshot>>,
 /// 驗證清除重裝時僅移除應用程式專用工具與指定的 GStreamer registry，保留 `.GITKEEP`、`.bundled-*` 與其他快取檔。
 #[test]
 fn clean_reinstall_clears_only_engine_files_and_the_selected_cache_file() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let directory = std::env::temp_dir().join(format!(
-        "neo-clean-tools-test-{}-{nonce}",
-        std::process::id()
-    ));
+    let directory = unique_test_directory("neo-clean-tools-test");
     let engine = directory.join("engine");
     let cache = directory.join("cache/gstreamer/registry.bin");
     fs::create_dir_all(engine.join("bin")).unwrap();
@@ -272,14 +276,7 @@ fn clean_reinstall_clears_only_engine_files_and_the_selected_cache_file() {
 /// 驗證升級前只會使目標 GStreamer registry 快取失效而不波及同目錄其他快取檔案。
 #[test]
 fn upgrade_invalidates_only_the_selected_gstreamer_registry() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let directory = std::env::temp_dir().join(format!(
-        "neo-upgrade-cache-test-{}-{nonce}",
-        std::process::id()
-    ));
+    let directory = unique_test_directory("neo-upgrade-cache-test");
     let registry = directory.join("cache/gstreamer/registry.bin");
     fs::create_dir_all(registry.parent().unwrap()).unwrap();
     fs::write(&registry, b"registry").unwrap();
@@ -932,6 +929,105 @@ fn clear_transient_setup_files_rejects_symlinks() {
 
     assert!(clear_transient_setup_files(&setup).is_err());
     assert_eq!(fs::read(&outside).unwrap(), b"keep");
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+/// 驗證首次透過官方 HTTPS 安裝自訂 UxPlay 成功後，`apply_tofu_sha256` 會自動鎖定雜湊並停用未驗證旗標。
+#[test]
+fn apply_tofu_sha256_pins_valid_hash_and_clears_allow_unverified() {
+    let validated = ValidatedToolInstall {
+        tool: ToolId::UxPlay,
+        version: "1.73.6".to_owned(),
+        reference: "v1.73.6".to_owned(),
+        sha256: None,
+        allow_unverified: true,
+        is_default: false,
+    };
+    let valid_sha = "168de53ed688f87c4022d79357ce91f9608ad5c53236bff95134d19b88efeb3f";
+    let result = InstallResult {
+        pid: 1,
+        exit_code: 0,
+        stage: None,
+        message: Some("ok".to_owned()),
+        resolved_sha256: Some(valid_sha.to_uppercase()),
+    };
+
+    let locked = apply_tofu_sha256(&validated, Some(&result));
+    assert_eq!(locked.sha256.as_deref(), Some(valid_sha));
+    assert!(!locked.allow_unverified);
+
+    let bad_result = InstallResult {
+        pid: 1,
+        exit_code: 0,
+        stage: None,
+        message: Some("ok".to_owned()),
+        resolved_sha256: Some("not-a-sha".to_owned()),
+    };
+    let unchanged = apply_tofu_sha256(&validated, Some(&bad_result));
+    assert_eq!(unchanged.sha256, None);
+    assert!(unchanged.allow_unverified);
+}
+
+/// 驗證未釘選且未允許 `allow_unverified` 的自訂 UxPlay 偏好設定載入時會被拒絕清除。
+#[test]
+fn load_tool_version_preferences_rejects_unpinned_uxplay_without_opt_in() {
+    let config_dir = install_log_test_directory();
+    fs::create_dir_all(&config_dir).unwrap();
+    let prefs = ToolVersionPreferences {
+        scrcpy: None,
+        uxplay: Some(PinnedToolVersion {
+            version: "1.73.6".to_owned(),
+            reference: "v1.73.6".to_owned(),
+            sha256: None,
+            allow_unverified: false,
+        }),
+    };
+    fs::write(
+        config_dir.join(TOOL_VERSIONS_FILE),
+        serde_json::to_string(&prefs).unwrap(),
+    )
+    .unwrap();
+
+    let loaded = load_tool_version_preferences(&config_dir);
+    assert!(loaded.uxplay.is_none());
+
+    fs::remove_dir_all(&config_dir).unwrap();
+}
+
+/// 驗證 macOS 終端機啟動包裝腳本使用 `umask 077`、符號連結防護、`env -i` 與 Bash 3.2 安全陣列展開。
+#[test]
+fn build_macos_launch_script_enforces_hardened_wrapper() {
+    let script = build_macos_launch_script(
+        Path::new("/tmp/install.sh"),
+        Path::new("/tmp/install.log"),
+        Path::new("/tmp/engine"),
+        Path::new("/tmp/install.done"),
+        Path::new("/tmp/install-result.json"),
+        &["--only".to_owned(), "uxplay".to_owned()],
+    );
+    assert!(script.contains("umask 077"));
+    assert!(script.contains("if [ -L \"$target\" ]"));
+    assert!(script.contains("exec /usr/bin/env -i"));
+    assert!(script.contains("${extra_args[@]+\"${extra_args[@]}\"}"));
+    assert!(script.contains("'--only' 'uxplay'"));
+}
+
+/// 驗證 `read_log_tail` 拒絕符號連結日誌檔案且不讀取外部目標內容。
+#[cfg(unix)]
+#[test]
+fn read_log_tail_rejects_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let root = install_log_test_directory();
+    let outside = root.join("secret.txt");
+    let log_path = root.join("install.log");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&outside, b"secret-content").unwrap();
+    symlink(&outside, &log_path).unwrap();
+
+    let err = read_log_tail(&log_path, 4096).unwrap_err();
+    assert!(!err.contains("secret-content"));
 
     fs::remove_dir_all(&root).unwrap();
 }

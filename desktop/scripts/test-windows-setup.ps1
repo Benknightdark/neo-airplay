@@ -29,6 +29,7 @@ $script:InstallStage = 'checking'
 $script:InstallMessage = 'Checking tools'
 $script:InstallFailure = $null
 $script:DelegatedToElevated = $false
+$script:ResolvedUxPlaySha256 = ''
 $script:passed = 0
 $Check = $false
 $Upgrade = $false
@@ -473,6 +474,74 @@ try {
         $manifest = "16c3fc2068df64946f670e3504b4752073ebae47a416a45b46e79a5ab19c689b *./scrcpy-winarm64-v5.0.1.zip`nb12a2c4ee8be317422451fc7dcf8ee20a71b5ea7ef9ad73ddd825a25316227a5  scrcpy-win64-v5.0.1.zip"
         Assert-True ((Find-ScrcpyChecksumInManifest $manifest 'scrcpy-win64-v5.0.1.zip') -eq 'b12a2c4ee8be317422451fc7dcf8ee20a71b5ea7ef9ad73ddd825a25316227a5') 'Failed to parse win64 hash'
         Assert-True ((Find-ScrcpyChecksumInManifest $manifest 'scrcpy-winarm64-v5.0.1.zip') -eq '16c3fc2068df64946f670e3504b4752073ebae47a416a45b46e79a5ab19c689b') 'Failed to parse winarm64 hash'
+    }
+
+    Invoke-Scenario 'Assert-AllowedDownloadHost enforces HTTPS host allowlist and rejects credentials or ports' {
+        Assert-AllowedDownloadHost 'https://github.com/FDH2/UxPlay/archive/v1.73.7.tar.gz' 'UxPlay'
+        Assert-AllowedDownloadHost 'https://objects.githubusercontent.com/artifact.zip' 'Artifact'
+        Assert-AllowedDownloadHost 'https://nodejs.org/dist/v24.22.2/node-v24.22.2-win-x64.zip' 'Node.js'
+        foreach ($badUrl in @(
+            'http://github.com/FDH2/UxPlay',
+            'https://evil.example/payload.zip',
+            'https://repo.msys2.org/distrib/msys2.exe',
+            'https://user:pass@github.com/FDH2/UxPlay',
+            'https://github.com:8443/FDH2/UxPlay'
+        )) {
+            $rejected = $false
+            try { Assert-AllowedDownloadHost $badUrl 'Untrusted' } catch { $rejected = $true }
+            Assert-True $rejected "Untrusted URL was accepted: $badUrl"
+        }
+    }
+
+    Invoke-Scenario 'Copy-FileAtomicSecure and Test-LocalSafePath block unsafe targets' {
+        $src = Join-Path $root 'src.bin'
+        $dst = Join-Path $root 'dst-dir\dst.bin'
+        [IO.File]::WriteAllText($src, 'secure-data')
+        Copy-FileAtomicSecure $src $dst
+        Assert-True ([IO.File]::ReadAllText($dst) -eq 'secure-data') 'Copy-FileAtomicSecure failed'
+
+        Assert-True (-not (Test-LocalSafePath '\\server\share\msys64')) 'UNC path must be rejected'
+        Assert-True (-not (Test-LocalSafePath '//server/share/msys64')) 'Forward-slash UNC path must be rejected'
+        Assert-True (-not (Test-LocalSafePath 'relative\path')) 'Relative path must be rejected'
+        Assert-True (Test-LocalSafePath (Join-Path $root 'msys64')) 'Local rooted path must be allowed'
+        if ($env:OS -eq 'Windows_NT') {
+            Assert-True (Test-LocalSafePath 'C:\msys64') 'Windows drive path must be allowed'
+        }
+    }
+
+    Invoke-Scenario 'Expand-ZipArchiveSafely blocks rooted Windows paths and Assert-SafeTarArchive blocks Tar Slip' {
+        Add-Type -AssemblyName System.IO.Compression
+        $zipDir = Join-Path $root 'zip-drive-test'
+        New-Item -ItemType Directory -Path $zipDir -Force | Out-Null
+        $driveZip = Join-Path $zipDir 'drive.zip'
+        $zipStream = [IO.File]::Open($driveZip, [IO.FileMode]::Create)
+        $archive = [IO.Compression.ZipArchive]::new($zipStream, [IO.Compression.ZipArchiveMode]::Create)
+        $entry = $archive.CreateEntry('C:\escaped.txt')
+        $writer = [IO.StreamWriter]::new($entry.Open())
+        $writer.Write('pwned')
+        $writer.Dispose()
+        $archive.Dispose()
+        $zipStream.Dispose()
+
+        $driveBlocked = $false
+        try {
+            Expand-ZipArchiveSafely $driveZip (Join-Path $zipDir 'out')
+        } catch {
+            $driveBlocked = $true
+        }
+        Assert-True $driveBlocked 'Rooted Windows ZIP entry must be blocked'
+
+        function ConvertTo-MsysPath([string]$Path) { return $Path }
+        function Invoke-Msys([string]$Command) {
+            Assert-True ($Command.Contains('tar -tzf')) 'Tar check must list archive entries'
+            Assert-True ($Command.Contains('tar -tvzf')) 'Tar check must inspect archive permissions/links'
+            throw 'Archive entry escapes destination directory: ../../evil.txt'
+        }
+        $fakeArchive = Join-Path $zipDir 'fake.tar.gz'
+        [IO.File]::WriteAllText($fakeArchive, 'stub')
+        $tarBlocked = $false
+        try { Assert-SafeTarArchive $fakeArchive } catch { $tarBlocked = $_.Exception.Message.Contains('escapes destination directory') }
+        Assert-True $tarBlocked 'Assert-SafeTarArchive must propagate traversal failures'
     }
 
     Write-Host "$script:passed installer scenarios passed."

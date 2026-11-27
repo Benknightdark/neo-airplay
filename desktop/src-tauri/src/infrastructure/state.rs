@@ -2,20 +2,21 @@
 
 use crate::application::{DashboardSnapshot, ReceiverRuntime, SettingsRepository};
 use crate::domain::{
-    available_renderers, bonjour_instance_matches, exit_snapshot, parse_adb_devices, AndroidDevice,
-    DomainError, DomainResult, EngineKind, EngineSnapshot, EngineStatus, LogLevel,
-    ReceiverSettings, AIRPLAY_READY_TIMEOUT,
+    available_renderers, bonjour_instance_matches, exit_snapshot, is_valid_android_serial,
+    parse_adb_devices, sanitize_airplay_pin, AirplayAuthMode, AndroidDevice, DomainError,
+    DomainResult, EngineKind, EngineSnapshot, EngineStatus, LogLevel, ReceiverSettings,
+    AIRPLAY_READY_TIMEOUT,
 };
 use crate::infrastructure::persistence::{AppLogger, JsonSettingsRepository};
 #[cfg(target_os = "macos")]
 use crate::infrastructure::process::macos_library_path;
 use crate::infrastructure::process::{
-    background_command, find_executable, first_non_empty_line, resolved_path, run_with_timeout,
-    PROCESS_TIMEOUT,
+    background_command, ensure_safe_directory, find_executable, first_non_empty_line,
+    is_executable_file, is_safe_regular_non_empty_file, read_bounded_lines, reject_symlink_path,
+    resolved_path, run_with_timeout_env_sanitized, sanitize_child_environment,
+    write_file_atomic_secure, DEFAULT_MAX_LOG_LINE_BYTES, PROCESS_TIMEOUT,
 };
-use std::fs;
-use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Mutex;
@@ -59,11 +60,14 @@ impl AppState {
         gstreamer_registry_path: PathBuf,
         require_airplay_discovery: bool,
     ) -> Result<Self, String> {
-        fs::create_dir_all(&config_dir).map_err(|error| error.to_string())?;
-        fs::create_dir_all(&log_dir).map_err(|error| error.to_string())?;
+        ensure_safe_directory(&config_dir, true).map_err(|error| error.to_string())?;
+        ensure_safe_directory(&log_dir, true).map_err(|error| error.to_string())?;
         #[cfg(target_os = "macos")]
-        if let Some(parent) = gstreamer_registry_path.parent() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        if let Some(parent) = gstreamer_registry_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            ensure_safe_directory(parent, true).map_err(|error| error.to_string())?;
         }
 
         let settings_repo = JsonSettingsRepository::new(config_dir.join("settings.json"));
@@ -79,14 +83,16 @@ impl AppState {
                 gstreamer_registry_path,
                 require_airplay_discovery,
                 logger.clone(),
-            ),
+            )
+            .with_config_dir(config_dir.clone()),
             android: EngineController::new(
                 EngineKind::Android,
                 engine_dir,
                 PathBuf::new(),
                 false,
                 logger,
-            ),
+            )
+            .with_config_dir(config_dir),
             android_refresh: Mutex::new(()),
             devices: Mutex::new(Vec::new()),
         })
@@ -152,8 +158,7 @@ impl AppState {
     /// 回傳啟動操作後的 `EngineSnapshot`。
     pub fn start_airplay(&self) -> Result<EngineSnapshot, String> {
         let settings = self.settings()?;
-        let args = settings.airplay_arguments();
-        Ok(self.airplay.start(&args, Some(&settings.receiver_name)))
+        Ok(self.airplay.start_airplay(&settings))
     }
 
     /// 停止運作中的 AirPlay（UxPlay）投影引擎。
@@ -186,11 +191,21 @@ impl AppState {
             return Ok(devices.clone());
         };
 
-        match run_with_timeout(
+        let engine_path = resolved_path(&self.android.engine_dir);
+        match run_with_timeout_env_sanitized(
             &adb_path,
             &["devices".to_owned(), "-l".to_owned()],
             PROCESS_TIMEOUT,
-        ) {
+            Some(engine_path.as_os_str()),
+            &[],
+        )
+        .map_err(|error| {
+            if error == "程序執行逾時。" {
+                "ADB 裝置查詢逾時。".to_owned()
+            } else {
+                error
+            }
+        }) {
             Ok(output) if output.status.success() => {
                 let parsed = parse_adb_devices(&String::from_utf8_lossy(&output.stdout));
                 let mut devices = self
@@ -247,6 +262,9 @@ impl AppState {
     pub fn start_android_mirror(&self, serial: &str) -> Result<EngineSnapshot, String> {
         if serial.trim().is_empty() {
             return Err("請先選擇 Android 裝置。".to_owned());
+        }
+        if !is_valid_android_serial(serial) {
+            return Err("選擇的 Android 裝置序號格式無效。".to_owned());
         }
         let devices = self
             .devices
@@ -399,6 +417,8 @@ pub(crate) struct EngineController {
     kind: EngineKind,
     /// 受控管投影工具根目錄。
     engine_dir: PathBuf,
+    /// 應用程式受保護設定目錄（用於寫入隔離 `uxplay.rc` 與 `uxplay.register`）。
+    config_dir: PathBuf,
     /// macOS 專用 GStreamer registry 快取檔案路徑。
     #[cfg(target_os = "macos")]
     gstreamer_registry_path: PathBuf,
@@ -435,6 +455,7 @@ impl EngineController {
         Self {
             kind,
             engine_dir,
+            config_dir: PathBuf::new(),
             #[cfg(target_os = "macos")]
             gstreamer_registry_path,
             require_airplay_discovery,
@@ -449,6 +470,18 @@ impl EngineController {
         }
     }
 
+    /// 設定此引擎控制器寫入隔離設定檔（如 `uxplay.rc`）所使用的應用程式設定目錄。
+    pub(crate) fn with_config_dir(mut self, config_dir: PathBuf) -> Self {
+        self.config_dir = config_dir;
+        self
+    }
+
+    /// 依完整接收器設定啟動 AirPlay（UxPlay）接收器，包含隔離 `UXPLAYRC` 與可選 PIN 驗證。
+    pub(crate) fn start_airplay(&self, settings: &ReceiverSettings) -> EngineSnapshot {
+        let args = settings.airplay_arguments();
+        self.start_internal(&args, Some(&settings.receiver_name), Some(settings))
+    }
+
     /// 啟動引擎子程序；若既有子程序仍在執行則直接回傳現行快照。
     ///
     /// # 參數
@@ -458,6 +491,15 @@ impl EngineController {
     /// # 回傳值
     /// 回傳啟動後或異常發生時的 `EngineSnapshot`。
     pub(crate) fn start(&self, args: &[String], receiver_name: Option<&str>) -> EngineSnapshot {
+        self.start_internal(args, receiver_name, None)
+    }
+
+    fn start_internal(
+        &self,
+        args: &[String],
+        receiver_name: Option<&str>,
+        airplay_settings: Option<&ReceiverSettings>,
+    ) -> EngineSnapshot {
         let Ok(mut inner) = self.inner.lock() else {
             return EngineSnapshot::stopped("接收器狀態無法更新。");
         };
@@ -500,6 +542,7 @@ impl EngineController {
         };
 
         let mut command = background_command(&executable);
+        sanitize_child_environment(&mut command);
         command
             .args(args)
             .env("PATH", resolved_path(&self.engine_dir))
@@ -507,32 +550,39 @@ impl EngineController {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let plugin_directory = self.engine_dir.join("lib/gstreamer-1.0");
-        command
-            .env("GST_PLUGIN_PATH_1_0", &plugin_directory)
-            .env("GST_PLUGIN_SYSTEM_PATH_1_0", &plugin_directory);
-        if matches!(self.kind, EngineKind::AirPlay) {
-            #[cfg(target_os = "macos")]
-            command
-                .env("GST_REGISTRY", &self.gstreamer_registry_path)
-                .env("GST_REGISTRY_1_0", &self.gstreamer_registry_path);
+
+        let mut redact_pin: Option<String> = None;
+        match self.kind {
+            EngineKind::AirPlay => {
+                if let Err(message) =
+                    self.configure_airplay_command(&mut command, airplay_settings, &mut redact_pin)
+                {
+                    inner.snapshot = EngineSnapshot {
+                        status: EngineStatus::DependencyMissing,
+                        message: message.clone(),
+                        process_id: None,
+                    };
+                    self.logger.write(LogLevel::Error, &message);
+                    return inner.snapshot.clone();
+                }
+            }
+            EngineKind::Android => {
+                if let Err(message) = self.configure_android_command(&mut command, &executable) {
+                    inner.snapshot = EngineSnapshot {
+                        status: EngineStatus::DependencyMissing,
+                        message: message.clone(),
+                        process_id: None,
+                    };
+                    self.logger.write(LogLevel::Error, &message);
+                    return inner.snapshot.clone();
+                }
+            }
         }
-        #[cfg(target_os = "macos")]
-        command.env("DYLD_LIBRARY_PATH", macos_library_path(&self.engine_dir));
-        #[cfg(target_os = "windows")]
-        command.env(
-            "GST_PLUGIN_SCANNER_1_0",
-            self.engine_dir.join("bin/gst-plugin-scanner.exe"),
-        );
-        #[cfg(not(target_os = "windows"))]
-        command.env(
-            "GST_PLUGIN_SCANNER_1_0",
-            self.engine_dir.join("bin/gst-plugin-scanner"),
-        );
+
         match command.spawn() {
             Ok(mut child) => {
                 let process_id = child.id();
-                self.capture_output(&mut child);
+                self.capture_output(&mut child, redact_pin.as_deref());
                 let name = self.kind.display_name();
                 let started_at = Instant::now();
                 inner.child = Some(child);
@@ -579,6 +629,112 @@ impl EngineController {
             }
         }
         inner.snapshot.clone()
+    }
+
+    fn configure_airplay_command(
+        &self,
+        command: &mut Command,
+        settings: Option<&ReceiverSettings>,
+        redact_pin: &mut Option<String>,
+    ) -> Result<(), String> {
+        let lib_dir = self.engine_dir.join("lib");
+        reject_symlink_path(&lib_dir)
+            .map_err(|_| "GStreamer 函式庫目錄不可為符號連結。".to_owned())?;
+        let plugin_directory = lib_dir.join("gstreamer-1.0");
+        reject_symlink_path(&plugin_directory)
+            .map_err(|_| "GStreamer 外掛目錄不可為符號連結。".to_owned())?;
+        command
+            .env("GST_PLUGIN_PATH_1_0", &plugin_directory)
+            .env("GST_PLUGIN_SYSTEM_PATH_1_0", &plugin_directory);
+
+        #[cfg(target_os = "macos")]
+        {
+            reject_symlink_path(&self.gstreamer_registry_path)
+                .map_err(|_| "GStreamer registry 快取不可為符號連結。".to_owned())?;
+            command
+                .env("GST_REGISTRY", &self.gstreamer_registry_path)
+                .env("GST_REGISTRY_1_0", &self.gstreamer_registry_path)
+                .env("DYLD_LIBRARY_PATH", macos_library_path(&self.engine_dir));
+        }
+
+        let scanner_path = self.engine_dir.join(if cfg!(target_os = "windows") {
+            "bin/gst-plugin-scanner.exe"
+        } else {
+            "bin/gst-plugin-scanner"
+        });
+        reject_symlink_path(&scanner_path)
+            .map_err(|_| "gst-plugin-scanner 路徑不可為符號連結。".to_owned())?;
+        if is_executable_file(&scanner_path) || !scanner_path.exists() {
+            command.env("GST_PLUGIN_SCANNER_1_0", &scanner_path);
+        } else {
+            return Err("gst-plugin-scanner 不是可執行的常規檔案。".to_owned());
+        }
+
+        if !self.config_dir.as_os_str().is_empty() {
+            ensure_safe_directory(&self.config_dir, true)
+                .map_err(|error| format!("應用程式設定目錄路徑不安全：{error}"))?;
+            let rc_contents = match settings {
+                Some(settings) if settings.airplay_auth_mode != AirplayAuthMode::None => {
+                    let register_path = self.config_dir.join("uxplay.register");
+                    reject_symlink_path(&register_path)
+                        .map_err(|_| "AirPlay 配對註冊檔不可為符號連結。".to_owned())?;
+                    if !register_path.exists() {
+                        write_file_atomic_secure(&register_path, b"", 0o600)
+                            .map_err(|error| format!("無法建立受控 AirPlay 配對註冊檔：{error}"))?;
+                    } else {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = std::fs::set_permissions(
+                                &register_path,
+                                std::fs::Permissions::from_mode(0o600),
+                            );
+                        }
+                    }
+                    if settings.airplay_auth_mode == AirplayAuthMode::FixedPin {
+                        let pin = sanitize_airplay_pin(&settings.airplay_pin);
+                        if !pin.is_empty() {
+                            *redact_pin = Some(pin);
+                        }
+                    }
+                    settings.uxplay_rc_contents(register_path.to_str())
+                }
+                _ => String::new(),
+            };
+            let rc_path = self.config_dir.join("uxplay.rc");
+            write_file_atomic_secure(&rc_path, rc_contents.as_bytes(), 0o600)
+                .map_err(|error| format!("無法建立受控 UxPlay 設定檔：{error}"))?;
+            command.env("UXPLAYRC", &rc_path);
+        } else {
+            #[cfg(unix)]
+            command.env("UXPLAYRC", "/dev/null");
+        }
+        Ok(())
+    }
+
+    fn configure_android_command(
+        &self,
+        command: &mut Command,
+        scrcpy_executable: &Path,
+    ) -> Result<(), String> {
+        let adb_path = find_executable(&self.engine_dir, "adb", true).ok_or_else(|| {
+            "找不到受控 ADB 執行檔。請安裝 scrcpy 與 Android Platform Tools。".to_owned()
+        })?;
+        let server_candidates = [
+            scrcpy_executable
+                .parent()
+                .map(|parent| parent.join("scrcpy-server")),
+            Some(self.engine_dir.join("bin/scrcpy-server")),
+        ];
+        let server_path = server_candidates
+            .into_iter()
+            .flatten()
+            .find(|candidate| is_safe_regular_non_empty_file(candidate))
+            .ok_or_else(|| "找不到有效的 scrcpy-server，請重新檢查或安裝投影工具。".to_owned())?;
+        command
+            .env("ADB", &adb_path)
+            .env("SCRCPY_SERVER_PATH", &server_path);
+        Ok(())
     }
 
     /// 輪詢子程序存活與 Bonjour 就緒狀態，更新並回傳最新 `EngineSnapshot`。
@@ -820,30 +976,47 @@ impl EngineController {
         )
     }
 
-    /// 啟動背景執行緒持續讀取子程序的 `stdout` 與 `stderr` 並寫入應用程式日誌。
+    /// 啟動背景執行緒持續讀取子程序的 `stdout` 與 `stderr`（單行有界）並寫入應用程式日誌。
     ///
     /// # 參數
     /// - `child`: 剛啟動的子程序可變參考，將接管其 `stdout` 與 `stderr` 控制權。
-    fn capture_output(&self, child: &mut Child) {
+    /// - `redact_pin`: 固定 PIN 模式時於輸出中遮罩的 PIN 密碼，避免寫入診斷日誌。
+    fn capture_output(&self, child: &mut Child, redact_pin: Option<&str>) {
         let name = self.kind.display_name();
+        let redact_owned = redact_pin.map(str::to_owned);
         if let Some(stdout) = child.stdout.take() {
             let logger = self.logger.clone();
             let name = name.to_owned();
+            let redact = redact_owned.clone();
             thread::spawn(move || {
-                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    logger.write(LogLevel::Information, &format!("{name}: {line}"));
-                }
+                read_bounded_lines(stdout, DEFAULT_MAX_LOG_LINE_BYTES, |line| {
+                    let sanitized = sanitize_engine_log_line(&line, redact.as_deref());
+                    logger.write(LogLevel::Information, &format!("{name}: {sanitized}"));
+                });
             });
         }
         if let Some(stderr) = child.stderr.take() {
             let logger = self.logger.clone();
             let name = name.to_owned();
+            let redact = redact_owned;
             thread::spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    logger.write(LogLevel::Warning, &format!("{name}: {line}"));
-                }
+                read_bounded_lines(stderr, DEFAULT_MAX_LOG_LINE_BYTES, |line| {
+                    let sanitized = sanitize_engine_log_line(&line, redact.as_deref());
+                    logger.write(LogLevel::Warning, &format!("{name}: {sanitized}"));
+                });
             });
         }
+    }
+}
+
+fn sanitize_engine_log_line(line: &str, redact_pin: Option<&str>) -> String {
+    let Some(pin) = redact_pin else {
+        return line.to_owned();
+    };
+    if line.contains("ENTER PIN") || line.contains("pin =") || line.contains("PIN =") {
+        line.replace(pin, "****")
+    } else {
+        line.to_owned()
     }
 }
 
@@ -872,7 +1045,13 @@ fn spawn_discovery_monitor(
     receiver_name: &str,
     logger: AppLogger,
 ) -> Result<(Child, Receiver<DiscoveryEvent>), String> {
-    let mut child = Command::new("/usr/bin/dns-sd")
+    let dns_sd_path = Path::new("/usr/bin/dns-sd");
+    if !is_executable_file(dns_sd_path) {
+        return Err("/usr/bin/dns-sd 不可用或不安全。".to_owned());
+    }
+    let mut command = Command::new(dns_sd_path);
+    sanitize_child_environment(&mut command);
+    let mut child = command
         .args(["-B", "_airplay._tcp", "local."])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -883,19 +1062,20 @@ fn spawn_discovery_monitor(
     if let Some(stdout) = child.stdout.take() {
         let expected_name = receiver_name.to_owned();
         thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if bonjour_instance_matches(&line, &expected_name) {
+            let mut matched = false;
+            read_bounded_lines(stdout, DEFAULT_MAX_LOG_LINE_BYTES, |line| {
+                if !matched && bonjour_instance_matches(&line, &expected_name) {
                     let _ = sender.send(DiscoveryEvent::Ready);
-                    break;
+                    matched = true;
                 }
-            }
+            });
         });
     }
     if let Some(stderr) = child.stderr.take() {
         thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            read_bounded_lines(stderr, DEFAULT_MAX_LOG_LINE_BYTES, |line| {
                 logger.write(LogLevel::Warning, &format!("Bonjour: {line}"));
-            }
+            });
         });
     }
     Ok((child, events))

@@ -60,9 +60,12 @@ pub fn run() {
                     engine_dir
                 }
             };
-            std::fs::create_dir_all(&config_dir)?;
-            std::fs::create_dir_all(&log_dir)?;
-            ensure_safe_directory(&engine_dir, false)?;
+            ensure_safe_directory(&config_dir, true)?;
+            ensure_safe_directory(&log_dir, true)?;
+            ensure_safe_directory(
+                &engine_dir,
+                cfg!(not(debug_assertions)) && e2e_profile.is_none(),
+            )?;
             let state = AppState::new(
                 config_dir.clone(),
                 log_dir,

@@ -143,6 +143,9 @@ pub struct InstallResult {
     /// 安裝腳本回報的詳細結果或錯誤訊息。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// 首次下載安裝自訂 UxPlay 成功時回報的實際原始碼封存檔 SHA-256（用於 TOFU 自動鎖定）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_sha256: Option<String>,
 }
 
 impl InstallResult {

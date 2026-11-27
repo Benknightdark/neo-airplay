@@ -336,9 +336,10 @@ pub struct CatalogContext<'a> {
 /// # 回傳值
 /// 合法則回傳 `Ok(())`；不符規則回傳 `DomainError::validation`。
 pub fn validate_catalog_url(url: &str) -> DomainResult<()> {
-    if url
-        .chars()
-        .any(|ch| ch.is_control() || ch.is_ascii_whitespace())
+    if !url.is_ascii()
+        || url
+            .chars()
+            .any(|ch| ch.is_control() || ch.is_ascii_whitespace() || ch == '\\')
     {
         return Err(DomainError::validation("爬取來源網址包含不安全字元。"));
     }
