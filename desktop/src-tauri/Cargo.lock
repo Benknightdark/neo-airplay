@@ -2392,7 +2392,7 @@ dependencies = [
 
 [[package]]
 name = "neo-airplay"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "fix-path-env",
  "jiff",
