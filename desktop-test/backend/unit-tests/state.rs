@@ -1,9 +1,10 @@
 //! 後端基礎設施層狀態管理、設定檔讀寫與子程序控制單元測試集合。
 
+#[cfg(unix)]
+use crate::domain::AirplayAuthMode;
 use crate::domain::{
-    bonjour_instance_matches, parse_adb_devices, renderer_argument, AirplayAuthMode,
-    AndroidDeviceStatus, EngineKind, EngineSnapshot, EngineStatus, ReceiverSettings,
-    AIRPLAY_READY_TIMEOUT,
+    bonjour_instance_matches, parse_adb_devices, renderer_argument, AndroidDeviceStatus,
+    EngineKind, EngineSnapshot, EngineStatus, ReceiverSettings, AIRPLAY_READY_TIMEOUT,
 };
 use crate::infrastructure::persistence::{
     load_settings, write_settings, AppLogger, MAX_SETTINGS_FILE_BYTES,

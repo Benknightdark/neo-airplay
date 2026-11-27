@@ -3,7 +3,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -176,7 +176,7 @@ pub fn macos_library_paths(engine_dir: &Path, inherited: Option<&OsStr>) -> Vec<
             if !entry.is_absolute()
                 || entry
                     .components()
-                    .any(|component| matches!(component, Component::ParentDir))
+                    .any(|component| matches!(component, std::path::Component::ParentDir))
             {
                 continue;
             }

@@ -16,7 +16,6 @@ use crate::infrastructure::process::{
     resolved_path, run_with_timeout_env_sanitized, sanitize_child_environment,
     write_file_atomic_secure, DEFAULT_MAX_LOG_LINE_BYTES, PROCESS_TIMEOUT,
 };
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -686,9 +685,9 @@ impl EngineController {
                         #[cfg(unix)]
                         {
                             use std::os::unix::fs::PermissionsExt;
-                            let _ = fs::set_permissions(
+                            let _ = std::fs::set_permissions(
                                 &register_path,
-                                fs::Permissions::from_mode(0o600),
+                                std::fs::Permissions::from_mode(0o600),
                             );
                         }
                     }

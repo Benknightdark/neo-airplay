@@ -77,11 +77,10 @@ jobs:
 
       - name: Audit Rust dependencies
         if: runner.os == 'Linux'
-        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-        with:
-          working-directory: desktop/src-tauri
-          ignore: RUSTSEC-2024-0429,RUSTSEC-2024-0370,RUSTSEC-2026-0370,RUSTSEC-2026-0371,RUSTSEC-2026-0372,RUSTSEC-2026-0543
-          token: ${{ github.token }}
+        working-directory: desktop/src-tauri
+        run: |
+          cargo install cargo-audit --locked --version 0.23.0
+          cargo audit
 
       - name: Install desktop test dependencies
         working-directory: desktop-test
