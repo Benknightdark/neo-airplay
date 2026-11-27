@@ -34,6 +34,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -49,6 +50,7 @@ jobs:
           set -euo pipefail
 
           version="$(node desktop/scripts/project-version.mjs read)"
+          gh auth setup-git
           git fetch --tags --force origin
           tag="v${version}"
           echo "value=$version" >> "$GITHUB_OUTPUT"
@@ -94,6 +96,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -109,6 +112,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          gh auth setup-git
           branch="automation/release-version-${CORRECTION_VERSION}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -155,6 +159,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -214,11 +219,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Check out merged commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Download installers from all platforms
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -227,11 +235,7 @@ jobs:
           path: release-assets
           merge-multiple: true
 
-      - name: Create versioned GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
-          RELEASE_TARGET: ${{ github.sha }}
+      - name: Stage release assets and generate SHA-256 checksums
         run: |
           set -euo pipefail
 
@@ -245,8 +249,40 @@ jobs:
             exit 1
           fi
 
+          rm -rf release-staging
+          mkdir -p release-staging
+          for asset in "${assets[@]}"; do
+            base="$(basename "$asset")"
+            if [[ -e "release-staging/$base" ]]; then
+              echo "::error::Duplicate release asset basename detected: $base"
+              exit 1
+            fi
+            cp -p "$asset" "release-staging/$base"
+          done
+
+          (cd release-staging && sha256sum * > SHA256SUMS.txt)
+
+      - name: Generate build provenance attestations
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: release-staging/*
+
+      - name: Create versioned GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.prepare-release.outputs.version }}
+          RELEASE_TARGET: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          mapfile -d '' release_files < <(find release-staging -maxdepth 1 -type f -print0 | sort -z)
+          if (( ${#release_files[@]} == 0 )); then
+            echo "::error::No staged release files found."
+            exit 1
+          fi
+
           tag="v${RELEASE_VERSION}"
-          gh release create "$tag" "${assets[@]}" \
+          gh release create "$tag" "${release_files[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$RELEASE_TARGET" \
             --title "Neo AirPlay $tag" \
@@ -271,6 +307,7 @@ jobs:
         with:
           ref: develop
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -285,6 +322,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          gh auth setup-git
           git fetch --tags --force origin
           develop_version="$(node desktop/scripts/project-version.mjs read)"
           comparison="$(node desktop/scripts/project-version.mjs compare "$develop_version" "$RELEASE_VERSION")"

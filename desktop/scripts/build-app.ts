@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 
-const result = spawnSync("bun", ["run", "tauri", "build", "--ci"], {
+const result = spawnSync("bun", ["run", "tauri", "build", "--ci", "--", "--locked"], {
   cwd: process.cwd(),
   stdio: "inherit",
 });

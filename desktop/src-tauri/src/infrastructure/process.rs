@@ -2,8 +2,8 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Error, ErrorKind, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::{BufRead, BufReader, Error, ErrorKind, Read, Write};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
@@ -11,8 +11,43 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// 單一外部程序管道允許擷取的最大輸出位元組數（1 MiB），防止記憶體耗盡。
 pub const MAX_CAPTURED_PROCESS_OUTPUT_BYTES: usize = 1024 * 1024;
+/// 單行外部程序輸出或日誌載入允許保留的最大位元組數（8 KiB），防止無換行超長輸出造成 OOM。
+pub const DEFAULT_MAX_LOG_LINE_BYTES: usize = 8192;
 /// 同步短程指令（如 `adb devices`）的預設等待逾時時間。
 pub const PROCESS_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// 啟動外部子程序前必須主動移除的環境變數清单，避免動態函式庫預載、GStreamer 外掛或 ADB/scrcpy/UxPlay 路徑遭到劫持。
+const DANGEROUS_CHILD_ENV_VARS: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "LD_AUDIT",
+    "LD_DEBUG",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_FRAMEWORK_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "DYLD_FALLBACK_FRAMEWORK_PATH",
+    "DYLD_IMAGE_SUFFIX",
+    "GST_PLUGIN_PATH",
+    "GST_PLUGIN_SYSTEM_PATH",
+    "GST_PLUGIN_PATH_1_0",
+    "GST_PLUGIN_SYSTEM_PATH_1_0",
+    "GST_PLUGIN_SCANNER",
+    "GST_PLUGIN_SCANNER_1_0",
+    "GST_REGISTRY",
+    "GST_REGISTRY_1_0",
+    "GST_REGISTRY_FORK",
+    "ADB",
+    "ADB_SERVER_SOCKET",
+    "ANDROID_ADB_SERVER_ADDRESS",
+    "ANDROID_ADB_SERVER_PORT",
+    "ANDROID_SERIAL",
+    "SCRCPY_SERVER_PATH",
+    "SCRCPY_ICON_DIR",
+    "UXPLAYRC",
+    "OPENSSL_CONF",
+    "GCONV_PATH",
+    "GIO_EXTRA_MODULES",
+];
 
 static TEMP_FILE_NONCE: AtomicU64 = AtomicU64::new(0);
 
@@ -73,6 +108,25 @@ fn safe_engine_subdir(engine_dir: &Path, components: &[&str]) -> Option<PathBuf>
     Some(current)
 }
 
+/// 驗證從 `root` 到指定子目錄鏈皆為非符號連結的實體目錄。
+pub fn is_safe_directory_chain(root: &Path, components: &[&str]) -> bool {
+    safe_engine_subdir(root, components).is_some()
+}
+
+/// 檢查目標路徑是否為非符號連結、非空且為一般檔案的實體檔案。
+pub fn is_safe_regular_non_empty_file(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|metadata| {
+        !metadata.file_type().is_symlink() && metadata.is_file() && metadata.len() > 0
+    })
+}
+
+/// 清除子程序環境中的動態載入器預載、外掛路徑及 ADB／scrcpy／UxPlay 覆寫變數。
+pub fn sanitize_child_environment(command: &mut Command) {
+    for name in DANGEROUS_CHILD_ENV_VARS {
+        command.env_remove(name);
+    }
+}
+
 /// 建構僅包含內建投影工具目錄的 `PATH` 環境變數字串。
 ///
 /// # 參數
@@ -118,7 +172,22 @@ pub fn macos_library_paths(engine_dir: &Path, inherited: Option<&OsStr>) -> Vec<
         paths.push(prefix.join("lib"));
     }
     if let Some(inherited) = inherited {
-        paths.extend(std::env::split_paths(inherited));
+        for entry in std::env::split_paths(inherited) {
+            if !entry.is_absolute()
+                || entry
+                    .components()
+                    .any(|component| matches!(component, Component::ParentDir))
+            {
+                continue;
+            }
+            let safe_entry = match fs::symlink_metadata(&entry) {
+                Ok(metadata) => !metadata.file_type().is_symlink() && metadata.is_dir(),
+                Err(error) => error.kind() == ErrorKind::NotFound,
+            };
+            if safe_entry {
+                paths.push(entry);
+            }
+        }
     }
     paths
 }
@@ -202,6 +271,77 @@ pub fn write_file_atomic_secure(
     stage_temp_file_atomic(path, unix_mode, None, |file| file.write_all(contents))
 }
 
+/// 安全驗證並開啟非符號連結的常規檔案；在 Unix 平台上於開啟後核對 `(dev, ino)` 以消除 TOCTOU 競態。
+pub fn open_regular_file_secure(path: &Path) -> std::io::Result<File> {
+    let pre_meta = fs::symlink_metadata(path)?;
+    if pre_meta.file_type().is_symlink() || !pre_meta.is_file() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "目標檔案不可為符號連結或非一般檔案。",
+        ));
+    }
+    let file = File::open(path)?;
+    let open_meta = file.metadata()?;
+    if !open_meta.is_file() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "目標檔案不可為非一般檔案。",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if open_meta.dev() != pre_meta.dev() || open_meta.ino() != pre_meta.ino() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "目標檔案在開啟期間遭到置換，已拒絕讀取。",
+            ));
+        }
+    }
+    Ok(file)
+}
+
+/// 以附加模式安全開啟非符號連結的常規檔案（Unix 套用指定檔案權限），並於開啟後驗證未遭符號連結置換。
+pub fn open_append_regular_file_secure(path: &Path, unix_mode: u32) -> std::io::Result<File> {
+    #[cfg(not(unix))]
+    let _ = unix_mode;
+
+    reject_symlink_path(path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(unix_mode);
+    }
+    let file = options.open(path)?;
+    let link_meta = fs::symlink_metadata(path)?;
+    if link_meta.file_type().is_symlink() || !link_meta.is_file() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "目標檔案不可為符號連結或非一般檔案。",
+        ));
+    }
+    let open_meta = file.metadata()?;
+    if !open_meta.is_file() {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "目標檔案不可為非一般檔案。",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if open_meta.dev() != link_meta.dev() || open_meta.ino() != link_meta.ino() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "目標檔案路徑與已開啟檔案節點不一致，已拒絕寫入。",
+            ));
+        }
+    }
+    Ok(file)
+}
+
 /// 以有界限的方式讀取非符號連結常規檔案內容，避免記憶體耗盡與符號連結越界讀取。
 ///
 /// # 參數
@@ -211,20 +351,14 @@ pub fn write_file_atomic_secure(
 /// # 回傳值
 /// 回傳完整位元組向量；若為符號連結、非一般檔案或超過上限則回傳 `std::io::Error`。
 pub fn read_bounded_regular_file(path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "目標檔案不可為符號連結或非一般檔案。",
-        ));
-    }
+    let file = open_regular_file_secure(path)?;
+    let metadata = file.metadata()?;
     if metadata.len() > max_bytes {
         return Err(Error::new(
             ErrorKind::InvalidData,
             format!("檔案大小超過 {max_bytes} 位元組上限。"),
         ));
     }
-    let file = File::open(path)?;
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     let limit = max_bytes.saturating_add(1);
     file.take(limit).read_to_end(&mut bytes)?;
@@ -490,7 +624,42 @@ pub fn run_with_timeout_env(
     path: Option<&OsStr>,
     extra_env: &[(&str, &OsStr)],
 ) -> Result<Output, String> {
+    run_with_timeout_env_inner(executable, args, timeout, path, extra_env, false)
+}
+
+/// 在完整淨化子程序環境變數後，以可選自訂 `PATH` 與額外環境變數啟動外部指令並限制執行逾時。
+pub fn run_with_timeout_env_sanitized(
+    executable: &Path,
+    args: &[String],
+    timeout: Duration,
+    path: Option<&OsStr>,
+    extra_env: &[(&str, &OsStr)],
+) -> Result<Output, String> {
+    run_with_timeout_env_inner(executable, args, timeout, path, extra_env, true)
+}
+
+fn run_with_timeout_env_inner(
+    executable: &Path,
+    args: &[String],
+    timeout: Duration,
+    path: Option<&OsStr>,
+    extra_env: &[(&str, &OsStr)],
+    sanitize_all: bool,
+) -> Result<Output, String> {
     let mut command = background_command(executable);
+    if sanitize_all {
+        sanitize_child_environment(&mut command);
+    } else {
+        for var in [
+            "LD_PRELOAD",
+            "LD_AUDIT",
+            "LD_DEBUG",
+            "DYLD_INSERT_LIBRARIES",
+            "DYLD_IMAGE_SUFFIX",
+        ] {
+            command.env_remove(var);
+        }
+    }
     command.args(args);
     if let Some(path) = path {
         command.env("PATH", path);
@@ -634,4 +803,77 @@ pub fn first_non_empty_line(bytes: &[u8]) -> Option<String> {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .map(str::to_owned)
+}
+
+/// 以有界緩衝區逐行讀取串流（單行最多保留 `max_line_bytes` 位元組），超長行截斷後仍持續排空至換行或 EOF 以防 OOM 或管線阻塞。
+pub fn read_bounded_lines<R: Read>(
+    reader: R,
+    max_line_bytes: usize,
+    mut on_line: impl FnMut(String),
+) {
+    let mut buffered = BufReader::with_capacity(8192, reader);
+    let mut line_bytes = Vec::with_capacity(max_line_bytes.min(1024));
+    let mut truncated = false;
+
+    loop {
+        let chunk = match buffered.fill_buf() {
+            Ok([]) | Err(_) => {
+                if !line_bytes.is_empty() || truncated {
+                    emit_bounded_line(&mut line_bytes, &mut truncated, &mut on_line);
+                }
+                break;
+            }
+            Ok(chunk) => chunk,
+        };
+
+        if let Some(newline_index) = chunk.iter().position(|byte| *byte == b'\n') {
+            append_bounded_slice(
+                &mut line_bytes,
+                &chunk[..newline_index],
+                max_line_bytes,
+                &mut truncated,
+            );
+            buffered.consume(newline_index + 1);
+            emit_bounded_line(&mut line_bytes, &mut truncated, &mut on_line);
+        } else {
+            let chunk_len = chunk.len();
+            append_bounded_slice(&mut line_bytes, chunk, max_line_bytes, &mut truncated);
+            buffered.consume(chunk_len);
+        }
+    }
+}
+
+fn append_bounded_slice(
+    line_bytes: &mut Vec<u8>,
+    slice: &[u8],
+    max_line_bytes: usize,
+    truncated: &mut bool,
+) {
+    if line_bytes.len() < max_line_bytes {
+        let remaining = max_line_bytes - line_bytes.len();
+        let take = slice.len().min(remaining);
+        line_bytes.extend_from_slice(&slice[..take]);
+        if take < slice.len() {
+            *truncated = true;
+        }
+    } else if !slice.is_empty() {
+        *truncated = true;
+    }
+}
+
+fn emit_bounded_line(
+    line_bytes: &mut Vec<u8>,
+    truncated: &mut bool,
+    on_line: &mut impl FnMut(String),
+) {
+    if line_bytes.last().copied() == Some(b'\r') {
+        line_bytes.pop();
+    }
+    let mut line = String::from_utf8_lossy(line_bytes).into_owned();
+    if *truncated {
+        line.push_str("…[truncated]");
+    }
+    line_bytes.clear();
+    *truncated = false;
+    on_line(line);
 }

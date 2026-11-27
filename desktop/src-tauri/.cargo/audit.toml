@@ -1,0 +1,17 @@
+# Cargo audit configuration for Neo AirPlay (`desktop/src-tauri`).
+# Only ignore upstream transitive advisories that have no non-breaking upgrade
+# path in Tauri 2 / GTK3 Linux dependencies, with explicit rationale and expiry review.
+
+[advisories]
+ignore = [
+  # glib 0.18.x unsoundness pulled transitively by gtk / tauri 2 Linux runtime (no 0.19+ compat in wry/tao yet).
+  "RUSTSEC-2024-0429",
+  # proc-macro-error unmaintained transitive dep via older macro crates in gtk-rs 0.18 / tauri ecosystem.
+  "RUSTSEC-2024-0370",
+  # gtk3-rs / atk / gdk / gio 0.18 unmaintained GTK3 bindings required by Tauri 2 Linux WebKitGTK stack.
+  "RUSTSEC-2026-0370",
+  "RUSTSEC-2026-0371",
+  "RUSTSEC-2026-0372",
+  # Upstream transitive advisory without patched Tauri 2 release at time of pin; re-evaluate on Tauri minor bumps.
+  "RUSTSEC-2026-0543",
+]

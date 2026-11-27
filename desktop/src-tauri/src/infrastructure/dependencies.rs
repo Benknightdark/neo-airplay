@@ -21,16 +21,15 @@ use crate::infrastructure::process::background_command;
 #[cfg(target_os = "macos")]
 use crate::infrastructure::process::macos_library_path;
 use crate::infrastructure::process::{
-    ensure_safe_directory, find_executable, read_bounded_regular_file, reject_symlink_path,
-    resolved_path, run_with_timeout, run_with_timeout_env, run_with_timeout_in_path,
-    write_file_atomic_secure,
+    ensure_safe_directory, find_executable, is_executable_file, open_append_regular_file_secure,
+    open_regular_file_secure, read_bounded_regular_file, reject_symlink_path, resolved_path,
+    run_with_timeout_env_sanitized, run_with_timeout_in_path, write_file_atomic_secure,
 };
 use serde::Serialize;
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use std::ffi::OsStr;
 #[cfg(target_os = "macos")]
 use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
@@ -121,6 +120,7 @@ pub struct DependencyManager {
     snapshot: Arc<Mutex<DependencySnapshot>>,
     pub(crate) worker_active: Arc<AtomicBool>,
     operation_gate: Arc<Mutex<()>>,
+    catalog_refresh_lock: Arc<Mutex<()>>,
     engine_dir: PathBuf,
     gstreamer_registry_path: PathBuf,
     setup_dir: PathBuf,
@@ -152,6 +152,7 @@ impl DependencyManager {
             })),
             worker_active: Arc::new(AtomicBool::new(false)),
             operation_gate: Arc::new(Mutex::new(())),
+            catalog_refresh_lock: Arc::new(Mutex::new(())),
             engine_dir,
             gstreamer_registry_path,
             setup_dir,
@@ -199,7 +200,7 @@ impl DependencyManager {
         let arch = detect_platform_arch();
         let package_manager = detect_package_manager();
         let installed = if self.enabled {
-            probe_installed_versions(&self.engine_dir)
+            probe_installed_versions(&self.engine_dir, &self.config_dir)
         } else {
             InstalledVersions::default()
         };
@@ -225,6 +226,11 @@ impl DependencyManager {
         &self,
         fetcher: &dyn ToolCatalogFetcher,
     ) -> DomainResult<ToolCatalogSnapshot> {
+        let Ok(_refresh_guard) = self.catalog_refresh_lock.try_lock() else {
+            return Err(DomainError::conflict(
+                "正在爬取線上工具版本清單，請稍候再試。",
+            ));
+        };
         let os = detect_platform_os();
         let arch = detect_platform_arch();
         let mut next = RemoteCatalogCache {
@@ -604,37 +610,54 @@ fn has_command_on_path(binary: &str) -> bool {
     })
 }
 
-fn probe_installed_versions(engine_dir: &Path) -> InstalledVersions {
+fn probe_installed_versions(engine_dir: &Path, config_dir: &Path) -> InstalledVersions {
     let engine_path = resolved_path(engine_dir);
+    let uxplay_rc_override: Option<PathBuf> = if cfg!(unix) {
+        Some(PathBuf::from("/dev/null"))
+    } else if !config_dir.as_os_str().is_empty() && ensure_safe_directory(config_dir, true).is_ok()
+    {
+        let empty_rc = config_dir.join("uxplay.empty.rc");
+        if write_file_atomic_secure(&empty_rc, b"", 0o600).is_ok() {
+            Some(empty_rc)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     #[cfg(target_os = "macos")]
     let dyld_path = macos_library_path(engine_dir);
     #[cfg(target_os = "macos")]
     let gst_plugins: OsString = engine_dir.join("lib/gstreamer-1.0").into_os_string();
-    #[cfg(target_os = "macos")]
-    let mac_env: [(&str, &OsStr); 3] = [
-        ("DYLD_LIBRARY_PATH", dyld_path.as_os_str()),
-        ("GST_PLUGIN_PATH_1_0", gst_plugins.as_os_str()),
-        ("GST_PLUGIN_SYSTEM_PATH_1_0", gst_plugins.as_os_str()),
-    ];
 
-    let run_probe = |executable: &Path, args: &[&str]| -> Option<String> {
+    let run_probe = |executable: &Path,
+                     args: &[&str],
+                     with_gstreamer_env: bool,
+                     with_uxplay_rc: bool|
+     -> Option<String> {
         let owned_args: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+        let mut extra_env: Vec<(&str, &OsStr)> = Vec::new();
+        if with_uxplay_rc {
+            if let Some(rc_path) = uxplay_rc_override.as_ref() {
+                extra_env.push(("UXPLAYRC", rc_path.as_os_str()));
+            }
+        }
         #[cfg(target_os = "macos")]
-        let output = run_with_timeout_env(
-            executable,
-            &owned_args,
-            VERSION_PROBE_TIMEOUT,
-            Some(engine_path.as_os_str()),
-            &mac_env,
-        )
-        .ok()?;
+        if with_gstreamer_env {
+            extra_env.push(("DYLD_LIBRARY_PATH", dyld_path.as_os_str()));
+            extra_env.push(("GST_PLUGIN_PATH_1_0", gst_plugins.as_os_str()));
+            extra_env.push(("GST_PLUGIN_SYSTEM_PATH_1_0", gst_plugins.as_os_str()));
+        }
         #[cfg(not(target_os = "macos"))]
-        let output = run_with_timeout_env(
+        let _ = with_gstreamer_env;
+
+        let output = run_with_timeout_env_sanitized(
             executable,
             &owned_args,
             VERSION_PROBE_TIMEOUT,
             Some(engine_path.as_os_str()),
-            &[],
+            &extra_env,
         )
         .ok()?;
         Some(combined_output(&output))
@@ -642,16 +665,16 @@ fn probe_installed_versions(engine_dir: &Path) -> InstalledVersions {
 
     InstalledVersions {
         uxplay: find_executable(engine_dir, "uxplay", false)
-            .and_then(|exe| run_probe(&exe, &["-v"]))
+            .and_then(|exe| run_probe(&exe, &["-v"], true, true))
             .and_then(|out| parse_installed_uxplay_version(&out)),
         scrcpy: find_executable(engine_dir, "scrcpy", true)
-            .and_then(|exe| run_probe(&exe, &["--version"]))
+            .and_then(|exe| run_probe(&exe, &["--version"], false, false))
             .and_then(|out| parse_installed_scrcpy_version(&out)),
         adb: find_executable(engine_dir, "adb", true)
-            .and_then(|exe| run_probe(&exe, &["version"]))
+            .and_then(|exe| run_probe(&exe, &["version"], false, false))
             .and_then(|out| parse_installed_adb_version(&out)),
         gstreamer: find_executable(engine_dir, "gst-inspect-1.0", false)
-            .and_then(|exe| run_probe(&exe, &["--version"]))
+            .and_then(|exe| run_probe(&exe, &["--version"], true, false))
             .and_then(|out| parse_installed_gstreamer_version(&out)),
     }
 }
@@ -849,19 +872,23 @@ fn fetch_linux_gstreamer_latest(
 
 fn fetch_rhel_gstreamer_latest() -> DomainResult<String> {
     let executable = Path::new("/usr/bin/dnf");
-    if !executable.is_file() {
+    if !is_executable_file(executable) {
         return Err(DomainError::external_process(
-            "找不到 /usr/bin/dnf，無法查詢 RHEL GStreamer 套件版本。",
+            "找不到可用的 /usr/bin/dnf，無法查詢 RHEL GStreamer 套件版本。",
         ));
     }
     let args = RHEL_GSTREAMER_DNF_ARGS
         .iter()
         .map(|arg| (*arg).to_owned())
         .collect::<Vec<_>>();
-    let output = run_with_timeout_env(executable, &args, RHEL_GSTREAMER_QUERY_TIMEOUT, None, &[])
-        .map_err(|error| {
-        DomainError::external_process(format!("RHEL DNF 版本查詢失敗：{error}"))
-    })?;
+    let output = run_with_timeout_env_sanitized(
+        executable,
+        &args,
+        RHEL_GSTREAMER_QUERY_TIMEOUT,
+        Some(OsStr::new("/usr/bin:/bin")),
+        &[],
+    )
+    .map_err(|error| DomainError::external_process(format!("RHEL DNF 版本查詢失敗：{error}")))?;
     if !output.status.success() {
         let detail = first_useful_line(&combined_output(&output))
             .unwrap_or_else(|| format!("結束代碼 {}", output.status));
@@ -886,6 +913,7 @@ pub(crate) fn load_tool_version_preferences(config_dir: &Path) -> ToolVersionPre
         validate_uxplay_ref(&pin.reference).is_ok()
             && validate_uxplay_ref(&pin.version).is_ok()
             && validate_optional_sha256(pin.sha256.as_deref()).is_ok()
+            && (pin.sha256.is_some() || pin.allow_unverified)
     });
     preferences.scrcpy = preferences.scrcpy.filter(|pin| {
         validate_scrcpy_version(&pin.version).is_ok()
@@ -1108,7 +1136,8 @@ fn run_setup(
     if operation == DependencyOperation::InstallTool {
         if installer_succeeded && target_tool_present(engine_dir, options.only_tool) {
             if let Some(validated) = options.validated_install.as_ref() {
-                save_tool_version_preference(config_dir, validated)?;
+                let locked = apply_tofu_sha256(validated, result.as_ref().ok());
+                save_tool_version_preference(config_dir, &locked)?;
             }
             stage_installer(setup_dir)?;
             remove_if_exists(&launch_path);
@@ -1157,6 +1186,26 @@ fn target_tool_present(engine_dir: &Path, only_tool: Option<ToolId>) -> bool {
     }
 }
 
+/// 首次透過官方 HTTPS 來源下載安裝自訂 UxPlay 成功時，將實測回報的 SHA-256 鎖定並關閉 `allow_unverified`（TOFU）。
+pub(crate) fn apply_tofu_sha256(
+    validated: &ValidatedToolInstall,
+    result: Option<&InstallResult>,
+) -> ValidatedToolInstall {
+    if validated.tool == ToolId::UxPlay && validated.sha256.is_none() {
+        if let Some(resolved_sha) = result
+            .and_then(|record| record.resolved_sha256.as_deref())
+            .and_then(|raw| validate_optional_sha256(Some(raw)).ok().flatten())
+        {
+            return ValidatedToolInstall {
+                sha256: Some(resolved_sha),
+                allow_unverified: false,
+                ..validated.clone()
+            };
+        }
+    }
+    validated.clone()
+}
+
 /// 在 macOS 上於首次就緒或快取失效時預熱 GStreamer registry 快取，加速後續 UxPlay 啟動。
 ///
 /// # 參數
@@ -1172,8 +1221,16 @@ fn warm_gstreamer_registry(
 ) {
     #[cfg(target_os = "macos")]
     {
-        if fs::metadata(registry_path).is_ok_and(|metadata| metadata.len() > 0) {
-            return;
+        match fs::symlink_metadata(registry_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                append_log(
+                    &setup_dir.join(INSTALL_LOG),
+                    "GStreamer registry 快取路徑不可為符號連結，已略過預熱。",
+                );
+                return;
+            }
+            Ok(metadata) if metadata.len() > 0 => return,
+            _ => {}
         }
 
         publish_installing(snapshot, "正在準備 GStreamer 快取…");
@@ -1187,11 +1244,12 @@ fn warm_gstreamer_registry(
             "--registry-path".into(),
             registry_path.to_string_lossy().into_owned(),
         ];
-        let output = run_with_timeout_in_path(
+        let output = run_with_timeout_env_sanitized(
             Path::new("/bin/bash"),
             &args,
             GSTREAMER_REGISTRY_WARMUP_TIMEOUT,
             None,
+            &[],
         );
         match output {
             Ok(output) => {
@@ -1376,26 +1434,23 @@ fn install_dependencies(
         ] {
             validate_terminal_path(path)?;
         }
-        let launch_contents = "#!/bin/bash\nset -euo pipefail\nif [ -L \"$1\" ] || [ -L \"$2\" ]; then\n  printf 'Refusing symlinked installer or log target.\\n' >&2\n  exit 1\nfi\nexec > >(tee -a \"$2\") 2>&1\ninstaller=\"$1\"\nengine=\"$3\"\nmarker=\"$4\"\nresult=\"$5\"\nshift 5\nexec /bin/bash \"$installer\" --gui --engine-dir \"$engine\" --marker-file \"$marker\" --result-file \"$result\" \"$@\"\n";
+        let extra_args = unix_extra_installer_args(force_upgrade, options);
+        let launch_contents = build_macos_launch_script(
+            &script,
+            &log_path,
+            engine_dir,
+            &marker_path,
+            &result_path,
+            &extra_args,
+        );
         write_file_atomic_secure(&launch_script, launch_contents.as_bytes(), 0o700)
             .map_err(|error| format!("無法準備終端安裝程序：{error}"))?;
         let _cleanup_launch_script = LaunchScriptCleanup(&launch_script);
 
-        let mut raw_args = vec![
-            "/bin/bash".to_owned(),
-            launch_script.to_string_lossy().into_owned(),
-            script.to_string_lossy().into_owned(),
-            log_path.to_string_lossy().into_owned(),
-            engine_dir.to_string_lossy().into_owned(),
-            marker_path.to_string_lossy().into_owned(),
-            result_path.to_string_lossy().into_owned(),
-        ];
-        raw_args.extend(unix_extra_installer_args(force_upgrade, options));
-        let command_line = raw_args
-            .into_iter()
-            .map(|value| shell_quote(&value))
-            .collect::<Vec<_>>()
-            .join(" ");
+        let command_line = format!(
+            "/bin/bash {}",
+            shell_quote(&launch_script.to_string_lossy())
+        );
         let osascript_args = macos_terminal_osascript_args(&command_line)?;
         let output = run_with_timeout_in_path(
             Path::new("/usr/bin/osascript"),
@@ -1437,18 +1492,8 @@ fn install_dependencies(
         } else {
             "install.sh"
         });
-        reject_symlink_path(&log_path)
-            .map_err(|error| format!("安裝記錄檔案路徑不安全：{error}"))?;
-        let mut log_options = OpenOptions::new();
-        log_options.create(true).append(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            log_options.mode(0o600);
-        }
-        let log = log_options
-            .open(&log_path)
-            .map_err(|error| format!("無法建立安裝記錄：{error}"))?;
+        let log = open_append_regular_file_secure(&log_path, 0o600)
+            .map_err(|error| format!("無法建立或驗證安裝記錄：{error}"))?;
         let mut command = installer_command_with_options(
             &script,
             engine_dir,
@@ -2020,7 +2065,14 @@ const ADB_STOP_TIMEOUT: Duration = Duration::from_secs(3);
 /// 盡力結束位於受控 `engine_dir` 內的背景 ADB daemon，避免 Windows 上檔案鎖定阻礙工具目錄清除。
 fn stop_adb_server_if_present(engine_dir: &Path) {
     if let Some(adb_path) = find_executable(engine_dir, "adb", true) {
-        let _ = run_with_timeout(&adb_path, &["kill-server".to_owned()], ADB_STOP_TIMEOUT);
+        let engine_path = resolved_path(engine_dir);
+        let _ = run_with_timeout_env_sanitized(
+            &adb_path,
+            &["kill-server".to_owned()],
+            ADB_STOP_TIMEOUT,
+            Some(engine_path.as_os_str()),
+            &[],
+        );
     }
 }
 
@@ -2167,23 +2219,29 @@ fn remove_file_if_exists(path: &Path) -> Result<(), String> {
     }
 }
 
-/// 安全讀取安裝日誌檔案（最多僅回傳尾端 `max_bytes`），拒絕符號連結或非一般檔案。
+/// 安全讀取安裝日誌檔案（最多僅回傳尾端 `max_bytes`），以單次安全開檔並核對 inode 防止 TOCTOU 與符號連結越界讀取。
 fn read_log_tail(path: &Path, max_bytes: usize) -> Result<String, String> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
+    let mut file = match open_regular_file_secure(path) {
+        Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err("尚無安裝記錄。".to_owned());
         }
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+            return Err("安裝記錄檔案路徑不安全。".to_owned());
+        }
         Err(error) => return Err(format!("無法讀取安裝記錄：{error}")),
     };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err("安裝記錄檔案路徑不安全。".to_owned());
-    }
-    if metadata.len() <= max_bytes as u64 {
-        let bytes = fs::read(path).map_err(|error| format!("無法讀取安裝記錄：{error}"))?;
+    let file_len = file
+        .metadata()
+        .map_err(|error| format!("無法讀取安裝記錄：{error}"))?
+        .len();
+    if file_len <= max_bytes as u64 {
+        let mut bytes = Vec::with_capacity(file_len as usize);
+        file.take(max_bytes as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("無法讀取安裝記錄：{error}"))?;
         return Ok(String::from_utf8_lossy(&bytes).into_owned());
     }
-    let mut file = fs::File::open(path).map_err(|error| format!("無法讀取安裝記錄：{error}"))?;
     file.seek(SeekFrom::End(-(max_bytes as i64)))
         .map_err(|error| format!("無法讀取安裝記錄：{error}"))?;
     let mut bytes = Vec::with_capacity(max_bytes);
@@ -2224,17 +2282,7 @@ fn rotate_install_log_if_oversized(path: &Path) -> Result<(), String> {
 /// - `path`: 安裝日誌檔案（`install.log`）路徑。
 /// - `message`: 欲附加的文字內容。
 fn append_log(path: &Path, message: &str) {
-    if reject_symlink_path(path).is_err() {
-        return;
-    }
-    let mut options = OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    if let Ok(mut file) = options.open(path) {
+    if let Ok(mut file) = open_append_regular_file_secure(path, 0o600) {
         let _ = writeln!(file, "{message}");
     }
 }
@@ -2279,6 +2327,56 @@ fn unix_time_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// 建構受 `0700` 保護的 macOS Terminal 啟動包裝腳本：設定 `umask 077`、驗證全部目標非符號連結、內嵌固定引數並淨化執行環境。
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn build_macos_launch_script(
+    installer: &Path,
+    log_path: &Path,
+    engine_dir: &Path,
+    marker_path: &Path,
+    result_path: &Path,
+    extra_args: &[String],
+) -> String {
+    let quoted_extra = extra_args
+        .iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "#!/bin/bash\n\
+set -euo pipefail\n\
+umask 077\n\
+installer={}\n\
+log_file={}\n\
+engine_dir={}\n\
+marker_file={}\n\
+result_file={}\n\
+extra_args=({})\n\
+for target in \"$installer\" \"$log_file\" \"$engine_dir\" \"$marker_file\" \"$result_file\"; do\n\
+  if [ -L \"$target\" ]; then\n\
+    printf 'Refusing symlinked installer or log target.\\n' >&2\n\
+    exit 1\n\
+  fi\n\
+done\n\
+exec > >(tee -a \"$log_file\") 2>&1\n\
+exec /usr/bin/env -i \\\n\
+  PATH='/usr/bin:/bin:/usr/sbin:/sbin' \\\n\
+  HOME=\"${{HOME:-}}\" \\\n\
+  USER=\"${{USER:-}}\" \\\n\
+  LOGNAME=\"${{LOGNAME:-}}\" \\\n\
+  TERM=\"${{TERM:-xterm-256color}}\" \\\n\
+  TMPDIR=\"${{TMPDIR:-/tmp}}\" \\\n\
+  LANG=\"${{LANG:-en_US.UTF-8}}\" \\\n\
+  /bin/bash \"$installer\" --gui --engine-dir \"$engine_dir\" --marker-file \"$marker_file\" --result-file \"$result_file\" ${{extra_args[@]+\"${{extra_args[@]}}\"}}\n",
+        shell_quote(&installer.to_string_lossy()),
+        shell_quote(&log_path.to_string_lossy()),
+        shell_quote(&engine_dir.to_string_lossy()),
+        shell_quote(&marker_path.to_string_lossy()),
+        shell_quote(&result_path.to_string_lossy()),
+        quoted_extra,
+    )
 }
 
 /// 驗證傳遞給 macOS 終端機安裝器的路徑不含控制字元（NUL、LF、CR）。

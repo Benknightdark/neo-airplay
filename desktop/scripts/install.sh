@@ -18,10 +18,13 @@ readonly HOMEBREW_INSTALL_URL="https://raw.githubusercontent.com/Homebrew/instal
 readonly RUSTUP_VERSION="1.29.3"
 readonly RUSTUP_LINUX_X64_SHA256="b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55"
 readonly RUSTUP_LINUX_ARM64_SHA256="9f608c142e0e38a78957d0661ba1dfaf0b6fb37184cfaa4b9a0aa57af6184282"
+readonly MAX_DOWNLOAD_BYTES="268435456"
+readonly MAX_CHECKSUM_MANIFEST_BYTES="1048576"
 
 UXPLAY_VERSION="$DEFAULT_UXPLAY_VERSION"
 UXPLAY_COMMIT="$DEFAULT_UXPLAY_COMMIT"
 UXPLAY_SHA256="$DEFAULT_UXPLAY_SHA256"
+RESOLVED_UXPLAY_SHA256=""
 SCRCPY_VERSION="$DEFAULT_SCRCPY_VERSION"
 SCRCPY_SHA256_OVERRIDE=""
 only_tool=""
@@ -185,7 +188,26 @@ load_node_version() {
 
 user_bin="${HOME}/.local/bin"
 export NEO_AIRPLAY_ENGINE_DIR="$engine_dir"
-export PATH="${user_bin}:${HOME}/.cargo/bin:${HOME}/.bun/bin:${PATH:-}"
+export PATH="${PATH:-/usr/bin:/bin}"
+
+is_untrusted_path_dir() {
+  local directory="${1%/}" home_clean="${HOME%/}"
+  [[ -n "$directory" ]] || return 0
+  if [[ -n "$home_clean" && ( "$directory" == "$home_clean" || "$directory" == "${home_clean}/"* ) ]]; then
+    return 0
+  fi
+  if [[ "$directory" == "${engine_dir%/}" || "$directory" == "${engine_dir%/}/"* ]]; then
+    return 0
+  fi
+  if [[ -d "$directory" ]] && find "$directory" -maxdepth 0 -perm -0002 ! -perm -1000 -print -quit 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  return 1
+}
+
+append_user_dev_path() {
+  export PATH="${user_bin}:${HOME}/.cargo/bin:${HOME}/.bun/bin:${PATH:-}"
+}
 
 cleanup_registered_paths() {
   local path
@@ -201,10 +223,18 @@ write_result() {
   [[ -n "$result_file" ]] || return 0
   [[ ! -L "$result_file" ]] || return 1
   temporary="$(mktemp "${result_file}.tmp.XXXXXX")"
-  if printf '{"pid":%d,"exitCode":%d}\n' "$$" "$status" > "$temporary"; then
-    mv -f -- "$temporary" "$result_file"
+  if [[ -n "$RESOLVED_UXPLAY_SHA256" && "$status" -eq 0 ]]; then
+    if printf '{"pid":%d,"exitCode":%d,"resolvedSha256":"%s"}\n' "$$" "$status" "$RESOLVED_UXPLAY_SHA256" > "$temporary"; then
+      mv -f -- "$temporary" "$result_file"
+    else
+      rm -f -- "$temporary"
+    fi
   else
-    rm -f -- "$temporary"
+    if printf '{"pid":%d,"exitCode":%d}\n' "$$" "$status" > "$temporary"; then
+      mv -f -- "$temporary" "$result_file"
+    else
+      rm -f -- "$temporary"
+    fi
   fi
 }
 
@@ -231,20 +261,39 @@ sha256_file() {
   fi
 }
 
+is_allowed_download_host() {
+  local url="$1" authority host
+  [[ "$url" == https://* ]] || return 1
+  authority="${url#https://}"
+  authority="${authority%%[/?#]*}"
+  [[ -n "$authority" && "$authority" != *@* && "$authority" != *:* ]] || return 1
+  host="$(printf '%s' "$authority" | awk '{print tolower($1)}')"
+  case "$host" in
+    github.com|codeload.github.com|objects.githubusercontent.com|release-assets.githubusercontent.com|raw.githubusercontent.com|static.rust-lang.org|nodejs.org)
+      return 0 ;;
+    *)
+      return 1 ;;
+  esac
+}
+
 download_https_unverified() {
-  local url="$1" destination="$2" label="$3"
-  [[ "$url" == https://* ]] || fail "Refusing non-HTTPS download URL for ${label}."
-  if ! curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-error --location --max-redirs 5 --connect-timeout 30 --max-time 600 "$url" --output "$destination"; then
+  local url="$1" destination="$2" label="$3" max_bytes="${4:-$MAX_DOWNLOAD_BYTES}" effective_url
+  is_allowed_download_host "$url" || fail "Refusing download URL outside official host allowlist for ${label}: ${url}"
+  if ! effective_url="$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-error --location --max-redirs 5 --max-filesize "$max_bytes" --connect-timeout 30 --max-time 600 --write-out '%{url_effective}' "$url" --output "$destination")"; then
     rm -f -- "$destination"
     fail "Failed to download ${label}."
+  fi
+  if ! is_allowed_download_host "$effective_url"; then
+    rm -f -- "$destination"
+    fail "Refusing redirected download target outside official host allowlist for ${label}: ${effective_url}"
   fi
 }
 
 download_verified() {
-  local url="$1" destination="$2" expected_sha="$3" label="$4" actual_sha
+  local url="$1" destination="$2" expected_sha="$3" label="$4" max_bytes="${5:-$MAX_DOWNLOAD_BYTES}" actual_sha
   [[ "$expected_sha" =~ ^[0-9a-fA-F]{64}$ ]] || fail "Invalid SHA-256 checksum configured for ${label}."
   expected_sha="$(printf '%s\n' "$expected_sha" | awk '{print tolower($1)}')"
-  download_https_unverified "$url" "$destination" "$label"
+  download_https_unverified "$url" "$destination" "$label" "$max_bytes"
   actual_sha="$(sha256_file "$destination" | awk '{print tolower($1)}')"
   if [[ "$actual_sha" != "$expected_sha" ]]; then
     rm -f -- "$destination"
@@ -265,11 +314,99 @@ resolve_scrcpy_sha256() {
   sums_dir="$(mktemp -d "${TMPDIR:-/tmp}/neo-airplay-scrcpy-sums.XXXXXX")"
   cleanup_paths+=("$sums_dir")
   sums_file="${sums_dir}/SHA256SUMS.txt"
-  download_https_unverified "https://github.com/Genymobile/scrcpy/releases/download/v${version}/SHA256SUMS.txt" "$sums_file" "Official scrcpy v${version} SHA256SUMS.txt"
+  download_https_unverified "https://github.com/Genymobile/scrcpy/releases/download/v${version}/SHA256SUMS.txt" "$sums_file" "Official scrcpy v${version} SHA256SUMS.txt" "$MAX_CHECKSUM_MANIFEST_BYTES"
   resolved="$(awk -v target="$asset" '{ name=$2; sub(/^\*/, "", name); sub(/^\.\//, "", name); if (name == target && $1 ~ /^[0-9a-fA-F]{64}$/) { print tolower($1); exit 0 } }' "$sums_file")"
   rm -rf -- "$sums_dir"
   [[ -n "$resolved" ]] || fail "Official SHA256SUMS.txt for scrcpy v${version} did not contain checksum for ${asset}."
   printf '%s\n' "$resolved"
+}
+
+validate_relative_symlink_target() {
+  local link_path="$1" target="$2" depth=0 segment parent
+  local -a parts target_parts
+  [[ -n "$target" && "$target" != /* ]] || return 1
+  parent="$(dirname "$link_path")"
+  if [[ "$parent" != "." ]]; then
+    IFS=/ read -r -a parts <<< "$parent"
+    for segment in "${parts[@]}"; do
+      [[ -z "$segment" || "$segment" == "." ]] && continue
+      [[ "$segment" != ".." ]] || return 1
+      depth=$((depth + 1))
+    done
+  fi
+  IFS=/ read -r -a target_parts <<< "$target"
+  for segment in "${target_parts[@]}"; do
+    [[ -z "$segment" || "$segment" == "." ]] && continue
+    if [[ "$segment" == ".." ]]; then
+      depth=$((depth - 1))
+      ((depth >= 0)) || return 1
+    else
+      depth=$((depth + 1))
+    fi
+  done
+  return 0
+}
+
+extract_tar_safely() {
+  local archive="$1" destination="$2" compression="$3" strip_components="${4:-0}" allow_internal_symlinks="${5:-0}"
+  local list_output detail_output entry line link_info link_path link_target
+  [[ -f "$archive" && ! -L "$archive" ]] || fail "Archive path is invalid or a symbolic link: ${archive}"
+  [[ -d "$destination" && ! -L "$destination" ]] || fail "Extraction destination must be a real directory: ${destination}"
+  list_output="$(LC_ALL=C LANG=C tar "-t${compression}f" "$archive")" || fail "Failed to inspect archive manifest: ${archive}"
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || continue
+    [[ "$entry" != /* ]] || fail "Archive entry uses absolute path: ${entry}"
+    [[ ! "$entry" =~ (^|/)\.\.(/|$) ]] || fail "Archive entry escapes destination directory: ${entry}"
+  done <<< "$list_output"
+
+  detail_output="$(LC_ALL=C LANG=C tar "-tv${compression}f" "$archive")" || fail "Failed to inspect archive metadata: ${archive}"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if [[ "$line" == h* || "$line" == b* || "$line" == c* || "$line" == p* || "$line" == *" link to "* ]]; then
+      fail "Refusing unsafe special file or hardlink in archive: ${line}"
+    fi
+    if [[ "$line" == l* ]]; then
+      if ((allow_internal_symlinks == 0)); then
+        fail "Refusing symbolic link entry in archive: ${line}"
+      fi
+      link_info="${line##* }"
+      if [[ "$line" == *" -> "* ]]; then
+        link_target="${line#* -> }"
+        link_path="${line% -> *}"
+        link_path="${link_path##* }"
+        validate_relative_symlink_target "$link_path" "$link_target" || fail "Refusing escaping symbolic link in archive: ${link_path} -> ${link_target}"
+      else
+        fail "Refusing unreadable symbolic link in archive: ${line}"
+      fi
+    fi
+  done <<< "$detail_output"
+
+  local -a tar_args=(--no-same-owner --no-same-permissions "-x${compression}f" "$archive" -C "$destination")
+  if ((strip_components > 0)); then
+    tar_args+=(--strip-components="$strip_components")
+  fi
+  tar "${tar_args[@]}"
+}
+
+extract_zip_safely() {
+  local archive="$1" destination="$2" zip_entries zip_details entry line
+  [[ -f "$archive" && ! -L "$archive" ]] || fail "ZIP archive path is invalid or a symbolic link: ${archive}"
+  [[ -d "$destination" && ! -L "$destination" ]] || fail "Extraction destination must be a real directory: ${destination}"
+  if unzip -Z1 "$archive" >/dev/null 2>&1; then
+    zip_entries="$(LC_ALL=C LANG=C unzip -Z1 "$archive")" || fail "Failed to inspect ZIP archive: ${archive}"
+    while IFS= read -r entry; do
+      [[ -n "$entry" ]] || continue
+      [[ "$entry" != /* && ! "$entry" =~ ^[a-zA-Z]: ]] || fail "ZIP entry uses unsafe absolute path: ${entry}"
+      [[ ! "$entry" =~ (^|/)\.\.(/|$) ]] || fail "ZIP entry escapes destination directory: ${entry}"
+    done <<< "$zip_entries"
+    zip_details="$(LC_ALL=C LANG=C unzip -Z "$archive" 2>/dev/null || true)"
+    while IFS= read -r line; do
+      if [[ "$line" == l* ]]; then
+        fail "Refusing symbolic link entry in ZIP archive: ${line}"
+      fi
+    done <<< "$zip_details"
+  fi
+  unzip -q "$archive" -d "$destination"
 }
 
 stage_file_atomic() {
@@ -337,8 +474,10 @@ check_gstreamer() {
   if [[ "$platform" == "Darwin" ]]; then
     setup_macos_library_path
   fi
-  if [[ -x "${engine_bin}/gst-plugin-scanner" ]]; then
-    export GST_PLUGIN_SCANNER_1_0="${engine_bin}/gst-plugin-scanner"
+  local scanner_executable
+  scanner_executable="$(runtime_executable gst-plugin-scanner || true)"
+  if [[ -n "$scanner_executable" ]]; then
+    export GST_PLUGIN_SCANNER_1_0="$scanner_executable"
   fi
   if [[ "$platform" == "Darwin" ]]; then
     elements+=(osxvideosink avdec_h264)
@@ -385,6 +524,7 @@ check_gstreamer() {
     export GST_REGISTRY="${registry_directory}/registry.bin"
     export GST_REGISTRY_1_0="$GST_REGISTRY"
 
+    unset LD_PRELOAD DYLD_INSERT_LIBRARIES
     if "$bounded_timeout" --kill-after=2s 30s "$gst_inspect" --print-plugin-auto-install-info > "$registry_output" 2> "$registry_error"; then
       registry_status=0
     else
@@ -460,7 +600,7 @@ check_uxplay() {
     missing+=("GNU timeout utility for bounded runtime probes")
     return 1
   fi
-  if ! version_output="$("$bounded_timeout" --kill-after=2s 10s "$executable" -v 2>&1)"; then
+  if ! version_output="$(UXPLAYRC=/dev/null "$bounded_timeout" --kill-after=2s 10s "$executable" -v 2>&1)"; then
     missing+=("uxplay version probe failed or timed out")
     return 1
   fi
@@ -509,6 +649,7 @@ check_runtime() {
 check_development() {
   local node_version bun_version rust_version
   local dev_missing=()
+  append_user_dev_path
   load_node_version
   if ! command -v rustup >/dev/null 2>&1 || ! rustc +stable --version >/dev/null 2>&1 || ! cargo +stable --version >/dev/null 2>&1; then
     dev_missing+=("Rust stable (rustup, rustc, cargo)")
@@ -575,6 +716,7 @@ EOF
   mv -f -- "$temporary" "$env_file"
   line='if [ -r "$HOME/.config/neo-airplay/env.sh" ]; then . "$HOME/.config/neo-airplay/env.sh"; fi'
   for profile in "${HOME}/.profile" "${HOME}/.bash_profile" "${HOME}/.bashrc" "${HOME}/.zprofile" "${HOME}/.zshrc"; do
+    [[ ! -L "$profile" ]] || fail "Shell profile must not be a symbolic link: ${profile}"
     if [[ ! -f "$profile" ]] || ! grep -Fqx -- "$line" "$profile"; then
       printf '\n%s\n' "$line" >> "$profile"
     fi
@@ -601,8 +743,10 @@ if ((warm_registry)); then
 
   local_gst_inspect="$(runtime_executable gst-inspect-1.0 || true)"
   local_timeout="$(runtime_executable gtimeout || true)"
+  local_scanner="$(runtime_executable gst-plugin-scanner || true)"
   [[ -x "$local_gst_inspect" ]] || fail "GStreamer gst-inspect-1.0 is unavailable."
   [[ -x "$local_timeout" ]] || fail "GNU timeout utility is unavailable."
+  [[ -x "$local_scanner" ]] || fail "GStreamer gst-plugin-scanner is unavailable or unsafe."
 
   registry_parent="$(dirname "$registry_path")"
   mkdir -p "$registry_parent"
@@ -612,9 +756,10 @@ if ((warm_registry)); then
     exit 0
   fi
 
+  unset LD_PRELOAD DYLD_INSERT_LIBRARIES
   export GST_PLUGIN_PATH_1_0="${engine_dir}/lib/gstreamer-1.0"
   export GST_PLUGIN_SYSTEM_PATH_1_0="${engine_dir}/lib/gstreamer-1.0"
-  export GST_PLUGIN_SCANNER_1_0="${engine_bin}/gst-plugin-scanner"
+  export GST_PLUGIN_SCANNER_1_0="$local_scanner"
   export GST_REGISTRY="$registry_path"
   export GST_REGISTRY_1_0="$registry_path"
   setup_macos_library_path
@@ -682,23 +827,57 @@ fi
 
 mkdir -p "$engine_bin"
 
+resolve_system_command() {
+  local command_name="$1" directory candidate
+  if [[ "${NEO_AIRPLAY_TEST_ALLOW_PATH_PRIVILEGED:-0}" == "1" ]]; then
+    local -a path_entries=()
+    IFS=: read -r -a path_entries <<< "${PATH:-}"
+    for directory in "${path_entries[@]}"; do
+      is_untrusted_path_dir "$directory" && continue
+      candidate="${directory}/${command_name}"
+      if [[ -x "$candidate" && ! -L "$candidate" ]]; then
+        printf '%s' "$candidate"
+        return 0
+      fi
+    done
+    return 1
+  fi
+  for directory in /usr/bin /usr/sbin /bin /sbin; do
+    candidate="${directory}/${command_name}"
+    if [[ -x "$candidate" && ! -L "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 run_privileged() {
+  local target_cmd="$1" resolved_target helper
+  shift
+  resolved_target="$(resolve_system_command "$target_cmd" || true)"
+  [[ -n "$resolved_target" ]] || fail "Trusted system executable is unavailable: ${target_cmd}"
   if ((gui)); then
-    command -v pkexec >/dev/null 2>&1 || fail "pkexec is required for GUI installation. Run this script in a terminal instead."
-    pkexec "$@"
+    helper="$(resolve_system_command pkexec || true)"
+    [[ -n "$helper" ]] || fail "pkexec is required for GUI installation. Run this script in a terminal instead."
+    "$helper" "$resolved_target" "$@"
   elif ((EUID == 0)); then
-    "$@"
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo "$@"
+    "$resolved_target" "$@"
   else
-    fail "Administrator authorization is required. Run this script from a terminal with sudo available."
+    helper="$(resolve_system_command sudo || true)"
+    [[ -n "$helper" ]] || fail "Administrator authorization is required. Run this script from a terminal with trusted sudo available."
+    "$helper" "$resolved_target" "$@"
   fi
 }
 
 install_uxplay_source() {
   local archive work_dir version_output version_number
   if ((upgrade == 0 && uxplay_custom_requested == 0)) && [[ "$only_tool" != "uxplay" ]] && [[ -f "${engine_bin}/uxplay" && ! -L "${engine_bin}/uxplay" && -x "${engine_bin}/uxplay" ]]; then
-    version_output="$("${engine_bin}/uxplay" -v 2>&1 || true)"
+    if [[ -n "$bounded_timeout" ]]; then
+      version_output="$(UXPLAYRC=/dev/null "$bounded_timeout" --kill-after=2s 10s "${engine_bin}/uxplay" -v 2>&1 || true)"
+    else
+      version_output="$(UXPLAYRC=/dev/null "${engine_bin}/uxplay" -v 2>&1 || true)"
+    fi
     version_number="$(printf '%s\n' "$version_output" | sed -nE 's/.*UxPlay version ([0-9]+(\.[0-9]+)+).*/\1/p' | head -n 1 || true)"
     if [[ -n "$version_number" ]] && awk -v actual="$version_number" -v minimum="$UXPLAY_VERSION" 'BEGIN { split(actual, a, "."); split(minimum, b, "."); for (i=1; i<=3; i++) { if ((a[i]+0) > (b[i]+0)) exit 0; if ((a[i]+0) < (b[i]+0)) exit 1 } exit 0 }'; then
       return
@@ -712,14 +891,16 @@ install_uxplay_source() {
   elif ((allow_unverified_uxplay)); then
     log "Downloading UxPlay source (${UXPLAY_COMMIT}) via HTTPS TLS 1.2+ without pinned SHA-256."
     download_https_unverified "$UXPLAY_URL" "$archive" "UxPlay source archive (${UXPLAY_COMMIT})"
+    RESOLVED_UXPLAY_SHA256="$(sha256_file "$archive" | awk '{print tolower($1)}')"
   else
     fail "Refusing to download UxPlay source without SHA-256 verification."
   fi
-  mkdir -p "${work_dir}/source"
-  tar -xzf "$archive" -C "${work_dir}/source" --strip-components=1
+  mkdir -p "${work_dir}/source" "${work_dir}/staged"
+  extract_tar_safely "$archive" "${work_dir}/source" z 1 0
   cmake -S "${work_dir}/source" -B "${work_dir}/build" -DCMAKE_INSTALL_PREFIX="$engine_dir"
   cmake --build "${work_dir}/build" --parallel
-  cmake --install "${work_dir}/build"
+  cmake --install "${work_dir}/build" --prefix "${work_dir}/staged"
+  stage_file_atomic "${work_dir}/staged/bin/uxplay" "${engine_bin}/uxplay" 0755 0
   rm -rf -- "$work_dir"
 }
 
@@ -728,7 +909,7 @@ external_runtime_executable() {
   local path_entries=()
   IFS=: read -r -a path_entries <<< "${PATH:-}"
   for directory in "${path_entries[@]}"; do
-    [[ "$directory" == "$engine_dir" || "$directory" == "${engine_dir}/"* ]] && continue
+    is_untrusted_path_dir "$directory" && continue
     candidate="${directory}/${command_name}"
     if [[ -x "$candidate" ]]; then
       printf '%s' "$candidate"
@@ -749,13 +930,16 @@ stage_runtime_tool() {
     fi
   fi
   if [[ -f "$target_path" && ! -L "$target_path" && -x "$target_path" && -z "$source_path" ]]; then return 0; fi
-  if [[ -z "$source_path" ]]; then source_path="$(command -v "$command_name" 2>/dev/null || true)"; fi
+  if [[ -z "$source_path" ]]; then source_path="$(external_runtime_executable "$command_name" || true)"; fi
   [[ -n "$source_path" && -x "$source_path" ]] || fail "Required runtime tool is not available for staging: ${command_name}."
+  if is_untrusted_path_dir "$(dirname "$source_path")"; then
+    fail "Refusing to stage runtime tool from untrusted directory: ${source_path}"
+  fi
   stage_file_atomic "$source_path" "$target_path" 0755 1
 }
 
 stage_runtime_tools() {
-  local scrcpy_server scrcpy_prefix
+  local scrcpy_server scrcpy_prefix external_scrcpy
   if ((upgrade)); then
     rm -rf "${engine_dir}/lib/gstreamer-1.0" "${engine_dir}/share/gstreamer-1.0"
     if [[ "$(uname -s)" == "Linux" && "$(uname -m)" != x86_64 && "$(uname -m)" != amd64 ]]; then
@@ -766,14 +950,17 @@ stage_runtime_tools() {
   stage_runtime_tool scrcpy
   stage_runtime_tool gst-inspect-1.0
   if [[ "$(uname -s)" == "Darwin" ]]; then
-    stage_runtime_tool gtimeout "$(command -v gtimeout 2>/dev/null || true)"
+    stage_runtime_tool gtimeout "$(external_runtime_executable gtimeout || true)"
   else
-    stage_runtime_tool timeout "$(command -v timeout 2>/dev/null || true)"
+    stage_runtime_tool timeout "$(external_runtime_executable timeout || true)"
   fi
   stage_gstreamer_plugins
   if [[ ! -f "${engine_bin}/scrcpy-server" || -L "${engine_bin}/scrcpy-server" || ! -s "${engine_bin}/scrcpy-server" ]]; then
-    scrcpy_server="$(dirname "$(command -v scrcpy)")/scrcpy-server"
-    if [[ -s "$scrcpy_server" ]]; then stage_file_atomic "$scrcpy_server" "${engine_bin}/scrcpy-server" 0644 1; fi
+    external_scrcpy="$(external_runtime_executable scrcpy || true)"
+    if [[ -n "$external_scrcpy" ]]; then
+      scrcpy_server="$(dirname "$external_scrcpy")/scrcpy-server"
+      if [[ -s "$scrcpy_server" ]]; then stage_file_atomic "$scrcpy_server" "${engine_bin}/scrcpy-server" 0644 1; fi
+    fi
     for scrcpy_server in /usr/share/scrcpy/scrcpy-server /usr/lib/scrcpy/scrcpy-server /usr/lib64/scrcpy/scrcpy-server; do
       if [[ -s "$scrcpy_server" ]]; then stage_file_atomic "$scrcpy_server" "${engine_bin}/scrcpy-server" 0644 1; break; fi
     done
@@ -790,36 +977,25 @@ stage_runtime_tools() {
   fi
 }
 
-copy_tree_dereference_links() {
-  local source_root="$1" source_path relative_path target_path
-  while IFS= read -r -d '' source_path; do
-    relative_path="${source_path#"${source_root}/"}"
-    target_path="${engine_dir}/lib/${relative_path}"
-    if [[ -d "$source_path" ]]; then
-      rm -rf "$target_path"
-      mkdir -p "$(dirname "$target_path")"
-      cp -RL "$source_path" "$target_path"
-    elif [[ -f "$source_path" ]]; then
-      rm -f "$target_path"
-      cp -L "$source_path" "$target_path"
-    else
-      rm -f "$target_path"
-    fi
-  done < <(find "$source_root" -type l -print0)
-}
-
 stage_gstreamer_plugins() {
-  local plugins_source scanner_source plugins_target
+  local plugins_source scanner_source plugins_target temp_plugins
   plugins_target="${engine_dir}/lib/gstreamer-1.0"
   [[ ! -L "${engine_dir}/lib" && ! -L "$plugins_target" ]] || fail "GStreamer plugin target directory must not be a symbolic link."
   if [[ "$(uname -s)" == "Darwin" ]]; then
-    local gstreamer_prefix
+    local gstreamer_prefix staged_lib lib_entry entry_name
     gstreamer_prefix="$(brew --prefix gstreamer)"
     plugins_source="${gstreamer_prefix}/lib/gstreamer-1.0"
     scanner_source="${gstreamer_prefix}/libexec/gstreamer-1.0/gst-plugin-scanner"
     mkdir -p "${engine_dir}/lib"
-    cp -Rf "${gstreamer_prefix}/lib/." "${engine_dir}/lib/"
-    copy_tree_dereference_links "${gstreamer_prefix}/lib"
+    for lib_entry in "${gstreamer_prefix}/lib/"*; do
+      [[ -e "$lib_entry" ]] || continue
+      entry_name="$(basename "$lib_entry")"
+      case "$entry_name" in
+        python*|pkgconfig|gst-validate-launcher|girepository-1.0) continue ;;
+      esac
+      rm -rf "${engine_dir}/lib/${entry_name}"
+      cp -RL "$lib_entry" "${engine_dir}/lib/${entry_name}"
+    done
     find "${engine_dir}/lib" -type f -exec chmod u+w {} +
   else
     plugins_source="$(pkg-config --variable=pluginsdir gstreamer-1.0 2>/dev/null || true)"
@@ -834,8 +1010,15 @@ stage_gstreamer_plugins() {
   fi
   [[ -d "$plugins_source" ]] || fail "GStreamer plugin directory is unavailable for staging."
   if [[ "$(uname -s)" != "Darwin" ]]; then
-    mkdir -p "$plugins_target"
-    cp -a "${plugins_source}/." "$plugins_target/"
+    mkdir -p "${engine_dir}/lib"
+    temp_plugins="$(mktemp -d "${engine_dir}/lib/.gstreamer-1.0.tmp.XXXXXX")"
+    cleanup_paths+=("$temp_plugins")
+    cp -RL "${plugins_source}/." "$temp_plugins/"
+    if find "$temp_plugins" -type l -print -quit 2>/dev/null | grep -q .; then
+      fail "Refusing symbolic links inside staged GStreamer plugins."
+    fi
+    rm -rf "$plugins_target"
+    mv "$temp_plugins" "$plugins_target"
   fi
   [[ -x "$scanner_source" ]] || fail "GStreamer plugin scanner is unavailable for staging."
   stage_file_atomic "$scanner_source" "${engine_bin}/gst-plugin-scanner" 0755 1
@@ -901,7 +1084,7 @@ install_macos_runtime() {
       brew upgrade --quiet "$package"
     done
   fi
-  stage_runtime_tool gtimeout "$(command -v gtimeout 2>/dev/null || true)"
+  stage_runtime_tool gtimeout "$(external_runtime_executable gtimeout || true)"
   bounded_timeout="$(runtime_executable gtimeout || true)"
   install_uxplay_source
   install_scrcpy_macos
@@ -939,7 +1122,7 @@ install_scrcpy_macos() {
   extract_dir="${work_dir}/extract"
   mkdir -p "$extract_dir"
   download_verified "https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/${asset}" "$archive" "$expected_sha" "Official macOS scrcpy archive"
-  tar -xzf "$archive" -C "$extract_dir"
+  extract_tar_safely "$archive" "$extract_dir" z 0 0
   bundle="$(find "$extract_dir" -type d -name "scrcpy-macos-*-v${SCRCPY_VERSION}" -print -quit)"
   if [[ -z "$bundle" ]]; then
     bundle="$(find "$extract_dir" -mindepth 1 -maxdepth 1 -type d -print -quit)"
@@ -968,7 +1151,7 @@ install_scrcpy_linux() {
     extract_dir="${work_dir}/extract"
     mkdir -p "$extract_dir"
     download_verified "$SCRCPY_LINUX_URL" "$archive" "$expected_sha" "scrcpy source archive"
-    tar -xzf "$archive" -C "$extract_dir"
+    extract_tar_safely "$archive" "$extract_dir" z 0 0
     binary="$(find "$extract_dir" -type f -name scrcpy -perm -u+x -print -quit)"
     server="$(find "$extract_dir" -type f -name scrcpy-server -print -quit)"
     [[ -n "$binary" && -n "$server" ]] || fail "The official scrcpy release archive did not contain its client and server binaries."
@@ -1005,7 +1188,7 @@ install_bun_binary() {
   extracted="${work_dir}/extract"
   mkdir -p "$extracted"
   download_verified "https://github.com/oven-sh/bun/releases/download/bun-v${BUN_VERSION}/${asset}" "$archive" "$expected_sha" "Bun ${BUN_VERSION} archive"
-  unzip -q "$archive" -d "$extracted"
+  extract_zip_safely "$archive" "$extracted"
   executable="$(find "$extracted" -type f -name bun -print -quit)"
   [[ -n "$executable" ]] || fail "Official Bun archive is missing its executable."
   target_dir="${HOME}/.bun/bin"
@@ -1038,7 +1221,7 @@ install_node_binary() {
   extracted="${work_dir}/extract"
   mkdir -p "$extracted"
   download_verified "https://nodejs.org/dist/v${NODE_VERSION}/${asset}" "$archive" "$expected_sha" "Node.js ${NODE_VERSION} archive"
-  tar -xJf "$archive" -C "$extracted"
+  extract_tar_safely "$archive" "$extracted" J 0 1
   node_root="$(find "$extracted" -mindepth 1 -maxdepth 1 -type d -name "node-v${NODE_VERSION}-*" -print -quit)"
   [[ -n "$node_root" && -x "${node_root}/bin/node" && ! -L "${node_root}/bin/node" ]] || fail "Official Node.js archive did not contain its node binary."
   node_dir="${HOME}/.local/lib/neo-airplay/node-v${NODE_VERSION}"
@@ -1119,7 +1302,7 @@ install_linux_runtime() {
   elif command -v pacman >/dev/null 2>&1; then manager=pacman
   else fail "Supported Linux package manager not found (apt, dnf, pacman)."; fi
   linux_packages "$manager"
-  stage_runtime_tool timeout "$(command -v timeout 2>/dev/null || true)"
+  stage_runtime_tool timeout "$(external_runtime_executable timeout || true)"
   bounded_timeout="$(runtime_executable timeout || true)"
   install_scrcpy_linux
   install_uxplay_source
@@ -1134,6 +1317,7 @@ install_linux_runtime() {
 }
 
 install_development_tools() {
+  append_user_dev_path
   mkdir -p "$user_bin"
   case "$(uname -s)" in
     Darwin)

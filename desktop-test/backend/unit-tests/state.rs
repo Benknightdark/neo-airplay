@@ -1,19 +1,22 @@
 //! 後端基礎設施層狀態管理、設定檔讀寫與子程序控制單元測試集合。
 
 use crate::domain::{
-    bonjour_instance_matches, parse_adb_devices, renderer_argument, AndroidDeviceStatus,
-    EngineKind, EngineSnapshot, EngineStatus, ReceiverSettings, AIRPLAY_READY_TIMEOUT,
+    bonjour_instance_matches, parse_adb_devices, renderer_argument, AirplayAuthMode,
+    AndroidDeviceStatus, EngineKind, EngineSnapshot, EngineStatus, ReceiverSettings,
+    AIRPLAY_READY_TIMEOUT,
 };
-use crate::infrastructure::persistence::{load_settings, write_settings, AppLogger};
+use crate::infrastructure::persistence::{
+    load_settings, write_settings, AppLogger, MAX_SETTINGS_FILE_BYTES,
+};
 #[cfg(unix)]
 use crate::infrastructure::process::find_executable;
 #[cfg(target_os = "macos")]
 use crate::infrastructure::process::macos_library_paths;
 use crate::infrastructure::process::{
-    finish_pipe, is_executable_file, read_pipe, MAX_CAPTURED_PROCESS_OUTPUT_BYTES,
+    finish_pipe, is_executable_file, read_bounded_lines, read_pipe, sanitize_child_environment,
+    MAX_CAPTURED_PROCESS_OUTPUT_BYTES,
 };
 use crate::infrastructure::state::{AppState, DiscoveryEvent, EngineController};
-#[cfg(target_os = "macos")]
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Cursor;
@@ -151,6 +154,7 @@ fn keeps_receiver_name_in_a_separate_argument() {
         renderer: "Auto".to_owned(),
         fullscreen: true,
         start_on_login: false,
+        ..ReceiverSettings::default()
     };
     #[allow(unused_mut)]
     let mut expected = vec![
@@ -192,6 +196,7 @@ fn settings_roundtrip_through_json_file() {
         renderer: "Auto".to_owned(),
         fullscreen: true,
         start_on_login: true,
+        ..ReceiverSettings::default()
     };
 
     write_settings(&path, &settings).unwrap();
@@ -499,4 +504,310 @@ fn test_directory(name: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!("neo-airplay-{name}-{}-{nonce}", std::process::id()))
+}
+
+/// 驗證 `write_settings` 設定 `0o600` 權限，且 `load_settings` 拒絕符號連結與超過上限的設定檔。
+#[test]
+fn settings_persistence_enforces_size_limit_and_unix_permissions() {
+    let directory = test_directory("settings-security");
+    fs::create_dir_all(&directory).unwrap();
+    let settings_path = directory.join("settings.json");
+
+    let custom = ReceiverSettings {
+        receiver_name: "Locked".to_owned(),
+        ..ReceiverSettings::default()
+    };
+    write_settings(&settings_path, &custom).unwrap();
+    assert_eq!(load_settings(&settings_path), custom);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let mode = fs::metadata(&settings_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        let outside = directory.join("outside.json");
+        fs::write(&outside, r#"{"receiverName":"Outside"}"#).unwrap();
+        let symlink_path = directory.join("symlink-settings.json");
+        symlink(&outside, &symlink_path).unwrap();
+        assert_eq!(load_settings(&symlink_path), ReceiverSettings::default());
+        assert!(write_settings(&symlink_path, &custom).is_err());
+    }
+
+    let oversized_path = directory.join("oversized.json");
+    let oversized_payload = vec![b' '; (MAX_SETTINGS_FILE_BYTES as usize) + 128];
+    fs::write(&oversized_path, oversized_payload).unwrap();
+    assert_eq!(load_settings(&oversized_path), ReceiverSettings::default());
+
+    fs::remove_dir_all(&directory).unwrap();
+}
+
+/// 驗證 `AppLogger` 拒絕符號連結的當日日誌檔且不覆寫外部目標。
+#[cfg(unix)]
+#[test]
+fn app_logger_refuses_symlinked_daily_log_target() {
+    use std::os::unix::fs::symlink;
+
+    let directory = test_directory("logger-symlink");
+    fs::create_dir_all(&directory).unwrap();
+    let outside = directory.join("outside.txt");
+    fs::write(&outside, b"keep-untouched").unwrap();
+
+    let today = jiff::Zoned::now().strftime("%Y-%m-%d").to_string();
+    let daily_log = directory.join(format!("{today}.jsonl"));
+    symlink(&outside, &daily_log).unwrap();
+
+    let logger = AppLogger::new(directory.clone());
+    logger.write(
+        crate::domain::LogLevel::Information,
+        "should not write through",
+    );
+    assert_eq!(fs::read(&outside).unwrap(), b"keep-untouched");
+
+    fs::remove_dir_all(&directory).unwrap();
+}
+
+/// 驗證 `read_bounded_lines` 會截斷超過上限的單行資料以防止 OOM 並繼續讀取後續行。
+#[test]
+fn read_bounded_lines_caps_long_lines_and_keeps_reading() {
+    let mut payload = vec![b'x'; 65536];
+    payload.extend_from_slice(b"\nsecond line\r\n");
+
+    let mut collected = Vec::new();
+    read_bounded_lines(Cursor::new(payload), 256, |line| collected.push(line));
+
+    assert_eq!(collected.len(), 2);
+    assert!(collected[0].ends_with("…[truncated]"));
+    assert!(collected[0].len() <= 256 + "…[truncated]".len());
+    assert_eq!(collected[1], "second line");
+}
+
+/// 驗證 `sanitize_child_environment` 會移除所有高風險環境變數注入鍵。
+#[test]
+fn sanitize_child_environment_removes_dangerous_variables() {
+    let mut command = Command::new("env");
+    sanitize_child_environment(&mut command);
+
+    let removed: std::collections::HashSet<&OsStr> = command
+        .get_envs()
+        .filter_map(|(key, value)| if value.is_none() { Some(key) } else { None })
+        .collect();
+
+    for expected in [
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_FRAMEWORK_PATH",
+        "OPENSSL_CONF",
+        "GCONV_PATH",
+        "UXPLAYRC",
+        "ADB",
+        "SCRCPY_SERVER_PATH",
+    ] {
+        assert!(
+            removed.contains(OsStr::new(expected)),
+            "expected dangerous env var {expected} to be removed"
+        );
+    }
+}
+
+/// 驗證 macOS `macos_library_paths` 拒絕相對路徑、`..` 遍歷路徑與符號連結目錄。
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_library_paths_rejects_relative_parent_and_symlink_entries() {
+    use std::os::unix::fs::symlink;
+
+    let directory = test_directory("macos-lib-paths");
+    let real_lib = directory.join("real-lib");
+    let symlink_lib = directory.join("sym-lib");
+    fs::create_dir_all(&real_lib).unwrap();
+    symlink(&real_lib, &symlink_lib).unwrap();
+
+    let combined = format!(
+        "relative/lib:/tmp/../escaped:{}:{}",
+        symlink_lib.display(),
+        real_lib.display()
+    );
+    let paths = macos_library_paths(&directory, Some(OsStr::new(&combined)));
+
+    assert!(paths.contains(&real_lib));
+    assert!(!paths.iter().any(|path| path == Path::new("relative/lib")));
+    assert!(!paths
+        .iter()
+        .any(|path| path == Path::new("/tmp/../escaped")));
+    assert!(!paths.contains(&symlink_lib));
+
+    fs::remove_dir_all(&directory).unwrap();
+}
+
+/// 驗證 `AppState::start_android_mirror` 在啟動 `scrcpy` 前拒絕不合法的 ADB 序號。
+#[test]
+fn start_android_mirror_rejects_invalid_serials() {
+    let directory = test_directory("invalid-android-serial");
+    let state = AppState::new(
+        directory.join("config"),
+        directory.join("logs"),
+        directory.join("engine"),
+        directory.join("cache/gstreamer/registry.bin"),
+        false,
+    )
+    .unwrap();
+
+    for bad_serial in ["", "-H", "--no-control", "../bad", "bad serial", "a\nb"] {
+        assert!(
+            state.start_android_mirror(bad_serial).is_err(),
+            "expected invalid serial {bad_serial:?} to be rejected"
+        );
+    }
+
+    fs::remove_dir_all(&directory).unwrap();
+}
+
+/// 驗證 Android 引擎在缺少或為符號連結的 `scrcpy-server` 時拒絕啟動並標記缺少元件。
+#[test]
+fn android_controller_requires_non_symlink_scrcpy_server() {
+    let directory = test_directory("scrcpy-server-check");
+    let engine = directory.join("engine");
+    let bin = engine.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let exe_name = if cfg!(target_os = "windows") {
+        "scrcpy.exe"
+    } else {
+        "scrcpy"
+    };
+    let adb_name = if cfg!(target_os = "windows") {
+        "adb.exe"
+    } else {
+        "adb"
+    };
+    let scrcpy_bin = bin.join(exe_name);
+    let adb_bin = bin.join(adb_name);
+    fs::write(&scrcpy_bin, b"#!/bin/sh\nexit 0\n").unwrap();
+    fs::write(&adb_bin, b"#!/bin/sh\nexit 0\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&scrcpy_bin, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&adb_bin, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let controller = EngineController::new(
+        EngineKind::Android,
+        engine.clone(),
+        directory.join("cache/reg.bin"),
+        false,
+        AppLogger::new(directory.join("logs")),
+    );
+    let snapshot = controller.start(&[], None);
+    assert_eq!(snapshot.status, EngineStatus::DependencyMissing);
+    assert!(snapshot.message.contains("scrcpy-server"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let outside = directory.join("outside-server");
+        fs::write(&outside, b"server").unwrap();
+        symlink(&outside, bin.join("scrcpy-server")).unwrap();
+        let sym_snapshot = controller.start(&[], None);
+        assert_eq!(sym_snapshot.status, EngineStatus::DependencyMissing);
+    }
+
+    fs::remove_dir_all(&directory).unwrap();
+}
+
+/// 驗證 AirPlay 固定 PIN 模式會寫入 `0600` `uxplay.rc` 與 `uxplay.register`、拒絕符號連結並在日誌中遮罩 PIN。
+#[cfg(unix)]
+#[test]
+fn airplay_fixed_pin_writes_secure_rc_redacts_logs_and_blocks_symlink() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let directory = test_directory("airplay-fixed-pin");
+    let engine = directory.join("engine");
+    let bin = engine.join("bin");
+    let config = directory.join("config");
+    let logs = directory.join("logs");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&config).unwrap();
+
+    let uxplay = bin.join("uxplay");
+    fs::write(
+        &uxplay,
+        "#!/bin/sh\nprintf '*** CLIENT MUST NOW ENTER PIN = \"9876\" AS AIRPLAY PASSWORD\\n'\n",
+    )
+    .unwrap();
+    fs::set_permissions(&uxplay, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let logger = AppLogger::new(logs);
+    let controller = EngineController::new(
+        EngineKind::AirPlay,
+        engine,
+        directory.join("cache/reg.bin"),
+        false,
+        logger.clone(),
+    )
+    .with_config_dir(config.clone());
+
+    let settings = ReceiverSettings {
+        airplay_auth_mode: AirplayAuthMode::FixedPin,
+        airplay_pin: "9876".to_owned(),
+        ..ReceiverSettings::default()
+    };
+    let snapshot = controller.start_airplay(&settings);
+    assert_eq!(snapshot.status, EngineStatus::Running);
+
+    let rc_path = config.join("uxplay.rc");
+    let reg_path = config.join("uxplay.register");
+    assert_eq!(
+        fs::metadata(&rc_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::metadata(&reg_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let rc_text = fs::read_to_string(&rc_path).unwrap();
+    assert!(rc_text.contains("pin 9876\n"));
+    assert!(rc_text.contains("reg \""));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let mut saw_redacted = false;
+    while std::time::Instant::now() < deadline {
+        let recent = logger.recent();
+        if recent
+            .iter()
+            .any(|entry| entry.message.contains("ENTER PIN = \"****\""))
+        {
+            saw_redacted = true;
+            assert!(
+                recent.iter().all(|entry| !entry.message.contains("9876")),
+                "fixed PIN must never leak into logs: {:?}",
+                recent
+            );
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(saw_redacted, "expected redacted PIN line in captured logs");
+
+    let _ = controller.stop();
+    drop(controller);
+
+    let outside = directory.join("outside.rc");
+    fs::write(&outside, b"untouched").unwrap();
+    fs::remove_file(&rc_path).unwrap();
+    symlink(&outside, &rc_path).unwrap();
+
+    let blocked_controller = EngineController::new(
+        EngineKind::AirPlay,
+        directory.join("engine"),
+        directory.join("cache/reg.bin"),
+        false,
+        logger,
+    )
+    .with_config_dir(config);
+    let blocked = blocked_controller.start_airplay(&settings);
+    assert_eq!(blocked.status, EngineStatus::DependencyMissing);
+    assert_eq!(fs::read(&outside).unwrap(), b"untouched");
+
+    fs::remove_dir_all(&directory).unwrap();
 }

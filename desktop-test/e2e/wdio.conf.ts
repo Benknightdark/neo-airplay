@@ -1,4 +1,4 @@
-import { chmodSync, copyFileSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,6 +26,7 @@ if (profileOwner) {
     copyFileSync(fixturePath, enginePath);
     if (process.platform !== "win32") chmodSync(enginePath, 0o755);
   }
+  writeFileSync(join(engineDirectory, "scrcpy-server"), "fake-scrcpy-server", "utf8");
 }
 
 export const config = {

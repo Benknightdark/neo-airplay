@@ -1,9 +1,9 @@
 //! 後端領域層模型、值物件、日誌環狀緩衝區與純文字解析函式的單元測試集合。
 
 use super::{
-    bonjour_instance_matches, parse_adb_devices, parse_missing_dependencies, stage_label,
-    AndroidDevice, AndroidDeviceStatus, AppLogEntry, LogLevel, ReceiverName, ReceiverSettings,
-    VideoRenderer,
+    bonjour_instance_matches, is_valid_android_serial, parse_adb_devices,
+    parse_missing_dependencies, stage_label, validate_catalog_url, AirplayAuthMode, AndroidDevice,
+    AndroidDeviceStatus, AppLogEntry, LogLevel, ReceiverName, ReceiverSettings, VideoRenderer,
 };
 use std::collections::VecDeque;
 
@@ -15,6 +15,7 @@ fn settings_are_normalized_and_invalid_renderer_uses_auto() {
         renderer: "unknown-sink".to_owned(),
         fullscreen: true,
         start_on_login: false,
+        ..ReceiverSettings::default()
     }
     .sanitized();
 
@@ -342,4 +343,133 @@ fn tool_catalog_parsers_and_os_matrix_work_offline() {
         macos_catalog.tools[1].version_control,
         VersionControlMode::Selectable
     );
+}
+
+/// 驗證 `ReceiverName` 會移除控制／Bidi 字元並依 UTF-8 邊界截斷至 63 位元組上限。
+#[test]
+fn receiver_name_strips_control_and_bidi_chars_and_bounds_63_utf8_bytes() {
+    let cleaned = ReceiverName::new("  \u{202E}Living\x00\n Room\u{2066}  ");
+    assert_eq!(cleaned.as_str(), "Living Room");
+
+    let ascii_long = ReceiverName::new(&"a".repeat(80));
+    assert_eq!(
+        ascii_long.as_str().len(),
+        super::settings::MAX_RECEIVER_NAME_UTF8_BYTES
+    );
+
+    let cjk_long = ReceiverName::new(&"測".repeat(25));
+    assert!(cjk_long.as_str().len() <= super::settings::MAX_RECEIVER_NAME_UTF8_BYTES);
+    assert_eq!(cjk_long.as_str().chars().count(), 21);
+}
+
+/// 驗證 AirPlay PIN 模式與 `UXPLAYRC` 內容產生規則（含帶空白註冊檔路徑的引號包覆與無效 PIN 降級）。
+#[test]
+fn airplay_auth_mode_and_uxplay_rc_generation() {
+    let none = ReceiverSettings::default();
+    assert!(none.uxplay_rc_contents(Some("/tmp/reg")).is_empty());
+
+    let random = ReceiverSettings {
+        airplay_auth_mode: AirplayAuthMode::RandomPin,
+        airplay_pin: "1234".to_owned(),
+        ..ReceiverSettings::default()
+    }
+    .sanitized();
+    assert_eq!(random.airplay_auth_mode, AirplayAuthMode::RandomPin);
+    assert!(random.airplay_pin.is_empty());
+    assert_eq!(random.uxplay_rc_contents(None), "pin\n");
+
+    let fixed = ReceiverSettings {
+        airplay_auth_mode: AirplayAuthMode::FixedPin,
+        airplay_pin: " 0429 ".to_owned(),
+        ..ReceiverSettings::default()
+    }
+    .sanitized();
+    assert_eq!(fixed.airplay_auth_mode, AirplayAuthMode::FixedPin);
+    assert_eq!(fixed.airplay_pin, "0429");
+    let rc = fixed.uxplay_rc_contents(Some("/tmp/path with spaces/uxplay.register"));
+    assert_eq!(
+        rc,
+        "pin 0429\nreg \"/tmp/path with spaces/uxplay.register\"\n"
+    );
+    assert!(!fixed.airplay_arguments().iter().any(|arg| arg == "0429"));
+
+    let quoted_rc = fixed.uxplay_rc_contents(Some("/tmp/bad\"path"));
+    assert_eq!(quoted_rc, "pin 0429\n");
+
+    let invalid_fixed = ReceiverSettings {
+        airplay_auth_mode: AirplayAuthMode::FixedPin,
+        airplay_pin: "12ab".to_owned(),
+        ..ReceiverSettings::default()
+    }
+    .sanitized();
+    assert_eq!(invalid_fixed.airplay_auth_mode, AirplayAuthMode::RandomPin);
+    assert!(invalid_fixed.airplay_pin.is_empty());
+}
+
+/// 驗證 Android `scrcpy` 參數預設停用剪貼簿同步、支援唯讀模式及 ADB 裝置序號白名單驗證。
+#[test]
+fn android_arguments_and_serial_validation() {
+    let defaults = ReceiverSettings::default();
+    assert!(defaults.android_no_clipboard_sync);
+    assert!(!defaults.android_read_only);
+    assert_eq!(
+        defaults.android_arguments("R58M123"),
+        vec!["--serial=R58M123", "--no-clipboard-autosync"]
+    );
+
+    let hardened = ReceiverSettings {
+        android_no_clipboard_sync: true,
+        android_read_only: true,
+        fullscreen: true,
+        ..ReceiverSettings::default()
+    };
+    assert_eq!(
+        hardened.android_arguments("emulator-5554"),
+        vec![
+            "--serial=emulator-5554",
+            "--fullscreen",
+            "--no-clipboard-autosync",
+            "--no-control"
+        ]
+    );
+
+    assert!(is_valid_android_serial("R58M123456A"));
+    assert!(is_valid_android_serial("192.168.1.10:5555"));
+    assert!(is_valid_android_serial("emulator-5554"));
+    assert!(!is_valid_android_serial(""));
+    assert!(!is_valid_android_serial("-H"));
+    assert!(!is_valid_android_serial("--no-control"));
+    assert!(!is_valid_android_serial("abc\ndef"));
+    assert!(!is_valid_android_serial("abc def"));
+    assert!(!is_valid_android_serial("../etc"));
+    assert!(!is_valid_android_serial(&"x".repeat(129)));
+}
+
+/// 驗證 `AppLogEntry` 移除 Bidi／控制字元並限制最大位元組長度。
+#[test]
+fn app_log_entry_sanitizes_bidi_and_truncates_long_message() {
+    let entry = AppLogEntry::new(
+        LogLevel::Information,
+        &format!(
+            "ok\r\n\u{202E}{}",
+            "a".repeat(super::diagnostics::MAX_LOG_MESSAGE_BYTES + 200)
+        ),
+    );
+    assert!(!entry.message.contains('\r'));
+    assert!(!entry.message.contains('\n'));
+    assert!(!entry.message.contains('\u{202E}'));
+    assert!(entry.message.ends_with('…'));
+    assert!(entry.message.len() <= super::diagnostics::MAX_LOG_MESSAGE_BYTES);
+}
+
+/// 驗證目錄 URL 驗證器拒絕反斜線、非 ASCII 字元與非官方來源主機。
+#[test]
+fn validate_catalog_url_rejects_backslash_and_non_ascii() {
+    assert!(validate_catalog_url(
+        "https://github.com/FDH2/UxPlay/archive/refs/tags/v1.73.7.tar.gz"
+    )
+    .is_ok());
+    assert!(validate_catalog_url("https://github.com/FDH2\\UxPlay").is_err());
+    assert!(validate_catalog_url("https://github.com/tést").is_err());
+    assert!(validate_catalog_url("https://evil.example/archive.tar.gz").is_err());
 }

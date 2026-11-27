@@ -75,12 +75,18 @@ function waitFor(promise, timeoutMilliseconds) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+function getWindowsTaskkillPath() {
+  const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
+  const safeRoot = /^[a-zA-Z]:[\\/]/.test(systemRoot) ? systemRoot : "C:\\Windows";
+  return `${safeRoot.replace(/[\\/]+$/, "")}\\System32\\taskkill.exe`;
+}
+
 function terminateSmokeApplication(signal) {
   if (!child?.pid) return;
 
   if (process.platform === "win32") {
     const result = spawnSync(
-      "taskkill.exe",
+      getWindowsTaskkillPath(),
       ["/PID", String(child.pid), "/T", "/F"],
       { stdio: "ignore" },
     );

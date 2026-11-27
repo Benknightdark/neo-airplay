@@ -48,9 +48,13 @@ const selectedDevice = computed(() =>
 const airplayActive = computed(() => isAirplayActive(props.dashboard.airplay.status));
 /** 依據 AirPlay 作用中狀態產生的停止按鈕文字。 */
 const buttonLabel = computed(() => airplayButtonLabel(props.dashboard.airplay.status));
-/** 依據 AirPlay 狀態與接收器名稱產生的操作引導提示。 */
+/** 依據 AirPlay 狀態、接收器名稱與驗證模式產生的操作引導提示。 */
 const airplayStatusHint = computed(() =>
-  airplayHint(props.dashboard.airplay.status, props.dashboard.settings.receiverName),
+  airplayHint(
+    props.dashboard.airplay.status,
+    props.dashboard.settings.receiverName,
+    props.dashboard.settings.airplayAuthMode,
+  ),
 );
 /** 當沒有可用 Android 裝置時顯示的診斷與排障指引文字。 */
 const unavailableDeviceHint = computed(() =>

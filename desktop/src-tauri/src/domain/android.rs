@@ -50,13 +50,23 @@ impl AndroidDevice {
     }
 }
 
+/// 驗證 ADB 裝置序號是否符合安全白名單（非空、不以 `-` 開頭、無控制字元、上限 128 字元）。
+pub fn is_valid_android_serial(serial: &str) -> bool {
+    !serial.is_empty()
+        && serial.len() <= 128
+        && !serial.starts_with('-')
+        && serial.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'@' | b'-')
+        })
+}
+
 /// 解析 `adb devices -l` 的標準輸出文字為結構化的 `AndroidDevice` 清單。
 ///
 /// # 參數
 /// - `output`: 執行 `adb devices -l` 所取得的原始標準輸出字串。
 ///
 /// # 回傳值
-/// 回傳過濾標題列與 daemon 訊息後的裝置列表。
+/// 回傳過濾標題列、daemon 訊息與無效序號後的裝置列表。
 pub fn parse_adb_devices(output: &str) -> Vec<AndroidDevice> {
     output
         .lines()
@@ -64,7 +74,7 @@ pub fn parse_adb_devices(output: &str) -> Vec<AndroidDevice> {
             let mut fields = line.split_whitespace();
             let serial = fields.next()?;
             let state = fields.next()?;
-            if serial == "List" || serial.starts_with('*') {
+            if serial == "List" || serial.starts_with('*') || !is_valid_android_serial(serial) {
                 return None;
             }
             let status = match state {
@@ -73,10 +83,14 @@ pub fn parse_adb_devices(output: &str) -> Vec<AndroidDevice> {
                 "offline" => AndroidDeviceStatus::Offline,
                 _ => AndroidDeviceStatus::Unknown,
             };
-            let model = fields
+            let model: String = fields
                 .find_map(|field| field.strip_prefix("model:"))
                 .unwrap_or(serial)
-                .replace('_', " ");
+                .replace('_', " ")
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .take(128)
+                .collect();
             Some(AndroidDevice {
                 serial: serial.to_owned(),
                 model,

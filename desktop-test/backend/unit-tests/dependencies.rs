@@ -177,6 +177,7 @@ fn install_test_child_process() {
             exit_code: 0,
             stage: None,
             message: None,
+            resolved_sha256: None,
         },
     )
     .unwrap();
@@ -932,6 +933,105 @@ fn clear_transient_setup_files_rejects_symlinks() {
 
     assert!(clear_transient_setup_files(&setup).is_err());
     assert_eq!(fs::read(&outside).unwrap(), b"keep");
+
+    fs::remove_dir_all(&root).unwrap();
+}
+
+/// 驗證首次透過官方 HTTPS 安裝自訂 UxPlay 成功後，`apply_tofu_sha256` 會自動鎖定雜湊並停用未驗證旗標。
+#[test]
+fn apply_tofu_sha256_pins_valid_hash_and_clears_allow_unverified() {
+    let validated = ValidatedToolInstall {
+        tool: ToolId::UxPlay,
+        version: "1.73.6".to_owned(),
+        reference: "v1.73.6".to_owned(),
+        sha256: None,
+        allow_unverified: true,
+        is_default: false,
+    };
+    let valid_sha = "168de53ed688f87c4022d79357ce91f9608ad5c53236bff95134d19b88efeb3f";
+    let result = InstallResult {
+        pid: 1,
+        exit_code: 0,
+        stage: None,
+        message: Some("ok".to_owned()),
+        resolved_sha256: Some(valid_sha.to_uppercase()),
+    };
+
+    let locked = apply_tofu_sha256(&validated, Some(&result));
+    assert_eq!(locked.sha256.as_deref(), Some(valid_sha));
+    assert!(!locked.allow_unverified);
+
+    let bad_result = InstallResult {
+        pid: 1,
+        exit_code: 0,
+        stage: None,
+        message: Some("ok".to_owned()),
+        resolved_sha256: Some("not-a-sha".to_owned()),
+    };
+    let unchanged = apply_tofu_sha256(&validated, Some(&bad_result));
+    assert_eq!(unchanged.sha256, None);
+    assert!(unchanged.allow_unverified);
+}
+
+/// 驗證未釘選且未允許 `allow_unverified` 的自訂 UxPlay 偏好設定載入時會被拒絕清除。
+#[test]
+fn load_tool_version_preferences_rejects_unpinned_uxplay_without_opt_in() {
+    let config_dir = install_log_test_directory();
+    fs::create_dir_all(&config_dir).unwrap();
+    let prefs = ToolVersionPreferences {
+        scrcpy: None,
+        uxplay: Some(PinnedToolVersion {
+            version: "1.73.6".to_owned(),
+            reference: "v1.73.6".to_owned(),
+            sha256: None,
+            allow_unverified: false,
+        }),
+    };
+    fs::write(
+        config_dir.join(TOOL_VERSIONS_FILE),
+        serde_json::to_string(&prefs).unwrap(),
+    )
+    .unwrap();
+
+    let loaded = load_tool_version_preferences(&config_dir);
+    assert!(loaded.uxplay.is_none());
+
+    fs::remove_dir_all(&config_dir).unwrap();
+}
+
+/// 驗證 macOS 終端機啟動包裝腳本使用 `umask 077`、符號連結防護、`env -i` 與 Bash 3.2 安全陣列展開。
+#[test]
+fn build_macos_launch_script_enforces_hardened_wrapper() {
+    let script = build_macos_launch_script(
+        Path::new("/tmp/install.sh"),
+        Path::new("/tmp/install.log"),
+        Path::new("/tmp/engine"),
+        Path::new("/tmp/install.done"),
+        Path::new("/tmp/install-result.json"),
+        &["--only".to_owned(), "uxplay".to_owned()],
+    );
+    assert!(script.contains("umask 077"));
+    assert!(script.contains("if [ -L \"$target\" ]"));
+    assert!(script.contains("exec /usr/bin/env -i"));
+    assert!(script.contains("${extra_args[@]+\"${extra_args[@]}\"}"));
+    assert!(script.contains("'--only' 'uxplay'"));
+}
+
+/// 驗證 `read_log_tail` 拒絕符號連結日誌檔案且不讀取外部目標內容。
+#[cfg(unix)]
+#[test]
+fn read_log_tail_rejects_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let root = install_log_test_directory();
+    let outside = root.join("secret.txt");
+    let log_path = root.join("install.log");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(&outside, b"secret-content").unwrap();
+    symlink(&outside, &log_path).unwrap();
+
+    let err = read_log_tail(&log_path, 4096).unwrap_err();
+    assert!(!err.contains("secret-content"));
 
     fs::remove_dir_all(&root).unwrap();
 }

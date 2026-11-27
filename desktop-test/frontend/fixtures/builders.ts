@@ -29,6 +29,10 @@ export function createReceiverSettings(
     renderer: "Auto",
     fullscreen: false,
     startOnLogin: false,
+    airplayAuthMode: "none",
+    airplayPin: "",
+    androidNoClipboardSync: true,
+    androidReadOnly: false,
     ...overrides,
   };
 }

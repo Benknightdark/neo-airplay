@@ -9,6 +9,7 @@ import {
   airplayHint,
   engineLabel,
   isAirplayActive,
+  isAirplayPinValid,
   isReceiverNameValid,
   sanitizeReceiverSettings,
 } from "../../../desktop/src/domain";
@@ -29,20 +30,49 @@ describe("接收器領域規則", () => {
 
     expect(airplayHint("starting", "Studio")).toContain("Bonjour 廣播");
     expect(airplayHint("running", "Studio")).toContain("Studio");
+    expect(airplayHint("running", "Studio", "randomPin")).toContain("一次性 PIN");
+    expect(airplayHint("running", "Studio", "fixedPin")).toContain("4 位數字 PIN");
     expect(airplayHint("stopped", "Studio")).toContain("UxPlay");
     expect(engineLabel("faulted")).toBe("發生錯誤");
   });
 
-  /** 驗證空名稱與過長名稱會回傳錯誤，合法名稱則會去除前後空白。 */
-  it("驗證並正規化接收器設定名稱", () => {
+  /** 驗證空名稱與過長名稱會回傳錯誤，合法名稱則會去除前後空白並執行安全性正規化。 */
+  it("驗證並正規化接收器設定名稱與安全選項", () => {
     expect(isReceiverNameValid("   ")).toBe(false);
+    expect(isReceiverNameValid("\u202E\u0007   ")).toBe(false);
     expect(isReceiverNameValid("  Studio  ")).toBe(true);
+    expect(isReceiverNameValid("a".repeat(64))).toBe(false);
+    expect(isReceiverNameValid("測試".repeat(11))).toBe(false);
+
+    expect(isAirplayPinValid("none", "")).toBe(true);
+    expect(isAirplayPinValid("randomPin", "")).toBe(true);
+    expect(isAirplayPinValid("fixedPin", "123")).toBe(false);
+    expect(isAirplayPinValid("fixedPin", "abcd")).toBe(false);
+    expect(isAirplayPinValid("fixedPin", " 0429 ")).toBe(true);
 
     expect(
-      sanitizeReceiverSettings(createReceiverSettings({ receiverName: "  Studio  " })).receiverName,
+      sanitizeReceiverSettings(createReceiverSettings({ receiverName: "  \u202EStudio\u0000  " })).receiverName,
     ).toBe("Studio");
     expect(
       sanitizeReceiverSettings(createReceiverSettings({ receiverName: "   " })).receiverName,
     ).toBe("Neo AirPlay");
+
+    const invalidPinNormalized = sanitizeReceiverSettings(
+      createReceiverSettings({
+        airplayAuthMode: "fixedPin",
+        airplayPin: "12a",
+      }),
+    );
+    expect(invalidPinNormalized.airplayAuthMode).toBe("randomPin");
+    expect(invalidPinNormalized.airplayPin).toBe("");
+
+    const validPinNormalized = sanitizeReceiverSettings(
+      createReceiverSettings({
+        airplayAuthMode: "fixedPin",
+        airplayPin: " 1234 ",
+      }),
+    );
+    expect(validPinNormalized.airplayAuthMode).toBe("fixedPin");
+    expect(validPinNormalized.airplayPin).toBe("1234");
   });
 });

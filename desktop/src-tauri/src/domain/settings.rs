@@ -6,25 +6,76 @@ use serde::{Deserialize, Serialize};
 const DEFAULT_RECEIVER_NAME: &str = "Neo AirPlay";
 /// 預設視訊渲染器選項識別字。
 const DEFAULT_RENDERER: &str = "Auto";
+/// DNS-SD（Bonjour）服務實例名稱允許的最大 UTF-8 位元組長度。
+pub const MAX_RECEIVER_NAME_UTF8_BYTES: usize = 63;
 
-/// 已正規化的 AirPlay 接收器顯示名稱值物件，確保名稱不為空白或全空白字元。
+/// 判斷字元是否為控制字元或 Unicode 雙向（Bidi）方向覆寫控制字元。
+fn is_unsafe_display_char(ch: char) -> bool {
+    ch.is_control()
+        || matches!(
+            ch,
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}'
+        )
+}
+
+/// 依 UTF-8 字元邊界截斷字串，保證結果位元組長度不超過 `max_bytes`。
+fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+/// AirPlay 區域網路連線認證模式。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum AirplayAuthMode {
+    /// 不啟用連線 PIN 驗證（維持既有預設行為）。
+    #[default]
+    None,
+    /// 每次啟動 AirPlay 接收器時產生隨機 4 碼一次性 PIN。
+    RandomPin,
+    /// 使用固定 4 碼數字 PIN 限制連線，並於受控註冊檔記錄已配對裝置。
+    FixedPin,
+}
+
+/// 驗證並正規化 4 碼數字 PIN；不符合精確 4 位 ASCII 數字時回傳空字串。
+pub fn sanitize_airplay_pin(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.len() == 4 && trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
+        trimmed.to_owned()
+    } else {
+        String::new()
+    }
+}
+
+/// 已正規化的 AirPlay 接收器顯示名稱值物件，確保名稱不為空白、無控制或 Bidi 字元且符合 63 位元組上限。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReceiverName(String);
 
 impl ReceiverName {
-    /// 建立 `ReceiverName`，會修剪前後空白並在空字串時退回預設名稱 `"Neo AirPlay"`。
+    /// 建立 `ReceiverName`，會移除控制與 Bidi 字元、修剪前後空白並截斷至 63 UTF-8 位元組，空字串時退回 `"Neo AirPlay"`。
     ///
     /// # 參數
     /// - `raw`: 使用者輸入或設定檔載入的原始接收器名稱。
     ///
     /// # 回傳值
-    /// 回傳保證非空的 `ReceiverName` 值物件。
+    /// 回傳保證非空且安全的 `ReceiverName` 值物件。
     pub fn new(raw: &str) -> Self {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
+        let filtered: String = raw
+            .chars()
+            .filter(|ch| !is_unsafe_display_char(*ch))
+            .collect();
+        let trimmed = filtered.trim();
+        let bounded = truncate_utf8_bytes(trimmed, MAX_RECEIVER_NAME_UTF8_BYTES).trim_end();
+        if bounded.is_empty() {
             Self(DEFAULT_RECEIVER_NAME.to_owned())
         } else {
-            Self(trimmed.to_owned())
+            Self(bounded.to_owned())
         }
     }
 
@@ -90,10 +141,22 @@ pub struct ReceiverSettings {
     /// 是否在作業系統登入時自動啟動應用程式。
     #[serde(default)]
     pub start_on_login: bool,
+    /// AirPlay 區網連線認證模式（關閉／隨機 PIN／固定 PIN）。
+    #[serde(default)]
+    pub airplay_auth_mode: AirplayAuthMode,
+    /// 固定 PIN 模式下的 4 位數字密碼（非固定模式時保持空字串）。
+    #[serde(default)]
+    pub airplay_pin: String,
+    /// 啟動 `scrcpy` 時是否停用電腦與 Android 裝置間的自動剪貼簿同步。
+    #[serde(default = "default_true")]
+    pub android_no_clipboard_sync: bool,
+    /// 啟動 `scrcpy` 時是否使用唯讀投影模式（禁止視窗操控與檔案拖放安裝）。
+    #[serde(default)]
+    pub android_read_only: bool,
 }
 
 impl Default for ReceiverSettings {
-    /// 建立預設接收器設定（名稱 `"Neo AirPlay"`、渲染器 `"Auto"`、非全螢幕、不開機自啟）。
+    /// 建立預設接收器設定（名稱 `"Neo AirPlay"`、渲染器 `"Auto"`、Android 預設停用自動剪貼簿同步）。
     ///
     /// # 回傳值
     /// 回傳包含預設欄位的 `ReceiverSettings`。
@@ -103,6 +166,10 @@ impl Default for ReceiverSettings {
             renderer: default_renderer(),
             fullscreen: false,
             start_on_login: false,
+            airplay_auth_mode: AirplayAuthMode::None,
+            airplay_pin: String::new(),
+            android_no_clipboard_sync: true,
+            android_read_only: false,
         }
     }
 }
@@ -111,15 +178,28 @@ impl ReceiverSettings {
     /// 套用領域值物件規則清理並正規化設定欄位。
     ///
     /// # 回傳值
-    /// 回傳名稱與渲染器皆已正規化的新 `ReceiverSettings` 實例。
+    /// 回傳名稱、渲染器與認證欄位皆已正規化的新 `ReceiverSettings` 實例。
     pub fn sanitized(self) -> Self {
         let receiver_name = ReceiverName::new(&self.receiver_name);
         let renderer = VideoRenderer::new(&self.renderer);
+        let sanitized_pin = sanitize_airplay_pin(&self.airplay_pin);
+        let (airplay_auth_mode, airplay_pin) = match self.airplay_auth_mode {
+            AirplayAuthMode::None => (AirplayAuthMode::None, String::new()),
+            AirplayAuthMode::RandomPin => (AirplayAuthMode::RandomPin, String::new()),
+            AirplayAuthMode::FixedPin if !sanitized_pin.is_empty() => {
+                (AirplayAuthMode::FixedPin, sanitized_pin)
+            }
+            AirplayAuthMode::FixedPin => (AirplayAuthMode::RandomPin, String::new()),
+        };
         Self {
             receiver_name: receiver_name.as_str().to_owned(),
             renderer: renderer.as_str().to_owned(),
             fullscreen: self.fullscreen,
             start_on_login: self.start_on_login,
+            airplay_auth_mode,
+            airplay_pin,
+            android_no_clipboard_sync: self.android_no_clipboard_sync,
+            android_read_only: self.android_read_only,
         }
     }
 
@@ -139,7 +219,7 @@ impl ReceiverSettings {
         VideoRenderer::new(&self.renderer)
     }
 
-    /// 依目前設定組裝啟動 `uxplay` 所需的命令列參數陣列。
+    /// 依目前設定組裝啟動 `uxplay` 所需的命令列參數陣列（不包含固定 PIN 明文）。
     ///
     /// # 回傳值
     /// 回傳傳遞給 UxPlay 子程序的完整參數清單。
@@ -160,6 +240,30 @@ impl ReceiverSettings {
         args
     }
 
+    /// 產生寫入受控 `0600` `UXPLAYRC` 設定檔的內容（用於套用 PIN 保護並隔離外部 `.uxplayrc`）。
+    pub fn uxplay_rc_contents(&self, register_path: Option<&str>) -> String {
+        let mut lines = Vec::new();
+        match self.airplay_auth_mode {
+            AirplayAuthMode::None => return String::new(),
+            AirplayAuthMode::RandomPin => lines.push("pin".to_owned()),
+            AirplayAuthMode::FixedPin => {
+                let pin = sanitize_airplay_pin(&self.airplay_pin);
+                if pin.is_empty() {
+                    lines.push("pin".to_owned());
+                } else {
+                    lines.push(format!("pin {pin}"));
+                }
+            }
+        }
+        if let Some(path) = register_path {
+            if !path.is_empty() && !path.contains('"') && !path.chars().any(is_unsafe_display_char)
+            {
+                lines.push(format!("reg \"{path}\""));
+            }
+        }
+        format!("{}\n", lines.join("\n"))
+    }
+
     /// 依目前設定與指定裝置序號組裝啟動 `scrcpy` 所需的命令列參數陣列。
     ///
     /// # 參數
@@ -168,12 +272,23 @@ impl ReceiverSettings {
     /// # 回傳值
     /// 回傳傳遞給 scrcpy 子程序的完整參數清單。
     pub fn android_arguments(&self, serial: &str) -> Vec<String> {
-        let mut args = vec!["--serial".to_owned(), serial.to_owned()];
+        let mut args = vec![format!("--serial={serial}")];
         if self.fullscreen {
             args.push("--fullscreen".to_owned());
         }
+        if self.android_no_clipboard_sync {
+            args.push("--no-clipboard-autosync".to_owned());
+        }
+        if self.android_read_only {
+            args.push("--no-control".to_owned());
+        }
         args
     }
+}
+
+/// Serde 反序列化缺漏 `androidNoClipboardSync` 時使用的預設值工廠函式。
+fn default_true() -> bool {
+    true
 }
 
 /// Serde 反序列化缺漏 `receiverName` 時使用的預設值工廠函式。

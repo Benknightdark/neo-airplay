@@ -152,7 +152,7 @@ exec "$@"
     rustup: '#!/bin/sh\nif [ "${1:-}" = "component" ]; then printf "rustfmt-x86_64-unknown-linux-gnu\\nclippy-x86_64-unknown-linux-gnu\\n"; fi\nexit 0\n',
     rustc: '#!/bin/sh\nprintf "rustc 1.88.0 (isolated setup test)\\n"\n',
     cargo: '#!/bin/sh\nprintf "cargo 1.88.0 (isolated setup test)\\n"\n',
-    cmake: '#!/bin/sh\ncase "$*" in *"--install"*) mkdir -p "$NEO_AIRPLAY_ENGINE_DIR/bin"; printf "%s\\n" "#!/bin/sh" "printf \\"UxPlay version 1.73.7\\\\n\\"" > "$NEO_AIRPLAY_ENGINE_DIR/bin/uxplay"; chmod 0755 "$NEO_AIRPLAY_ENGINE_DIR/bin/uxplay" ;; esac\nexit 0\n',
+    cmake: '#!/bin/sh\nprefix="$NEO_AIRPLAY_ENGINE_DIR"\ninstall_mode=0\nwhile [ "$#" -gt 0 ]; do\n  case "$1" in\n    --install) install_mode=1; shift ;;\n    --prefix) prefix="$2"; shift 2 ;;\n    *) shift ;;\n  esac\ndone\nif [ "$install_mode" = "1" ]; then\n  mkdir -p "$prefix/bin"\n  printf "%s\\n" "#!/bin/sh" "printf \\"UxPlay version 1.73.7\\\\n\\"" > "$prefix/bin/uxplay"\n  chmod 0755 "$prefix/bin/uxplay"\n  if [ "${FAKE_CMAKE_PLANT_BEACON:-0}" = "1" ]; then\n    printf "%s\\n" "#!/usr/bin/env python3" "print(\\"unwanted\\")" > "$prefix/bin/uxplay-beacon.py"\n    chmod 0755 "$prefix/bin/uxplay-beacon.py"\n  fi\nfi\nexit 0\n',
     cc: "#!/bin/sh\nexit 0\n",
     "c++": "#!/bin/sh\nexit 0\n",
     patchelf: "#!/bin/sh\nexit 0\n",
@@ -162,9 +162,9 @@ exec "$@"
     sudo: '#!/bin/sh\nexec "$@"\n',
     "apt-get": `#!/bin/sh\nprintf '%s\\n' "$*" >> "$PACKAGE_MANAGER_MARKER"\nexit "\${FAKE_PACKAGE_MANAGER_STATUS:-97}"\n`,
     dnf: `#!/bin/sh\nprintf '%s\\n' "$*" >> "$PACKAGE_MANAGER_MARKER"\nif [ "\${1:-}" = "repoquery" ] && [ "\${FAKE_DNF_MISSING_SCRCPY:-0}" = "1" ]; then exit 1; fi\nexit "\${FAKE_PACKAGE_MANAGER_STATUS:-97}"\n`,
-    curl: '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CURL_ARGS_MARKER"\nwhile [ "$#" -gt 0 ]; do\n  if [ "$1" = "--output" ]; then shift; : > "$1"; fi\n  shift\ndone\nprintf download >> "$SCRCPY_DOWNLOAD_MARKER"\n',
-    sha256sum: '#!/bin/sh\ncase "$1" in *uxplay.tar.gz*) printf "168de53ed688f87c4022d79357ce91f9608ad5c53236bff95134d19b88efeb3f  %s\\n" "$1" ;; *) printf "%s  %s\\n" "$FAKE_SCRCPY_SHA256" "$1" ;; esac\n',
-    tar: '#!/bin/sh\n[ "${1:-}" = "-xzf" ] || exit 1\nshift\nshift\n[ "${1:-}" = "-C" ] || exit 1\ndestination="$2"\nbundle="$destination/scrcpy-linux-x86_64-v5.0.1"\nmkdir -p "$bundle"\nprintf "#!/bin/sh\\nprintf \\\"scrcpy 5.0.1\\\\n\\\"\\n" > "$bundle/scrcpy"\nprintf "fake scrcpy server\\n" > "$bundle/scrcpy-server"\nprintf "#!/bin/sh\\nprintf \\\"Android Debug Bridge version 1.0.41\\\\n\\\"\\n" > "$bundle/adb"\nchmod 0755 "$bundle/scrcpy" "$bundle/adb"\n',
+    curl: '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CURL_ARGS_MARKER"\nout_file=""\nurl_arg=""\nwant_effective=0\nwhile [ "$#" -gt 0 ]; do\n  case "$1" in\n    --output) out_file="$2"; shift 2 ;;\n    --write-out) want_effective=1; shift 2 ;;\n    --proto|--proto-redir|--max-redirs|--max-filesize|--connect-timeout|--max-time) shift 2 ;;\n    https://*|http://*) url_arg="$1"; shift ;;\n    *) shift ;;\n  esac\ndone\nif [ -n "$out_file" ]; then\n  if [ -n "${FAKE_CURL_PAYLOAD_FILE:-}" ] && [ -f "$FAKE_CURL_PAYLOAD_FILE" ]; then\n    cp -- "$FAKE_CURL_PAYLOAD_FILE" "$out_file"\n  else\n    : > "$out_file"\n  fi\nfi\nprintf download >> "$SCRCPY_DOWNLOAD_MARKER"\nif [ "$want_effective" = "1" ]; then\n  printf "%s" "${FAKE_EFFECTIVE_URL:-$url_arg}"\nfi\n',
+    sha256sum: '#!/bin/sh\ncase "$1" in *uxplay.tar.gz*) printf "%s  %s\\n" "${FAKE_UXPLAY_SHA256:-168de53ed688f87c4022d79357ce91f9608ad5c53236bff95134d19b88efeb3f}" "$1" ;; *) printf "%s  %s\\n" "$FAKE_SCRCPY_SHA256" "$1" ;; esac\n',
+    tar: '#!/bin/sh\nif [ "${FAKE_TAR_USE_HOST:-0}" = "1" ] && [ -x /usr/bin/tar ]; then\n  exec /usr/bin/tar "$@"\nfi\nmode=""\nlist_flag=0\nverbose_flag=0\ndest=""\nwhile [ "$#" -gt 0 ]; do\n  case "$1" in\n    --no-same-owner|--no-same-permissions|--strip-components=*) shift ;;\n    -C) dest="$2"; shift 2 ;;\n    -tv*f) list_flag=1; verbose_flag=1; shift 2 ;;\n    -t*f) list_flag=1; shift 2 ;;\n    -x*f) mode="extract"; shift 2 ;;\n    *) shift ;;\n  esac\ndone\nif [ "$list_flag" = "1" ]; then\n  if [ "$verbose_flag" = "1" ]; then\n    printf "%s\\n" "${FAKE_TAR_DETAIL_OUTPUT:--rw-r--r-- 0 root root 12 scrcpy-linux-x86_64-v5.0.1/scrcpy}"\n  else\n    printf "%s\\n" "${FAKE_TAR_LIST_OUTPUT:-scrcpy-linux-x86_64-v5.0.1/scrcpy}"\n  fi\n  exit 0\nfi\n[ "$mode" = "extract" ] && [ -n "$dest" ] || exit 1\nbundle="$dest/scrcpy-linux-x86_64-v5.0.1"\nmkdir -p "$bundle"\nprintf "#!/bin/sh\\nprintf \\"scrcpy 5.0.1\\\\n\\"\\n" > "$bundle/scrcpy"\nprintf "fake scrcpy server\\n" > "$bundle/scrcpy-server"\nprintf "#!/bin/sh\\nprintf \\"Android Debug Bridge version 1.0.41\\\\n\\"\\n" > "$bundle/adb"\nchmod 0755 "$bundle/scrcpy" "$bundle/adb"\n',
     brew: `#!/bin/sh\nprintf '%s\\n' "$*" >> "$BREW_MARKER"\nexit 97\n`,
     "xcode-select": '#!/bin/sh\nif [ "${1:-}" = "--install" ]; then printf requested > "$CLT_INSTALL_MARKER"; exit 0; fi\n[ "${CLT_AVAILABLE:-1}" = "1" ]\n',
   };
@@ -221,6 +221,13 @@ exec "$@"
     GST_INSPECT_ENV_MARKER: gstInspectEnvironmentMarker,
     GST_TIMEOUT_MARKER: gstTimeoutMarker,
     FAKE_SCRCPY_SHA256: options.scrcpySha256 ?? "9f969d30cc574816077edecda65719c1c70b0aee1df1ba5fa00779ac07b8fd6e",
+    FAKE_EFFECTIVE_URL: options.effectiveUrl ?? "",
+    FAKE_TAR_LIST_OUTPUT: options.tarListOutput ?? "",
+    FAKE_TAR_DETAIL_OUTPUT: options.tarDetailOutput ?? "",
+    FAKE_TAR_USE_HOST: options.tarUseHost ? "1" : "0",
+    FAKE_CMAKE_PLANT_BEACON: options.plantBeacon ? "1" : "0",
+    FAKE_UXPLAY_SHA256: options.uxplaySha256 ?? "",
+    NEO_AIRPLAY_TEST_ALLOW_PATH_PRIVILEGED: options.allowPathPrivileged === false ? "0" : "1",
   };
 
   return {
@@ -1118,5 +1125,96 @@ test("installer rejects invalid tool overrides and unverified custom UxPlay with
     }
   } finally {
     fixture.cleanup();
+  }
+});
+
+test("installer blocks Tar Slip, symlinked tar entries, and redirected non-allowlisted download hosts", { skip: shellChecksUnsupported }, () => {
+  const tarSlip = createScenario({
+    uname: "Linux",
+    missingCommands: ["scrcpy", "adb"],
+    tarListOutput: "../../etc/cron.d/evil",
+  });
+  try {
+    const result = tarSlip.runInstaller(["--only", "scrcpy"]);
+    assert.notEqual(result.status, 0, "Tar Slip entry must abort installer");
+    assert.match(result.stderr + result.stdout, /escapes destination directory/);
+  } finally {
+    tarSlip.cleanup();
+  }
+
+  const symlinkTar = createScenario({
+    uname: "Linux",
+    missingCommands: ["scrcpy", "adb"],
+    tarListOutput: "scrcpy-linux-x86_64-v5.0.1/scrcpy",
+    tarDetailOutput: "lrwxrwxrwx 0 root root 0 scrcpy-linux-x86_64-v5.0.1/scrcpy -> /etc/passwd",
+  });
+  try {
+    const result = symlinkTar.runInstaller(["--only", "scrcpy"]);
+    assert.notEqual(result.status, 0, "Symlink entry in restricted archive must abort installer");
+    assert.match(result.stderr + result.stdout, /symbolic link entry/);
+  } finally {
+    symlinkTar.cleanup();
+  }
+
+  const badRedirect = createScenario({
+    uname: "Linux",
+    missingCommands: ["scrcpy", "adb"],
+    effectiveUrl: "https://untrusted.example.com/scrcpy.tar.gz",
+  });
+  try {
+    const result = badRedirect.runInstaller(["--only", "scrcpy"]);
+    assert.notEqual(result.status, 0, "Redirect to non-allowlisted host must abort installer");
+    assert.match(result.stderr + result.stdout, /outside official host allowlist/);
+  } finally {
+    badRedirect.cleanup();
+  }
+});
+
+test("installer rejects user-writable sudo/pkexec, stages only uxplay binary, and emits resolvedSha256", { skip: shellChecksUnsupported }, () => {
+  const hijackedSudo = createScenario({
+    uname: "Linux",
+    missingCommands: ["uxplay", "cmake"],
+    allowPathPrivileged: false,
+  });
+  try {
+    const localBin = join(hijackedSudo.home, ".local", "bin");
+    const pwnMarker = join(hijackedSudo.root, "pwned-by-fake-sudo");
+    mkdirSync(localBin, { recursive: true });
+    writeFileSync(join(localBin, "sudo"), `#!/bin/sh\ntouch "${pwnMarker}"\n`);
+    writeFileSync(join(localBin, "apt-get"), `#!/bin/sh\ntouch "${pwnMarker}"\n`);
+    chmodSync(join(localBin, "sudo"), 0o755);
+    chmodSync(join(localBin, "apt-get"), 0o755);
+
+    const result = hijackedSudo.runInstaller(["--only", "uxplay"]);
+    assert.notEqual(result.status, 0);
+    assert.equal(existsSync(pwnMarker), false, "Fake sudo or apt-get under HOME must never be executed");
+  } finally {
+    hijackedSudo.cleanup();
+  }
+
+  const staged = createScenario({
+    uname: "Linux",
+    missingCommands: ["uxplay"],
+    plantBeacon: true,
+    uxplaySha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  });
+  const resultFile = join(staged.root, "install-result.json");
+  try {
+    const result = staged.runInstaller([
+      "--only",
+      "uxplay",
+      "--uxplay-ref",
+      "v1.73.6",
+      "--allow-unverified-uxplay",
+      "--result-file",
+      resultFile,
+    ]);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(existsSync(join(staged.engineDirectory, "bin", "uxplay")), true);
+    assert.equal(existsSync(join(staged.engineDirectory, "bin", "uxplay-beacon.py")), false, "Unrequested CMake helper scripts must not be staged into engine/bin");
+    const parsedResult = JSON.parse(readFileSync(resultFile, "utf8"));
+    assert.equal(parsedResult.resolvedSha256, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  } finally {
+    staged.cleanup();
   }
 });

@@ -6,6 +6,8 @@ use std::collections::VecDeque;
 
 /// 記憶體中最多保留的近期診斷日誌筆數上限。
 pub const MAX_RECENT_LOGS: usize = 300;
+/// 單筆診斷日誌訊息允許保留的最大位元組長度，避免過大記錄消耗記憶體或磁碟。
+pub const MAX_LOG_MESSAGE_BYTES: usize = 4096;
 
 /// 診斷日誌的重要程度等級。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -27,12 +29,12 @@ pub struct AppLogEntry {
     pub timestamp: Timestamp,
     /// 日誌嚴重等級。
     pub level: LogLevel,
-    /// 經過換行正規化與空白修剪的日誌內容。
+    /// 經過換行正規化、控制字元過濾與長度上限修剪的日誌內容。
     pub message: String,
 }
 
 impl AppLogEntry {
-    /// 建立一筆帶目前時間戳記的診斷日誌，並將換行字元壓平為單行空白。
+    /// 建立一筆帶目前時間戳記的診斷日誌，壓平換行、移除控制／Bidi 字元並限制最大長度。
     ///
     /// # 參數
     /// - `level`: 日誌嚴重等級。
@@ -41,10 +43,39 @@ impl AppLogEntry {
     /// # 回傳值
     /// 回傳正規化後的 `AppLogEntry` 實例。
     pub fn new(level: LogLevel, message: &str) -> Self {
+        let normalized: String = message
+            .chars()
+            .filter_map(|ch| match ch {
+                '\r' | '\n' => Some(' '),
+                ch if ch.is_control()
+                    || matches!(
+                        ch,
+                        '\u{202A}'..='\u{202E}'
+                            | '\u{2066}'..='\u{2069}'
+                            | '\u{200E}'
+                            | '\u{200F}'
+                            | '\u{061C}'
+                    ) =>
+                {
+                    None
+                }
+                other => Some(other),
+            })
+            .collect();
+        let trimmed = normalized.trim();
+        let bounded = if trimmed.len() <= MAX_LOG_MESSAGE_BYTES {
+            trimmed.to_owned()
+        } else {
+            let mut end = MAX_LOG_MESSAGE_BYTES.saturating_sub("…".len());
+            while end > 0 && !trimmed.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}…", &trimmed[..end])
+        };
         Self {
             timestamp: Timestamp::now(),
             level,
-            message: message.replace(['\r', '\n'], " ").trim().to_owned(),
+            message: bounded,
         }
     }
 }
