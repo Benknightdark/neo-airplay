@@ -492,7 +492,10 @@ fn background_console_probe() {
     }
 }
 
-/// 建立含 PID 與奈秒亂數的隔離暫存測試目錄路徑。
+/// 同一測試程序內遞增的暫存目錄序號，避免平行測試在相同時間戳下共用目錄。
+static TEST_DIRECTORY_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 建立含 PID、奈秒時間戳與遞增序號的隔離暫存測試目錄路徑。
 ///
 /// # 參數
 /// - `name`: 測試識別前綴字串。
@@ -504,7 +507,11 @@ fn test_directory(name: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    std::env::temp_dir().join(format!("neo-airplay-{name}-{}-{nonce}", std::process::id()))
+    let sequence = TEST_DIRECTORY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "neo-airplay-{name}-{}-{nonce}-{sequence}",
+        std::process::id()
+    ))
 }
 
 /// 驗證 `write_settings` 設定 `0o600` 權限，且 `load_settings` 拒絕符號連結與超過上限的設定檔。

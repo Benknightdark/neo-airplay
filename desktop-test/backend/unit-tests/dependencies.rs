@@ -183,19 +183,34 @@ fn install_test_child_process() {
     .unwrap();
 }
 
+/// 同一測試程序內遞增的暫存目錄序號，避免 macOS 時鐘僅有微秒精度時平行測試取得相同路徑。
+static TEST_DIRECTORY_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 建立含 PID、時間戳與遞增序號的唯一暫存測試目錄路徑。
+///
+/// # 參數
+/// - `prefix`: 測試目錄名稱前綴。
+///
+/// # 回傳值
+/// 回傳位於系統暫存目錄下且不與平行測試衝突的 `PathBuf`。
+fn unique_test_directory(prefix: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let sequence = TEST_DIRECTORY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "{prefix}-{}-{nonce}-{sequence}",
+        std::process::id()
+    ))
+}
+
 /// 建立安裝日誌測試專用的隔離暫存目錄。
 ///
 /// # 回傳值
 /// 回傳位於系統暫存目錄下的唯一測試目錄 `PathBuf`。
 fn install_log_test_directory() -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "neo-install-log-test-{}-{nonce}",
-        std::process::id()
-    ))
+    unique_test_directory("neo-install-log-test")
 }
 
 /// 啟動執行 `install_test_child_process` 的子程序，並建立測試用暫存目錄與初始快照。
@@ -206,12 +221,7 @@ fn install_log_test_directory() -> PathBuf {
 /// # 回傳值
 /// 回傳 `(directory, snapshot, child)` 元組供安裝等待邏輯測試使用。
 fn install_test_process(mode: &str) -> (PathBuf, Arc<Mutex<DependencySnapshot>>, Child) {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let directory =
-        std::env::temp_dir().join(format!("neo-install-test-{}-{nonce}", std::process::id()));
+    let directory = unique_test_directory("neo-install-test");
     fs::create_dir_all(&directory).unwrap();
     let snapshot = Arc::new(Mutex::new(DependencySnapshot {
         status: "installing".into(),
@@ -239,14 +249,7 @@ fn install_test_process(mode: &str) -> (PathBuf, Arc<Mutex<DependencySnapshot>>,
 /// 驗證清除重裝時僅移除應用程式專用工具與指定的 GStreamer registry，保留 `.GITKEEP`、`.bundled-*` 與其他快取檔。
 #[test]
 fn clean_reinstall_clears_only_engine_files_and_the_selected_cache_file() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let directory = std::env::temp_dir().join(format!(
-        "neo-clean-tools-test-{}-{nonce}",
-        std::process::id()
-    ));
+    let directory = unique_test_directory("neo-clean-tools-test");
     let engine = directory.join("engine");
     let cache = directory.join("cache/gstreamer/registry.bin");
     fs::create_dir_all(engine.join("bin")).unwrap();
@@ -273,14 +276,7 @@ fn clean_reinstall_clears_only_engine_files_and_the_selected_cache_file() {
 /// 驗證升級前只會使目標 GStreamer registry 快取失效而不波及同目錄其他快取檔案。
 #[test]
 fn upgrade_invalidates_only_the_selected_gstreamer_registry() {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let directory = std::env::temp_dir().join(format!(
-        "neo-upgrade-cache-test-{}-{nonce}",
-        std::process::id()
-    ));
+    let directory = unique_test_directory("neo-upgrade-cache-test");
     let registry = directory.join("cache/gstreamer/registry.bin");
     fs::create_dir_all(registry.parent().unwrap()).unwrap();
     fs::write(&registry, b"registry").unwrap();
